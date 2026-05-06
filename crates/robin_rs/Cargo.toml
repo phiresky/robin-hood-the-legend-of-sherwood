@@ -50,8 +50,6 @@ bitcode = { version = "0.6", features = ["serde"] }
 bincode = { version = "2", features = ["serde"] }
 zstd = "0.13"
 base64 = "0.22"
-librashader = { path = "../../third_party/librashader/librashader", default-features = false, features = ["presets", "runtime-wgpu", "stable"] }
-
 # Windowing + input
 winit = { version = "0.30", features = ["android-native-activity"] }
 raw-window-handle = "0.6"
@@ -84,6 +82,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 
 # Native-only: tiny blocking HTTP server for the script-RPC endpoint.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+librashader = { path = "../../third_party/librashader/librashader", default-features = false, features = ["presets", "runtime-wgpu", "stable"] }
 tiny_http = "0.12"
 # Multiplayer transport.  The host/server side still uses blocking
 # tungstenite in spawned OS threads; native clients use
