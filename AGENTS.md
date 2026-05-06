@@ -14,7 +14,7 @@ When working in a worktree (`.claude/worktrees/<name>/`), you are in a **full co
 
 - The Cargo workspace is at the repo root. Run `cargo test` to build and test.
 - When done, **commit your changes** with `git add` and `git commit`. The branch will be merged into `rust` later.
-- The Rust implementation is functionally runnable. Net-new features go in `NEW_FEATURES.md`.
+- The Rust implementation is functionally runnable. Net-new features go in `docs/NEW_FEATURES.md`.
 - Only modify the files specified in your task. Don't touch unrelated files.
 - Use `serde::{Serialize, Deserialize}` for all new structs. No legacy binary serialization.
 - Register new modules in `crates/robin_rs/src/lib.rs` with `pub mod <name>;`

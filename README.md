@@ -3,15 +3,17 @@
 A from-scratch Rust reimplementation of the 2002 stealth-tactics game
 [Robin Hood: The Legend of Sherwood](https://en.wikipedia.org/wiki/Robin_Hood:_The_Legend_of_Sherwood)
 by Spellbound. Loads the original game's data files (demo or full release -
-see [DATADIRS.md](DATADIRS.md) for known versions and where to get them)
+see [DATADIRS.md](docs/DATADIRS.md) for known versions and where to get them)
 and plays them through a pure-Rust engine.
+
+![Ferris in Robin Hood](docs/ferris-in-robin-hood.avif)
 
 ## Status
 
 Playable mostly on the Leicester demo and the full campaign: main
 menu, missions, save/load, replays should all _mostly_ work. Most testing has been done on the demo so the campaign logic is likely not fully working yet.
 A fair amount of things are still broken, like bow / special items and some triggers.
-~270K LOC across five workspace crates, ~1,600 tests. See [NEW_FEATURES.md](NEW_FEATURES.md)
+~270K LOC across five workspace crates, ~1,600 tests. See [NEW_FEATURES.md](docs/NEW_FEATURES.md)
 for new and future additions.
 
 ## Building
@@ -216,7 +218,7 @@ installer - any of these are known to work:
 - Lincoln demo ("Free Lincoln" / DEMO II)
 - Full retail release (original 2003 CD, GOG, Runesoft Linux port, Steam version, …)
 
-See [DATADIRS.md](DATADIRS.md) for the exhaustive list of installers,
+See [DATADIRS.md](docs/DATADIRS.md) for the exhaustive list of installers,
 hashes, and download sources for every known version and language.
 
 On my machine, several pre-laid-out datadirs live under `datadirs/` for development:
@@ -240,12 +242,12 @@ On my machine, several pre-laid-out datadirs live under `datadirs/` for developm
   to the binary. A read-only loader exists for older binary saves.
 - **Deterministic lockstep sim**, with a per-frame state hash, replay
   files, and a rollback checker - prerequisites for multiplayer (see
-  [MULTIPLAYER.md](MULTIPLAYER.md)).
+  [MULTIPLAYER.md](docs/MULTIPLAYER.md)).
 - **GPU-accelerated rendering** on top of the original 16-bit RGB565
   software pipeline.
 
 Further Rust-side additions and planned features are tracked in
-[NEW_FEATURES.md](NEW_FEATURES.md).
+[NEW_FEATURES.md](docs/NEW_FEATURES.md).
 
 
 ## AI Use disclaimer
