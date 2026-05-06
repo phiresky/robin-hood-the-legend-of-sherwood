@@ -284,6 +284,13 @@ GOG installer with v1.1 hotfix (build 24778). InnoSetup exe + bin. Same extras a
     MD5:      00292c14650583a9b350ce23decda5b4
     SHA256:   7451b367a9713f43fad9a3f2b9c6a1d9af382a9a97809f676bd0aa9cd9a0c028
 
+## Windows — Steam release
+
+Steam store release published by Microids. The store page lists English, French,
+German, and Spanish interface languages.
+
+    source:   https://store.steampowered.com/app/46560/Robin_Hood_The_Legend_of_Sherwood/
+
 ## ZETA OS — BeOS/ZETA port
 
 Port for ZETA OS (a BeOS derivative). BFS filesystem disc image containing `RobinHood.zpkg`,
