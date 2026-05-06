@@ -1,21 +1,22 @@
-# Robin Hood — The Legend Of Sherwood
+# Robin Hood: The Legend of Sherwood
 
 A from-scratch Rust reimplementation of the 2002 stealth-tactics game
-[Robin Hood - The Legend of Sherwood](https://en.wikipedia.org/wiki/Robin_Hood:_The_Legend_of_Sherwood)
+[Robin Hood: The Legend of Sherwood](https://en.wikipedia.org/wiki/Robin_Hood:_The_Legend_of_Sherwood)
 by Spellbound. Loads the original game's data files (demo or full release -
 see [DATADIRS.md](DATADIRS.md) for known versions and where to get them)
 and plays them through a pure-Rust engine.
 
 ## Status
 
-Playable mosly on the Leicester demo and the full campaign: main
+Playable mostly on the Leicester demo and the full campaign: main
 menu, campaign map, missions, save/load, replays should all _mostly_ work.
+A fair amount of things are still broken, like bow / special items and some triggers.
 ~270K LOC across five workspace crates, ~1,600 tests. See [NEW_FEATURES.md](NEW_FEATURES.md)
 for new and future additions.
 
 ## Building
 
-Currently only tested on a Linux host. Optional features: `video` (cutscenes via ffmpeg-next, on by default), `native-fs`
+Currently only tested on a Linux host. Optional features: `video` (intro/outro via ffmpeg-next, on by default), `native-fs`
 (OS data-dir lookup, on by default).
 
 Theoretically, all the following platforms should be supported:
