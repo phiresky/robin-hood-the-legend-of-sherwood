@@ -1,5 +1,10 @@
 This document lists ALL KNOWN versions of this game and how they differ.
 
+TLDR: either get the Leicester demo from
+https://www.moddb.com/games/robin-hood-the-legend-of-sherwood/downloads/robin-hood-the-legend-of-sherwood-demo-robin-hood-the-legend-of-sherwood
+or buy the full game from GOG:
+https://www.gog.com/en/game/robin_hood
+
 # Language Codes
 
 ```
@@ -267,6 +272,10 @@ Despite the archive.org title listing "Robin Hood", this disc contains
 ## Windows — GOG/romsfun repackage (v2.0.0.12)
 
 GOG-style installer with bonus content (artworks, avatars, manual, soundtrack, wallpapers).
+
+Official GOG store page:
+
+    source:   https://www.gog.com/en/game/robin_hood
 
     filename: robin-hood-romsfun.zip (contains setup_robin_hood_2.0.0.12.exe, 577 MB)
     format:   Zip archive (641 MB total)
