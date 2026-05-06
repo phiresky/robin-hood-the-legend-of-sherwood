@@ -1,0 +1,21 @@
+{
+  "name": "robin-hood-wasm-www",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "build:shell": "tsc --noEmit && vite build && node scripts/inline-dist-index.mjs",
+    "strip:wasm": "node scripts/optimize-wasm.mjs dist/assets",
+    "strip:wasm-pkg": "node scripts/optimize-wasm.mjs pkg",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.10"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

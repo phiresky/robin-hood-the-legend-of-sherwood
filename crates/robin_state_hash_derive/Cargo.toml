@@ -1,0 +1,17 @@
+[package]
+name = "robin_state_hash_derive"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[dev-dependencies]
+robin_util = { path = "../robin_util" }
+serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,76 @@
+plugins {
+    id "com.android.application"
+}
+
+def repoRoot = layout.projectDirectory.dir("../..")
+def ndkHome = providers.environmentVariable("ANDROID_NDK_HOME")
+    .orElse("/home/phire/tmp/android-sdk/ndk/29.0.14206865")
+def ndkBin = ndkHome.map { "${it}/toolchains/llvm/prebuilt/linux-x86_64/bin" }
+def ndkLib = ndkHome.map { "${it}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android" }
+def rustProfile = providers.gradleProperty("rustProfile").orElse("android-dev")
+def rustLib = rustProfile.map { repoRoot.file("target/aarch64-linux-android/${it}/librobin_rs.so") }
+def cxxSharedLib = ndkLib.map { file("${it}/libc++_shared.so") }
+def syncedJniLibs = layout.buildDirectory.dir("generated/jniLibs")
+
+android {
+    namespace "io.github.phiresky.robinhood"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "io.github.phiresky.robinhood"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "0.1"
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+
+    sourceSets {
+        main {
+            manifest.srcFile "../AndroidManifest.xml"
+            assets.srcDirs = ["../assets"]
+            jniLibs.srcDirs = [syncedJniLibs]
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+}
+
+tasks.register("buildRustAndroid", Exec) {
+    workingDir repoRoot.asFile
+    commandLine "cargo", "build",
+        "-p", "robin_rs",
+        "--lib",
+        "--target", "aarch64-linux-android",
+        "--profile", rustProfile.get(),
+        "--no-default-features",
+        "--features", "android"
+    environment "ANDROID_NDK_HOME", ndkHome.get()
+    environment "PATH", "${ndkBin.get()}:${System.getenv("PATH")}"
+    environment "CC_aarch64_linux_android", "aarch64-linux-android35-clang"
+    environment "CXX_aarch64_linux_android", "aarch64-linux-android35-clang++"
+    environment "AR_aarch64_linux_android", "llvm-ar"
+    environment "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", "aarch64-linux-android35-clang"
+    environment "RUSTC_WRAPPER", ""
+    inputs.property("rustProfile", rustProfile)
+    inputs.files(repoRoot.dir("crates"))
+    inputs.files(repoRoot.file("Cargo.toml"), repoRoot.file("Cargo.lock"))
+    outputs.file(rustLib)
+}
+
+tasks.register("syncRustJniLibs", Copy) {
+    dependsOn tasks.named("buildRustAndroid")
+    from(rustLib)
+    from(cxxSharedLib)
+    into(syncedJniLibs.map { it.dir("arm64-v8a") })
+}
+
+tasks.named("preBuild") {
+    dependsOn tasks.named("syncRustJniLibs")
+}

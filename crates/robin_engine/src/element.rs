@@ -1,0 +1,4597 @@
+//! Entity hierarchy — the base class system for all game entities.
+//!
+//! The animal actor branch is *not* ported — no shipped Robin Hood level
+//! instantiates any animal, so the whole subsystem was ripped out.  The
+//! BETE/MEOW mission-file chunk is still parsed by
+//! `level_data::read_animals`, which panics if it ever encounters
+//! a non-empty animal count.
+//!
+//! ## Design
+//!
+//! The hierarchy is conceptually:
+//! ```text
+//! Element (base)
+//! ├── Actor → Human → PC | NPC (Soldier, Civilian)
+//! ├── Fx → Target
+//! └── Object → Bonus | Projectile → Net
+//! ```
+//!
+//! Mobile and masked-FX entities are Spellbound engine leftovers — no
+//! shipped Robin Hood mission spawns them, so they are intentionally
+//! absent (same pattern as the animal actor branch).
+//!
+//! This Rust port uses:
+//! - **Composition**: Each hierarchy level has its own `*Data` struct.
+//!   Concrete entity types compose these structs flat.
+//! - **Traits**: Virtual method interfaces via trait inheritance
+//!   (`Element`, `Actor`, `Human`).
+//! - **Enum dispatch**: [`Entity`] enum holds any concrete entity type for
+//!   exhaustive pattern matching without `dyn`.
+//! - **[`EntityId`]**: Cross-entity references use IDs, not pointers.
+
+use std::collections::VecDeque;
+
+use serde::{Deserialize, Serialize};
+
+use crate::ai::{AiController, AiState as AiTopState, Substate as AiSubstate};
+use crate::ai_enemy::EnemyAi;
+use crate::ai_friendly::FriendlyAi;
+use crate::fast_find_grid::GRID_CELL_SIZE;
+use crate::geo2d::Point2D as GeoPoint2D;
+use crate::jump_line::JumpLineIndex;
+use crate::movement::{ActiveMovement, ActiveShot};
+use crate::order::OrderType;
+use crate::pathfinder::PathFinderSpeed;
+use crate::position_interface::PositionInterface;
+use crate::profiles::{
+    Action, CharacterProfile, CharacterProfileIdx, CivilianProfileIdx, SoldierProfileIdx,
+};
+use crate::sprite::Sprite;
+
+/// Re-export: `OrderType` is the canonical animation-type enum.
+pub type Animation = OrderType;
+
+// ═══════════════════════════════════════════════════════════════════
+//  Entity identity
+// ═══════════════════════════════════════════════════════════════════
+
+pub use crate::element_kinds::*;
+pub use crate::entity_id::EntityId;
+// ═══════════════════════════════════════════════════════════════════
+//  Simple geometry types
+// ═══════════════════════════════════════════════════════════════════
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
+    robin_state_hash_derive::StateHash,
+)]
+pub struct Point2D {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl From<crate::geo2d::Point2D> for Point2D {
+    #[inline]
+    fn from(p: crate::geo2d::Point2D) -> Self {
+        Self { x: p.x, y: p.y }
+    }
+}
+
+impl From<crate::rhline::Vec2> for Point2D {
+    #[inline]
+    fn from(v: crate::rhline::Vec2) -> Self {
+        Self { x: v.x, y: v.y }
+    }
+}
+
+impl Point2D {
+    /// Convert to the canonical [`crate::geo2d::Point2D`] type.
+    #[inline]
+    pub fn to_geo_point(self) -> crate::geo2d::Point2D {
+        crate::geo2d::pt(self.x, self.y)
+    }
+
+    /// Convert to [`crate::rhline::Vec2`].
+    #[inline]
+    pub fn to_vec2(self) -> crate::rhline::Vec2 {
+        crate::rhline::Vec2::new(self.x, self.y)
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
+    robin_state_hash_derive::StateHash,
+)]
+pub struct Point3D {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+impl From<crate::position_interface::Point3D> for Point3D {
+    #[inline]
+    fn from(p: crate::position_interface::Point3D) -> Self {
+        Self {
+            x: p.x,
+            y: p.y,
+            z: p.z,
+        }
+    }
+}
+
+impl From<Point3D> for crate::position_interface::Point3D {
+    #[inline]
+    fn from(p: Point3D) -> Self {
+        Self {
+            x: p.x,
+            y: p.y,
+            z: p.z,
+        }
+    }
+}
+
+impl Point3D {
+    /// Convert to [`crate::position_interface::Point3D`] (serde-enabled).
+    #[inline]
+    pub fn to_pos_point3d(self) -> crate::position_interface::Point3D {
+        crate::position_interface::Point3D::new(self.x, self.y, self.z)
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
+    robin_state_hash_derive::StateHash,
+)]
+pub struct Vector2D {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl From<crate::geo2d::Vec2D> for Vector2D {
+    #[inline]
+    fn from(v: crate::geo2d::Vec2D) -> Self {
+        Self { x: v.x, y: v.y }
+    }
+}
+
+impl From<crate::rhline::Vec2> for Vector2D {
+    #[inline]
+    fn from(v: crate::rhline::Vec2) -> Self {
+        Self { x: v.x, y: v.y }
+    }
+}
+
+impl Vector2D {
+    /// Convert to the canonical [`crate::geo2d::Vec2D`] type.
+    #[inline]
+    pub fn to_geo_vec(self) -> crate::geo2d::Vec2D {
+        crate::geo2d::pt(self.x, self.y)
+    }
+
+    /// Convert to [`crate::rhline::Vec2`].
+    #[inline]
+    pub fn to_vec2(self) -> crate::rhline::Vec2 {
+        crate::rhline::Vec2::new(self.x, self.y)
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
+    robin_state_hash_derive::StateHash,
+)]
+pub struct BoundingBox2D {
+    pub min: Point2D,
+    pub max: Point2D,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Data structs — one per hierarchy level
+// ═══════════════════════════════════════════════════════════════════
+
+/// Base data shared by **all** entities.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ElementData {
+    pub kind: ElementKind,
+
+    // Identity
+    pub blipped: bool,
+    pub class_id: u16,
+    pub active: bool,
+    /// Whether the actor is hidden inside a building.
+    /// Set when entering a building sector; separate from `active` so the
+    /// entity still participates in game logic.
+    pub hidden_in_building: bool,
+
+    // Sprite surface
+    pub sprite_id: u32,
+    pub select_id: u32,
+
+    // Note: the carry-pickup bookkeeping is handled synchronously here
+    // via `HumanData::carrier`, so there are no "apply position next
+    // tick" delayed-position fields on the base entity.
+    /// "Teleported away" by script.
+    pub in_honolulu: bool,
+
+    pub index_in_elements_list: u16,
+    pub custom_minimap_dot: u16,
+
+    // Outline colours
+    pub outline_colors: [u16; OutlineColorName::COUNT],
+    pub current_outline: OutlineColorName,
+    pub outline_width: u16,
+
+    pub unreachable: bool,
+
+    /// Current posture. Runtime writes must go through
+    /// [`ElementData::set_posture`] or an entity-level helper so the
+    /// corpse-transition guard stays centralized. TODO: the field is
+    /// still public for broad read compatibility; narrow that once the
+    /// remaining read churn is practical.
+    pub posture: Posture,
+
+    // -- Cross-module references --
+    /// The entity's sprite animation/rendering state + embedded
+    /// `PositionInterface` (position/direction/layer/sector/material/...).
+    pub sprite: Sprite,
+
+    /// Cached grid cell coordinates `(cx, cy)` for fast_find_grid spatial
+    /// queries.  Updated whenever the entity moves.
+    pub grid_cell: Option<(u16, u16)>,
+}
+
+impl Default for ElementData {
+    fn default() -> Self {
+        Self {
+            kind: ElementKind::Fx,
+            blipped: false,
+            class_id: 0,
+            active: true,
+            hidden_in_building: false,
+            sprite_id: 0,
+            select_id: 0,
+            in_honolulu: false,
+            index_in_elements_list: 0,
+            // Default to `CUSTOM_DOT_NOT_CUSTOMIZED` (=1). Zero would
+            // mean Invisible, silently hiding every entity on the
+            // minimap.
+            custom_minimap_dot: 1,
+            outline_colors: [0; OutlineColorName::COUNT],
+            current_outline: OutlineColorName::Default,
+            outline_width: 2,
+            unreachable: false,
+            posture: Posture::Undefined,
+            sprite: Sprite::default(),
+            grid_cell: None,
+        }
+    }
+}
+
+impl ElementData {
+    // -- PositionInterface forwarding accessors --
+    //
+    // Position/direction/layer/sector/material/obstacle live on the
+    // embedded `PositionInterface` (inside `sprite`). These forwarders
+    // exist so callers can keep using `elem.direction()` / `elem.position()`
+    // etc. rather than threading `sprite.position_iface` through every
+    // access.
+
+    #[inline]
+    #[must_use = "method returns a value by value; assigning to its fields is a silent no-op (e.g. `elem.direction()` then `+= 1` modifies a temporary). Use the `set_direction_*` setters instead."]
+    pub fn direction(&self) -> i16 {
+        self.sprite.position_iface.get_direction().into()
+    }
+    #[inline]
+    pub fn set_direction_instantly(&mut self, d: i16) {
+        self.sprite
+            .position_iface
+            .set_direction_instantly(crate::position_interface::Direction::from_raw(d as i32));
+    }
+    #[inline]
+    pub fn set_direction_goal(&mut self, d: i16) {
+        self.sprite
+            .position_iface
+            .set_direction(crate::position_interface::Direction::from_raw(d as i32));
+    }
+
+    #[inline]
+    #[must_use = "method returns Point3D by value; `elem.position().x = v` (or `+= v`) silently modifies a temporary. Use `set_position` to mutate."]
+    pub fn position(&self) -> Point3D {
+        let p = self.sprite.position_iface.get_position();
+        Point3D {
+            x: p.x,
+            y: p.y,
+            z: p.z,
+        }
+    }
+    #[inline]
+    pub fn set_position(&mut self, p: Point3D) {
+        self.sprite
+            .position_iface
+            .set_position(crate::position_interface::Point3D {
+                x: p.x,
+                y: p.y,
+                z: p.z,
+            });
+    }
+
+    #[inline]
+    #[must_use = "method returns Point2D by value; `elem.position_map().x = v` silently modifies a temporary. Use `set_position_map` to mutate."]
+    pub fn position_map(&self) -> Point2D {
+        let p = self.sprite.position_iface.get_position_map();
+        Point2D { x: p.x, y: p.y }
+    }
+    #[inline]
+    pub fn set_position_map(&mut self, p: Point2D) {
+        self.sprite
+            .position_iface
+            .set_position_map(crate::geo2d::pt(p.x, p.y));
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn layer(&self) -> u16 {
+        self.sprite.position_iface.get_layer().into()
+    }
+    #[inline]
+    pub fn set_layer(&mut self, l: u16) {
+        let layer = crate::position_interface::Layer::new(l)
+            .expect("layer must be < 0xFFFF; 0xFFFF is the 'no layer' sentinel");
+        self.sprite.position_iface.set_layer(layer);
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn sector(&self) -> Option<crate::position_interface::SectorHandle> {
+        self.sprite.position_iface.get_sector()
+    }
+    #[inline]
+    pub fn set_sector(&mut self, s: Option<crate::position_interface::SectorHandle>) {
+        self.sprite.position_iface.set_sector(s);
+    }
+
+    /// Door-transit half of "is inside a building": true while the
+    /// actor is in the middle of a pass-door animation, before its
+    /// sector pointer has been swapped to the inside-building sector.
+    #[inline]
+    pub fn is_in_door_transit(&self) -> bool {
+        !self.sprite.position_iface.get_door().is_null()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn obstacle_index(&self) -> Option<crate::position_interface::ObstacleHandle> {
+        self.sprite.position_iface.get_obstacle()
+    }
+    /// Set the obstacle the element is standing on. The caller must
+    /// supply the obstacle's pre-resolved top-plane coefficients — the
+    /// obstacle pointer and its top plane are paired whenever the
+    /// obstacle is non-null.
+    #[inline]
+    pub fn set_obstacle_index(
+        &mut self,
+        obs: Option<crate::position_interface::ObstacleHandle>,
+        plane: Option<crate::position_interface::PlaneZCoeffs>,
+    ) {
+        self.sprite.position_iface.set_obstacle(obs, plane);
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn material(&self) -> GameMaterial {
+        self.sprite.position_iface.get_material()
+    }
+    #[inline]
+    pub fn set_material(&mut self, m: GameMaterial) {
+        self.sprite.position_iface.set_material(m);
+    }
+
+    /// Distance from the actor's map position to the boundary of the
+    /// material sector it is standing in, under the 1-norm with Y
+    /// pre-stretched by `INVERSE_ASPECT_RATIO`.  Returns 0 if the
+    /// actor is not inside any material sector.  Caller: debug
+    /// material-sector overlay (unported).
+    ///
+    /// The containing sector is located at query time rather than
+    /// cached on the actor — the only caller is a debug HUD that runs
+    /// once per frame, so caching would be a micro-optimisation.  This
+    /// method has no active users yet; it exists so reviving the
+    /// overlay is a one-line change.
+    #[must_use]
+    pub fn get_distance_to_boundary_of_material_sector(
+        &self,
+        materials: &crate::material_sectors::MaterialSectors,
+    ) -> f32 {
+        let p = self.position_map();
+        let point = crate::geo2d::pt(p.x, p.y);
+        match materials.containing_sector(point) {
+            None => 0.0,
+            Some(sector) => sector.approximate_distance_to_boundary(
+                point,
+                crate::position_interface::INVERSE_ASPECT_RATIO,
+            ),
+        }
+    }
+
+    /// Change the posture, respecting the corpse-transition guard: a
+    /// `Dead` / `DeadBack` corpse can only transition to `Carried`
+    /// (pickup); any other posture write on a dead sprite is silently
+    /// dropped. This is the single runtime mutation point for
+    /// `posture`; direct field writes should go through here.
+    ///
+    /// The "fire intersection update on every lying↔non-lying
+    /// transition" hook is implemented as a deferred per-tick drain
+    /// rather than a synchronous hook on this setter: the hook needs
+    /// engine access to iterate actors. See
+    /// [`EngineInner::process_corpse_intersection_updates`].
+    pub fn set_posture(&mut self, p: Posture) {
+        if self.posture.allows_transition_to(p) {
+            self.posture = p;
+        }
+    }
+
+    /// Recompute the cached grid cell from the current map position.
+    pub fn update_grid_cell(&mut self) {
+        let pm = self.position_map();
+        let cx = (pm.x as i32 / GRID_CELL_SIZE) as u16;
+        let cy = (pm.y as i32 / GRID_CELL_SIZE) as u16;
+        self.grid_cell = Some((cx, cy));
+    }
+
+    /// Reveal a blipped entity: clear the blip flag AND flip the sprite
+    /// back to its primary (normal-character) profile so it stops
+    /// rendering as a dark silhouette.
+    ///
+    /// Clears the `blipped` flag and swaps `use_alternate_profile` back
+    /// off so the renderer (which reads through `current_scripts_opt`)
+    /// picks up the real character sprite instead of the blip00
+    /// silhouette.
+    ///
+    /// After the profile swap the sprite's `current_row` / `current_frame`
+    /// can land on indices that are valid for the blip00 profile but
+    /// out-of-range for the revealed character (blip00 has a single
+    /// idle row; the real character has many).  We reset them to 0 so
+    /// the renderer always picks a valid frame; the next animation
+    /// command from the AI will re-drive the row based on the actor's
+    /// real action state.
+    ///
+    /// Safe to call on non-blipped entities: it's a no-op beyond
+    /// clearing a flag that's already false.
+    /// `direction` is the sprite's current facing.  Callers on an
+    /// `Entity` should pass `actor_data().position_iface.get_direction()`
+    /// — `element.direction` can lag pi.direction by a frame.
+    pub fn reveal_blip(&mut self, direction: u16) {
+        if !self.blipped {
+            return;
+        }
+        self.blipped = false;
+        let sprite = &mut self.sprite;
+        // Only flip if the sprite actually loaded the alternate
+        // profile — otherwise `use_alternate_profile` is false by
+        // default and toggling it would select a non-existent slot.
+        if sprite.alternate_scripts.is_some() && sprite.use_alternate_profile {
+            // Just toggle the profile.  `switch_alternate_profile`
+            // recomputes `current_row` from `last_action` + direction
+            // when an animation has already played — without that, a
+            // newly-revealed guard reverts to row 0 (north-facing
+            // WaitingUpright) instead of keeping its authored
+            // direction.
+            sprite.switch_alternate_profile(direction & 15);
+        }
+    }
+
+    /// Get the map position as a `geo2d::Point2D` for use with pathfinder
+    /// and fast_find_grid APIs that operate on `geo::Coord<f32>`.
+    pub fn position_map_geo(&self) -> GeoPoint2D {
+        let pm = self.position_map();
+        crate::geo2d::pt(pm.x, pm.y)
+    }
+
+    /// Initialise outline colours based on entity kind.
+    ///
+    /// Per-subclass colour table:
+    /// - PC → green
+    /// - Soldier → red / purple (VIP)
+    /// - Civilian → cyan / purple (VIP)
+    /// - Object → yellow
+    /// - Target → red
+    ///
+    /// `is_vip` selects the VIP branch for soldiers: VIP soldiers write
+    /// only the Hidden/Default/Target slots with the purple
+    /// `OC_NPC_VIP_*` values and leave Striking/Parrying untouched
+    /// (encoding "VIPs don't strike").  Civilian VIP support is not
+    /// yet wired through (`init_outline_colors` callers don't provide
+    /// a civilian profile); for now non-soldier kinds ignore `is_vip`.
+    pub fn init_outline_colors(&mut self, is_vip: bool) {
+        use OutlineColorName as N;
+        use outline_colors::*;
+
+        match self.kind {
+            ElementKind::ActorPc => {
+                self.outline_colors[N::Default as usize] = pc_default();
+                self.outline_colors[N::Hidden as usize] = pc_hidden();
+                self.outline_colors[N::Target as usize] = pc_target();
+            }
+            ElementKind::ActorSoldier => {
+                if is_vip {
+                    // VIP branch: only Hidden / Default / Target are
+                    // written; Striking / Parrying stay at their
+                    // default zero values, encoding "VIPs don't
+                    // strike".
+                    self.outline_colors[N::Default as usize] = npc_vip_default();
+                    self.outline_colors[N::Hidden as usize] = npc_vip_hidden();
+                    self.outline_colors[N::Target as usize] = npc_vip_target();
+                } else {
+                    self.outline_colors[N::Default as usize] = npc_evil_default();
+                    self.outline_colors[N::Hidden as usize] = npc_evil_hidden();
+                    self.outline_colors[N::Target as usize] = npc_evil_target();
+                    self.outline_colors[N::Striking as usize] = npc_evil_striking();
+                    self.outline_colors[N::Parrying as usize] = npc_evil_parrying();
+                }
+            }
+            ElementKind::ActorCivilian => {
+                self.outline_colors[N::Default as usize] = npc_good_default();
+                self.outline_colors[N::Hidden as usize] = npc_good_hidden();
+                self.outline_colors[N::Target as usize] = npc_good_target();
+            }
+            ElementKind::Target => {
+                // The red target colour goes in the `Default` slot,
+                // not `Target` — an FX target uses the *default*
+                // outline as its red highlight.
+                self.outline_colors[N::Default as usize] = target_target();
+            }
+            _ => {
+                self.outline_colors[N::Hidden as usize] = object_hidden();
+                self.outline_colors[N::Target as usize] = object_target();
+            }
+        }
+    }
+
+    /// Get the active outline colour (RGB565).  Returns 0 if no colour is set.
+    pub fn active_outline_color(&self) -> u16 {
+        self.outline_colors[self.current_outline as usize]
+    }
+}
+
+/// In-progress ladder / wall climb.
+///
+/// Set when an actor enters a wall-or-ladder lift sector (the WAIT_FREE_LIFT
+/// command's success path in `tick.rs`), cleared when the actor finishes
+/// crossing the door on the other side (the "Leaving a lift" branch in
+/// `door_pass.rs`). Lets the push-damage path know which sector an actor
+/// was climbing so `translate_ladder_wall_fall` can decrement that
+/// sector's occupancy counter.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ActiveLiftClimb {
+    /// The lift sector number the actor is currently occupying.
+    pub sector_number: u16,
+    /// `true` if the actor entered at the top going down, `false` if
+    /// they entered at the bottom going up. Used to flip the correct
+    /// `lift_occupied_*` flag back off on exit.
+    pub upwards: bool,
+    /// `true` if the actor is a PC — matches the `is_pc` flag
+    /// tracked in `set_occupied_*`, so we decrement both counters.
+    pub is_pc: bool,
+}
+
+/// Active push-flight state.
+///
+/// When a push/circle/charge strike lands, the victim is launched along a
+/// flight vector over several animation frames instead of teleporting
+/// instantly.  Each frame the position is advanced by `increment`; on the
+/// final frame the entity snaps to `goal`.
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, robin_state_hash_derive::StateHash,
+)]
+pub struct ActiveFlight {
+    /// Per-frame position increment (total displacement / frames).
+    pub increment_x: f32,
+    pub increment_y: f32,
+    /// Goal position to snap to on completion.
+    pub goal_x: f32,
+    pub goal_y: f32,
+    /// Frames remaining in the flight.
+    pub frames_remaining: u16,
+    /// Original hitter that launched this flight, when the flight was
+    /// triggered by a hit/push strike. Each frame the flyer applies a
+    /// domino-effect sweep to nearby upright actors and propagates a
+    /// `ReceiveHitDamage` element citing this antagonist.
+    ///
+    /// `None` for non-combat flights (rolling, ladder/wall fall) where
+    /// the domino-effect sweep is not invoked.
+    pub antagonist: Option<EntityId>,
+
+    /// Per-frame z (elevation) increment.  Non-zero only when the goal
+    /// sits on a sloped projection-area obstacle (currently only set by
+    /// push flights — `apply_push_effect`); other flight setup sites
+    /// (rolling, ladder-wall fall, hit fall) leave this at 0.
+    pub increment_z: f32,
+    /// Goal elevation to snap to on completion.  Computed from the
+    /// projection-area obstacle's top plane at the chosen flight goal.
+    pub goal_z: f32,
+    /// Goal layer to write back to the actor on landing.
+    pub goal_layer: u16,
+    /// Goal sector to write back to the actor on landing.
+    pub goal_sector: Option<crate::position_interface::SectorHandle>,
+    /// Projection-area obstacle the actor is flying onto, if any.  The
+    /// actor is considered to be on the goal obstacle for the duration
+    /// of the flight; we apply the obstacle on landing alongside the
+    /// goal layer/sector.  Mid-flight queries that need the plane
+    /// should use the explicit `increment_z` field.
+    pub obstacle: Option<crate::position_interface::ObstacleHandle>,
+}
+
+/// Active rider charge state.
+///
+/// When a rider enters charging mode, this struct tracks the hit zone
+/// polygon and potential victims.  Each frame, victims inside
+/// the expanding hit zone take `SWORDSTRIKE_CHARGE` damage and are removed
+/// from the candidate list.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ActiveRiderCharge {
+    /// Forward direction vector (from sector, with aspect ratio).
+    pub forward: (f32, f32),
+    /// Sidewards direction vector (forward rotated +4 sectors).
+    pub sidewards: (f32, f32),
+    /// Position at charge start (map coords).
+    pub origin: Point2D,
+    /// Layer at charge start.
+    pub layer: u16,
+    /// Candidate victims (entities inside the initial large hit zone).
+    /// Removed as they get hit.
+    pub pending_victims: Vec<EntityId>,
+    /// Current animation frame counter (incremented each tick).
+    pub current_frame: u16,
+    /// Total frames in the charging animation.
+    pub total_frames: u16,
+    /// Whether the charge has been initialized (first-frame setup done).
+    pub initialized: bool,
+}
+
+/// Pending layer/sector swap during a door pass.
+///
+/// When the actor reaches the door's midpoint waypoint, swap the
+/// layer/sector to the other side of the door.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct PendingDoorPass {
+    /// Trigger when `path_waypoint_index` reaches this value.
+    pub at_waypoint_index: usize,
+    pub target_layer: u16,
+    pub target_sector: Option<crate::position_interface::SectorHandle>,
+}
+
+/// One step in a door-pass sub-order chain.
+///
+/// Built by `translate_pass_door_*`. Each door type produces a specific
+/// sequence of walk/transition/trigger steps.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub enum DoorPassStep {
+    /// Walk to destination with the given animation.
+    Walk {
+        destination: GeoPoint2D,
+        action: crate::order::OrderType,
+        reverse: bool,
+        compute_direction: bool,
+        /// Optional walk-step tolerance.  Used by the ladder / wall
+        /// translators so the walk-to-mid step ends early enough for
+        /// the subsequent climb transition to land at the exact
+        /// lift-edge pixel (e.g. `TELEPORT_LADDER = 45.0`,
+        /// `TELEPORT_WALL = 60.0`, or per-animation distances via
+        /// `GetDistanceForAnimation`).  Stairs / building door passes
+        /// leave this at `0.0`.
+        tolerance: f32,
+    },
+    /// Fire the PassDoor() callback — change layer/sector, building/lift callbacks.
+    /// First trigger changes layer/sector; second re-enables anti-collision.
+    PassingDoor,
+    /// Play a transition animation in place (crouch, climb transition, turn).
+    Transition {
+        action: crate::order::OrderType,
+        reverse: bool,
+    },
+    /// Fire a selection-flash hulk effect on self (and carried, if any).
+    /// Inserted by the building-door translator between the walk-to-mid
+    /// and `PassingDoor` steps for PCs.  The handler calls
+    /// `StartHulk(OCN_DEFAULT, 2, true, tolerance)`.
+    Select {
+        /// Speed factor for the hulk fade —
+        /// `(pMid - pOut/pIn).Norm() * 0.03`.
+        speed: f32,
+    },
+}
+
+/// Active door-pass state on an actor.
+///
+/// Tracks the multi-step walk-through sequence built by the
+/// `translate_pass_door_*` functions (engine/door_pass.rs).
+/// The movement tick processes steps one at a time:
+/// - Walk steps set waypoints on the actor path
+/// - PassingDoor steps fire the layer/sector swap callback
+/// - Transition steps play animations in place
+///
+/// Replaces the simpler [`PendingDoorPass`] with full multi-step parity.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ActiveDoorPass {
+    /// Door index in the global door table.
+    pub door_index: crate::gate::DoorIndex,
+    /// Direction: true = outside→inside (direct), false = inside→outside.
+    pub direct: bool,
+    /// Remaining steps to execute (front = next step).
+    pub steps: VecDeque<DoorPassStep>,
+    /// How many PassingDoor triggers have fired (first changes layer, second
+    /// re-enables anti-collision).
+    pub triggers_fired: u8,
+    /// Animation for the currently executing Walk step. Set when a Walk step
+    /// is popped, read by `tick_entity_movement` for sprite animation.
+    pub current_action: crate::order::OrderType,
+    /// Whether the current Walk step plays its animation in reverse.
+    pub current_reverse: bool,
+    /// When a `Transition` step is popped and its animation starts via
+    /// `active_ai_anim`, the actor's walking `action_state` is saved here
+    /// and the runtime `action_state` is cleared to `Waiting` so the
+    /// movement loop stops advancing.  When the animation completes and
+    /// `advance_door_pass` proceeds to the next `Walk` step, the saved
+    /// state is restored so movement resumes with the correct sprite row.
+    /// The order list blocks naturally until the sprite animation
+    /// reports `MOTION_TERMINATED`.
+    pub saved_action_state: Option<ActionState>,
+}
+
+/// Actor-level data.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ActorData {
+    pub old_action: Animation,
+    pub is_ignored_for_anti_collision: bool,
+
+    // Surrender
+    pub is_about_to_surrender: bool,
+    pub is_surrendering: bool,
+    pub menacer: Option<EntityId>,
+
+    // Current state
+    pub action_state: ActionState,
+    pub execution_frozen: bool,
+    pub sequence_element_started: bool,
+
+    // Wait
+    pub wait_time: u32,
+
+    /// Countdown for the Listen ability's one-shot reveal.  Armed to
+    /// `TIME_LISTEN_WAIT` (25) by the ai.rs section 2a listen pass
+    /// when the PC enters the `ListenPhase::CountingDown` phase, then
+    /// decremented each subsequent frame.  When it reaches 0, the blip
+    /// reveal + FX target `Heard()` callback fires exactly once and
+    /// the phase advances to `ExitTransition`.
+    pub listen_wait_time: u32,
+
+    /// Countdown for the Whistle ability's expanding-noise ellipse
+    /// render pass.  Armed to `TIME_LISTEN_WAIT` (25) on the first
+    /// tick of the whistle animation, decremented each subsequent
+    /// frame until 0.  Read by `render_listen_ping` to draw the
+    /// expanding circle during the last `TIME_LISTEN` (5) frames (the
+    /// Whistling arm of the shared Listen/Whistle ellipse render).
+    pub whistle_wait_time: u32,
+
+    /// Current phase of the Listen ability, if any.  We carry an
+    /// explicit phase so the ability tick in `abilities::tick_abilities`
+    /// and the countdown in `engine/ai.rs` section 2a can coordinate
+    /// without re-parsing order types every frame.
+    pub listen_phase: ListenPhase,
+
+    /// Current phase of the beggar's `ReceivePurse` animation chain, if
+    /// any.  The three-order queue `ReceivingPurse → WaitingWithPurse →
+    /// Transition` is driven phase-by-phase so the `WaitingWithPurse`
+    /// completion can fire `EngineInner::reveal_scrolls` at the right
+    /// moment.
+    pub receive_purse_phase: ReceivePursePhase,
+
+    // Seeking
+    pub seek_target: Option<EntityId>,
+    pub last_seek_target_position: Point2D,
+    /// Countdown before the actor may re-issue a seek against a moving
+    /// target.  Armed to `TIME_SEEK_REFRESH` (25) at seek launch and
+    /// after each RefreshSeek; decremented each frame by
+    /// [`EngineInner::tick_refresh_seeks`].
+    pub seek_refresh_wait: u32,
+    // Note: seek tolerance/flags/sector/layer all live on the active
+    // `Movement` element rather than as duplicate per-actor fields —
+    // it's the authoritative source consulted by `tick_refresh_seeks`,
+    // `refresh_seek_point`, and the per-tick movement loop.
+    /// Post-seek sequence launched via `SEQ_INFO` when the seek ends
+    /// (target reached/lost, or a self-seek collapses immediately).
+    /// Copied from the movement sequence element's `post_seek_sequence`
+    /// at seek dispatch.
+    pub post_seek_sequence: Option<Box<crate::sequence::Sequence>>,
+
+    pub passing_door_directly: bool,
+
+    pub script_class: String,
+
+    /// Pathfinder speed / priority for this actor's path requests.
+    pub pathfinder_speed: PathFinderSpeed,
+
+    /// Tracks the sequence element that initiated the current movement,
+    /// so we can notify the sequence manager when movement completes.
+    pub active_movement: ActiveMovement,
+
+    /// Pending layer/sector change to apply mid-walk during a door pass.
+    /// When set, the movement tick checks the actor's path waypoint index
+    /// against `at_waypoint_index` and applies the change when the actor
+    /// reaches that waypoint, firing the layer/sector update at the
+    /// door midpoint.
+    ///
+    /// Deprecated: prefer `active_door_pass` for new code.
+    pub pending_door_pass: Option<PendingDoorPass>,
+
+    /// Multi-step door-pass state. When set, the movement tick processes
+    /// steps one at a time: walk steps set waypoints, PassingDoor steps
+    /// fire the layer/sector callback, and Transition steps play
+    /// animations in place. See [`ActiveDoorPass`].
+    pub active_door_pass: Option<ActiveDoorPass>,
+
+    /// Tracks the sequence element that initiated an in-progress ranged
+    /// action (currently only bow shots).  See
+    /// [`ActiveShot`][crate::movement::ActiveShot] for details.
+    pub active_shot: ActiveShot,
+
+    /// Tracks an in-progress melee sword strike.  See
+    /// [`ActiveMelee`][crate::movement::ActiveMelee] for details.
+    pub active_melee: crate::movement::ActiveMelee,
+
+    /// Tracks an in-progress hero ability (carry, tie, heal, whistle, etc.).
+    /// See [`ActiveAbility`][crate::movement::ActiveAbility] for details.
+    pub active_ability: crate::movement::ActiveAbility,
+
+    /// Per-frame sweep state for lateral/circle strikes.
+    /// Initialized at the hit frame; cleared when the melee strike ends.
+    pub sweep_state: Option<crate::movement::SweepState>,
+
+    /// Victims to enter sword-fight with when the current push strike
+    /// finishes. Populated at the push-strike hit frame (MOTION_DONE) and
+    /// drained when the strike terminates (MOTION_TERMINATED).
+    /// The victim list launches `EnterSwordfight` at terminate time,
+    /// not at hit time.
+    pub pending_push_swordfight: Vec<EntityId>,
+
+    /// Destination point for rolling after a death/knockout fall on a slope.
+    /// When `combat_anim` finishes and this is set, a Rolling animation is
+    /// queued toward this point.
+    pub pending_roll: Option<GeoPoint2D>,
+
+    /// World position the shield should face toward during movement.
+    /// Set by `dispatch_raise_shield` from the danger point; cleared on
+    /// shield lower or combat exit.  Faces the shield toward the threat
+    /// rather than the opponent.
+    pub shield_face_point: Option<Point2D>,
+
+    // -- Push flight state --
+    /// Active push-flight.  When `Some`, the entity is being pushed through
+    /// the air by a push/circle/charge strike.  Each frame the position
+    /// advances by the stored increment.
+    pub active_flight: Option<ActiveFlight>,
+
+    // -- Lift climb state --
+    /// If the actor is currently mid-climb on a wall-or-ladder lift sector,
+    /// which sector and which direction. Set at WAIT_FREE_LIFT entry,
+    /// cleared on the corresponding door-pass exit. Used by
+    /// `translate_ladder_wall_fall` to decrement the sector occupancy
+    /// counter when a climber gets shoved off.
+    pub active_lift: Option<ActiveLiftClimb>,
+
+    // -- Rider charge state --
+    /// Movement flags for the current path (from `MoveFlags` bits).
+    /// Set when path is dispatched from pathfinder; cleared when path ends.
+    /// Used to detect `RIDER_CHARGE` for firing `EventGaloppLoopEnd`.
+    pub rider_move_flags: u16,
+
+    /// Active rider charge state.  When `Some`, the rider is executing
+    /// `ExecuteRiderCharge` — moving along a path while checking a
+    /// polygon hit zone each frame.
+    pub active_rider_charge: Option<ActiveRiderCharge>,
+
+    /// 3D bounding-box obstacle representing the shield held in front of
+    /// this actor.  Computed by `update_shield_obstacles` each frame while
+    /// the actor is in a shield action state.  Used by `tick_arrows` to
+    /// block incoming arrows.
+    ///
+    pub shield_obstacle: Option<crate::sight_obstacle::SightObstacle>,
+
+    /// Active line-jump state.  Populated by
+    /// [`EngineInner::start_jump`](crate::engine::EngineInner::start_jump) and
+    /// drained by [`EngineInner::tick_active_jumps`]; the actor is
+    /// position-driven by the jump module while this is `Some`.
+    pub active_jump: Option<crate::engine::jump::ActiveJump>,
+    /// Target 3D point of the currently-executing jump step.  Stashed
+    /// here so [`tick_active_jumps`] can interpolate toward it on each
+    /// frame without re-peeking the consumed step.
+    pub active_jump_target_3d: Option<Point3D>,
+    /// Whether the currently-executing jump step is airborne (drives
+    /// `jump_z_offset` during interpolation).
+    pub active_jump_airborne: bool,
+    /// Deferred signal: when a jump drains its last step this holds
+    /// the sequence element to terminate once the enclosing tick can
+    /// borrow the sequence manager.
+    pub pending_jump_done: Option<(crate::sequence::SequenceId, usize)>,
+    /// Visual lift applied to the sprite during airborne jump steps.
+    /// The renderer subtracts this from the sprite's world Y so the
+    /// character appears above the ground.  `0.0` on the ground.
+    pub jump_z_offset: f32,
+
+    /// Last computed produced-noise volume.  Persists across frames
+    /// to implement the `RHMATERIAL_LIGHT_SHADOW` carry-over in
+    /// `refresh_produced_noise`, where walks/runs on light-shadow keep
+    /// the previous frame's volume.
+    pub last_noise_volume: u16,
+}
+
+impl Default for ActorData {
+    fn default() -> Self {
+        Self {
+            old_action: Animation::default(),
+            is_ignored_for_anti_collision: false,
+            is_about_to_surrender: false,
+            is_surrendering: false,
+            menacer: None,
+            action_state: ActionState::default(),
+            execution_frozen: false,
+            sequence_element_started: false,
+            wait_time: 0,
+            listen_wait_time: 0,
+            whistle_wait_time: 0,
+            listen_phase: ListenPhase::Inactive,
+            receive_purse_phase: ReceivePursePhase::Inactive,
+            seek_target: None,
+            last_seek_target_position: Point2D::default(),
+            seek_refresh_wait: 0,
+            post_seek_sequence: None,
+            passing_door_directly: false,
+            script_class: String::new(),
+            pathfinder_speed: PathFinderSpeed::default(),
+            active_movement: ActiveMovement::none(),
+            pending_door_pass: None,
+            active_door_pass: None,
+            active_shot: ActiveShot::none(),
+            active_melee: crate::movement::ActiveMelee::none(),
+            active_ability: crate::movement::ActiveAbility::default(),
+            sweep_state: None,
+            pending_push_swordfight: Vec::new(),
+            pending_roll: None,
+            shield_face_point: None,
+            active_jump: None,
+            active_jump_target_3d: None,
+            active_jump_airborne: false,
+            pending_jump_done: None,
+            jump_z_offset: 0.0,
+            active_flight: None,
+            active_lift: None,
+            rider_move_flags: 0,
+            active_rider_charge: None,
+            shield_obstacle: None,
+            last_noise_volume: 0,
+        }
+    }
+}
+
+impl ActorData {
+    /// Decouple this actor from its active Move element.  Legacy
+    /// name for "stop this actor moving now" — most ability-setup
+    /// sites call this before installing their own sequence element,
+    /// and priority arbitration will interrupt the orphaned Move
+    /// soon after.  For a hard teardown (terminate the Move
+    /// immediately so its remaining orders can't animate), use
+    /// `EngineInner::abort_actor_movement` instead.
+    pub fn clear_path(&mut self) {
+        self.active_movement.clear();
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    robin_state_hash_derive::StateHash,
+)]
+pub enum SmalltalkHint {
+    #[default]
+    None,
+    Left,
+    Right,
+    Legs,
+}
+
+/// Human-level data.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct HumanData {
+    pub carrier: Option<EntityId>,
+
+    // Health & combat
+    pub concussion_of_the_brain: u16,
+    pub concussion_healing_timeout: u16,
+    pub tiredness: u16,
+    pub unconscious: bool,
+
+    // Sword strikes
+    pub sword_strike_victims: Vec<EntityId>,
+    pub initial_strike_angle: f32,
+    pub current_strike_angle: f32,
+    pub final_strike_angle: f32,
+    pub sword_strike_boredom: Vec<u16>,
+
+    // Nets
+    pub stuck_under_nets_counter: u16,
+
+    // Visibility
+    pub hollow_man: bool,
+    pub has_already_been_detectable_body: bool,
+
+    // Swordfight — opponent list
+    /// Active swordfight opponents. The first entry is the principal opponent.
+    pub opponents: Vec<EntityId>,
+
+    /// Per-opponent jump line for table-swordfights, kept in lockstep
+    /// with [`Self::opponents`]: `opponent_jump_lines[i]` is the jump
+    /// line paired with `opponents[i]`, or `None` for opponents not
+    /// separated by a table.
+    ///
+    /// Mutators that touch `opponents` (push / swap / clear / positional
+    /// remove) must touch this vector at the same indices so the two
+    /// stay aligned.  Updated in place by
+    /// [`crate::engine::EngineInner::update_opponent_jump_line`].
+    pub opponent_jump_lines: Vec<Option<JumpLineIndex>>,
+
+    pub smalltalk_initiative: bool,
+    pub received_smalltalk_initiative: bool,
+    pub smalltalk_hint: SmalltalkHint,
+    pub smalltalk_hint_opponent: Option<EntityId>,
+    pub relative_fighting_ability: u16,
+
+    // Shield & combat
+    pub small_repulsive_radius: bool,
+    /// Previously-observed `posture.is_lying()` state for
+    /// [`EngineInner::process_corpse_intersection_updates`].
+    ///
+    /// `None` until the first observation (fresh spawn or post-load);
+    /// that first tick seeds it without firing an update so the
+    /// serialized `small_repulsive_radius` flag stays authoritative.
+    /// Later a mismatch against the current posture drives the
+    /// engine-level `update_intersecting_corpses` hook.
+    pub last_is_lying_for_corpse_intersection: Option<bool>,
+    pub killed_by_accident: bool,
+    pub parry_counter: u16,
+    pub detectable_list_index: u16,
+    pub invulnerable: bool,
+    pub last_motion_was_step_back_in_combat: bool,
+
+    // Hulk glow effect
+    pub running_hulk: u32,
+    pub time_hulk: u32,
+    pub hulk_level: u16,
+    pub hulk_direction: bool,
+    pub speed_hulk: f32,
+}
+
+impl Default for HumanData {
+    fn default() -> Self {
+        Self {
+            carrier: None,
+            concussion_of_the_brain: 0,
+            concussion_healing_timeout: 0,
+            tiredness: 0,
+            unconscious: false,
+            sword_strike_victims: Vec::new(),
+            initial_strike_angle: 0.0,
+            current_strike_angle: 0.0,
+            final_strike_angle: 0.0,
+            sword_strike_boredom: Vec::new(),
+            stuck_under_nets_counter: 0,
+            hollow_man: false,
+            has_already_been_detectable_body: false,
+            opponents: Vec::new(),
+            opponent_jump_lines: Vec::new(),
+            smalltalk_initiative: false,
+            received_smalltalk_initiative: false,
+            smalltalk_hint: SmalltalkHint::None,
+            smalltalk_hint_opponent: None,
+            relative_fighting_ability: 0,
+            small_repulsive_radius: false,
+            last_is_lying_for_corpse_intersection: None,
+            killed_by_accident: false,
+            parry_counter: 0,
+            detectable_list_index: 0,
+            invulnerable: false,
+            last_motion_was_step_back_in_combat: false,
+            running_hulk: 0,
+            time_hulk: 0,
+            hulk_level: 0,
+            hulk_direction: false,
+            speed_hulk: 0.0,
+        }
+    }
+}
+
+/// Default hulk animation length in frames.
+pub const HULK_LENGTH: u32 = 20;
+
+impl HumanData {
+    /// Tick the hulk glow animation.
+    pub fn refresh_hulk(&mut self) {
+        if self.running_hulk == 0 {
+            return;
+        }
+        self.running_hulk -= 1;
+        if self.running_hulk > 0 {
+            let ratio = self.running_hulk as f32 / self.time_hulk as f32;
+            self.hulk_level = if self.hulk_direction {
+                // Fade-out: level decreases as running_hulk → 0
+                40 + (60.0 * ratio) as u16
+            } else {
+                // Fade-in: level increases as running_hulk → 0
+                40 + (60.0 * (1.0 - ratio)) as u16
+            };
+        } else {
+            // Animation finished — reset to fade-out for next time
+            self.hulk_direction = true;
+            self.speed_hulk = 1.0;
+        }
+    }
+
+    /// Start the hulk outline glow animation.
+    pub fn start_hulk(&mut self, fade_out: bool, speed: f32) {
+        self.hulk_direction = fade_out;
+        self.speed_hulk = speed;
+        self.time_hulk = (speed * HULK_LENGTH as f32) as u32;
+        self.running_hulk = self.time_hulk;
+    }
+}
+
+/// PC-level data.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct PcData {
+    /// Life points stored directly.
+    pub life_points: i16,
+    pub immortal: bool,
+    pub robin: bool,
+    pub already_selected: bool,
+    pub list_index: u8,
+
+    /// Whether this PC can currently be selected and controlled.
+    /// Set/cleared by the `Activate` and `Deactivate` script natives,
+    /// and by rescue-PC spawn logic.
+    pub playable: bool,
+
+    /// Whether the per-PC UI panel should be hidden.  Toggled today by
+    /// the `CALL <initial> HIDEINTERFACE|DISPLAYINTERFACE` console
+    /// cheat.  The HUD port reads this flag when rendering.
+    pub interface_hidden: bool,
+
+    // Actions
+    pub current_action: Action,
+    pub saved_action: Action,
+    pub disabled_actions: Vec<bool>,
+    pub disabled_actions_temp: Vec<bool>,
+
+    // Quick actions
+    pub quick_action_types: Vec<QuickAction>,
+    /// Stored sequences for each QA slot (up to 3). When the player
+    /// replays a QA, the engine launches the sequence from this slot.
+    pub quick_action_sequences: Vec<Option<crate::sequence::Sequence>>,
+    pub titbits: Vec<u32>,
+
+    // Detection
+    pub head_seen: bool,
+    pub belt_seen: bool,
+    pub feet_seen: bool,
+
+    // Teleport
+    pub position_before_teleport: Point2D,
+    /// Frames remaining in the cheat-teleport hulk-rebuild fade.
+    /// Decremented each frame by the per-PC render path (not yet
+    /// ported); read here by `SetTeleportStuff` to suppress the
+    /// old-position star burst when a re-teleport fires while the
+    /// previous fade is still in flight.
+    pub teleport_counter: u16,
+    /// Initial value of [`Self::teleport_counter`] when the most recent
+    /// teleport began.  Used by the render path to compute the fade
+    /// percentage.
+    pub max_teleport_counter: u16,
+    pub fried_psykokwack: bool,
+
+    // Carried person
+    pub carried: Option<EntityId>,
+    pub carried_posture: Posture,
+
+    // Shield
+    pub shield_danger_point: Point3D,
+    pub shield_protected: Option<EntityId>,
+    pub shield_protector: Option<EntityId>,
+
+    // Guard
+    pub guard: Option<EntityId>,
+
+    // Reinforcement
+    pub time_till_reinforcement: u32,
+
+    // Sherwood
+    pub work_icon: WorkIcon,
+
+    // Ammo dropping
+    pub last_ammo_dropping_position: Point2D,
+    pub last_dropped_ammo: Option<EntityId>,
+    pub update_last_dropped_ammo: bool,
+    pub last_dropping_direction: u8,
+
+    /// References character profile.
+    pub profile_index: CharacterProfileIdx,
+    /// Which of the 10 playable characters this PC represents.  `None`
+    /// when level load encountered a character profile whose
+    /// `profile_name` string isn't one of the known French names
+    /// (mirrors the previous empty-string fallback).
+    pub kind: Option<crate::character_kind::CharacterKind>,
+    /// Cached contextual movement permissions from the character
+    /// profile.  `disabled_actions` only tracks the three quick-action
+    /// slots, not these profile-level abilities.
+    pub has_lockpick: bool,
+    pub has_climb: bool,
+    pub has_jump: bool,
+
+    /// Beam-me spawn index for Sherwood HQ positioning.
+    /// -1 = not assigned. Set by engine during level setup.
+    pub beam_me_index: i16,
+
+    /// Whether the portrait's "trumpet" replacement-available indicator
+    /// should be shown.  Set by the PC kill path when a non-VIP peasant
+    /// is still available in the gang to replace the killed PC.
+    pub trumpet_enabled: bool,
+
+    /// `true` when at least one hostile NPC currently has this PC as an
+    /// attack/pursuit target.  Rebuilt every frame by the AI vision tick
+    /// (see `EngineInner::tick_enemy_ai`).  Read by the selection-circle
+    /// renderer so it can turn red while the PC is being hunted.
+    pub in_combat: bool,
+
+    /// The PC's current melee target (sword opponent).
+    ///
+    /// Set when the PC enters a swordfight, cleared when the fight
+    /// ends.  Used to populate `FighterSnapshot.principal_opponent` so
+    /// the enemy AI can reason about PC combat pairings.
+    pub melee_target: Option<EntityId>,
+
+    /// Initial action set from level data (beam-me `actionInitial`).
+    /// Evaluated by `InitializeAction()` to set the PC's starting
+    /// state.
+    pub initial_action: u32,
+
+    /// Forbidden hero expression list (expression_id, forbid_timer).
+    /// Each entry counts down each frame and is removed at 0, preventing
+    /// the same expression from repeating too quickly.
+    pub forbidden_expressions: Vec<(u16, u16)>,
+
+    /// The currently-playing expression (NO_EXPRESSION = 0xFFFF when
+    /// none).  Used by HeroSpeaking to suppress overlapping speech
+    /// unless priority is emergency.
+    pub current_expression: u16,
+
+    /// Last `combat_anim` id observed by the speech-trigger tick — used
+    /// to detect the START of a new animation and the DONE transition
+    /// (anim cleared) for `DoActionAndThenPlayRemark`.
+    pub prev_combat_anim_id: u32,
+    pub prev_combat_anim_ot: Option<crate::order::OrderType>,
+}
+
+impl Default for PcData {
+    fn default() -> Self {
+        Self {
+            life_points: 100,
+            immortal: false,
+            robin: false,
+            already_selected: false,
+            list_index: 0,
+            playable: true,
+            interface_hidden: false,
+            current_action: Action::default(),
+            saved_action: Action::default(),
+            disabled_actions: Vec::new(),
+            disabled_actions_temp: Vec::new(),
+            quick_action_types: Vec::new(),
+            quick_action_sequences: vec![None, None, None],
+            titbits: Vec::new(),
+            head_seen: false,
+            belt_seen: false,
+            feet_seen: false,
+            position_before_teleport: Point2D::default(),
+            teleport_counter: 0,
+            max_teleport_counter: 0,
+            fried_psykokwack: false,
+            carried: None,
+            carried_posture: Posture::Undefined,
+            shield_danger_point: Point3D::default(),
+            shield_protected: None,
+            shield_protector: None,
+            guard: None,
+            time_till_reinforcement: 0xFFFF_FFFF,
+            work_icon: WorkIcon::default(),
+            last_ammo_dropping_position: Point2D::default(),
+            last_dropped_ammo: None,
+            update_last_dropped_ammo: false,
+            last_dropping_direction: 0,
+            profile_index: CharacterProfileIdx(0),
+            kind: None,
+            has_lockpick: false,
+            has_climb: false,
+            has_jump: false,
+            beam_me_index: -1,
+            trumpet_enabled: false,
+            in_combat: false,
+            melee_target: None,
+            initial_action: 0,
+            forbidden_expressions: Vec::new(),
+            current_expression: 0xFFFF, // NO_EXPRESSION
+            prev_combat_anim_id: 0,
+            prev_combat_anim_ot: None,
+        }
+    }
+}
+
+impl PcData {
+    pub fn movement_auth_from_profile(profile: &CharacterProfile) -> (bool, bool, bool) {
+        (
+            profile.has_contextual_action(Action::Lockpick),
+            profile.has_contextual_action(Action::Climb),
+            profile.has_contextual_action(Action::Jump),
+        )
+    }
+}
+
+impl PcData {
+    /// Unconditionally save the current action and clear it; then,
+    /// **only if `playable`**, mark every action temp-disabled. The
+    /// widget messaging side-effect is omitted — the HUD reads
+    /// `disabled_actions_temp` directly each frame.
+    pub fn disable_all_actions_temp(&mut self) {
+        self.saved_action = self.current_action;
+        self.current_action = Action::default();
+        if self.playable {
+            for slot in self.disabled_actions_temp.iter_mut() {
+                *slot = true;
+            }
+        }
+    }
+
+    /// Gated on `!is_swordfighting && playable`. Inside the guard each
+    /// temp-disabled slot is conditionally cleared, and if any cleared
+    /// slot's action matches `saved_action` (and the permanent mask is
+    /// also clear), `current_action` is restored from `saved_action`.
+    /// The widget messaging side-effect is omitted — the HUD reads
+    /// state directly.
+    ///
+    /// `is_swordfighting` is provided by the caller because the
+    /// authoritative check (`HumanData::opponents.is_empty()`) lives on
+    /// the human layer and we don't take the whole `Entity` here.
+    pub fn enable_all_actions_temp(&mut self, is_swordfighting: bool) {
+        if is_swordfighting || !self.playable {
+            return;
+        }
+        let mut restore_index: Option<usize> = None;
+        for (idx, slot) in self.disabled_actions_temp.iter_mut().enumerate() {
+            if *slot {
+                *slot = false;
+                let permanent_disabled = self.disabled_actions.get(idx).copied().unwrap_or(false);
+                if !permanent_disabled
+                    && self.saved_action != Action::default()
+                    && restore_index.is_none()
+                {
+                    // Resolve the index of the slot whose action
+                    // matches `saved_action`; the post-loop step
+                    // restores `current_action` from it.
+                    restore_index = Some(idx);
+                }
+            }
+        }
+        if restore_index.is_some() {
+            // Restore the saved action directly; the HUD re-derives
+            // the highlighted slot each frame.
+            self.current_action = self.saved_action;
+        }
+    }
+}
+
+/// A detectable entity tracked by NPC vision.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct Detectable {
+    pub element: Option<EntityId>,
+    pub detectable_type: DetectableType,
+    pub seen_last_frame: bool,
+    pub heard_last_frame: bool,
+    pub seen_now: bool,
+    pub shadow_seen_now: bool,
+    pub shadow_seen_last_frame: bool,
+    pub last_visibility: f32,
+}
+
+impl Default for Detectable {
+    fn default() -> Self {
+        Self {
+            element: None,
+            detectable_type: DetectableType::None,
+            seen_last_frame: false,
+            heard_last_frame: false,
+            seen_now: false,
+            shadow_seen_now: false,
+            shadow_seen_last_frame: false,
+            last_visibility: 0.0,
+        }
+    }
+}
+
+/// AI brain enum.  Each NPC owns one of these; soldiers get
+/// [`EnemyAi`], civilians get [`FriendlyAi`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default, robin_state_hash_derive::StateHash)]
+pub enum AiBrain {
+    #[default]
+    None,
+    Enemy(Box<EnemyAi>),
+    Friendly(Box<FriendlyAi>),
+}
+
+impl AiBrain {
+    /// Access the base `AiController` (common to both enemy and friendly).
+    pub fn base(&self) -> Option<&AiController> {
+        match self {
+            Self::None => None,
+            Self::Enemy(e) => Some(&e.base),
+            Self::Friendly(f) => Some(&f.base),
+        }
+    }
+
+    /// Mutable access to the base `AiController`.
+    pub fn base_mut(&mut self) -> Option<&mut AiController> {
+        match self {
+            Self::None => None,
+            Self::Enemy(e) => Some(&mut e.base),
+            Self::Friendly(f) => Some(&mut f.base),
+        }
+    }
+
+    /// Access the enemy AI subclass, if this is a soldier.
+    pub fn enemy(&self) -> Option<&EnemyAi> {
+        match self {
+            Self::Enemy(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the enemy AI subclass.
+    pub fn enemy_mut(&mut self) -> Option<&mut EnemyAi> {
+        match self {
+            Self::Enemy(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Access the friendly AI subclass, if this is a civilian.
+    pub fn friendly(&self) -> Option<&FriendlyAi> {
+        match self {
+            Self::Friendly(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the friendly AI subclass.
+    pub fn friendly_mut(&mut self) -> Option<&mut FriendlyAi> {
+        match self {
+            Self::Friendly(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+/// NPC-level data.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct NpcData {
+    pub life_points: i16,
+    pub number_of_arrows: u16,
+
+    pub direction_old: i16,
+    pub initial_view_direction: Vector2D,
+    pub initial_position_x: f32,
+    pub initial_position_y: f32,
+    pub initial_position_sector: Option<crate::position_interface::SectorHandle>,
+    pub initial_position_level: u16,
+    pub register_number: u16,
+
+    pub inform_my_friends: bool,
+    pub money: u32,
+    pub wasp_victim: bool,
+
+    pub body_visitors: u16,
+    pub old_cover_noise_deafness: u16,
+    pub old_cover_noise_deafness_frame_counter: u32,
+
+    /// Frames spent stuck on an outdoor ladder while idle.  Bumped
+    /// each tick by `tick_npc_stuck_on_ladder` when the NPC is on a
+    /// ladder in a non-building sector with command `Wait`/`MoveWaiting`
+    /// and not script-locked; reset otherwise.  After 25 frames the
+    /// engine fires `ForceReturnToDuty` so NPCs that hang on outdoor
+    /// ladders can self-recover.
+    pub stuck_on_ladder_emergency_counter: u16,
+
+    /// Whether this NPC has an attached dialog scroll.  Set by
+    /// `AttachScroll()` in the level loader / script system.
+    pub scroll_attached: bool,
+
+    /// One detection list per [`DetectableType`] (indexed 0..COUNT).
+    pub detectable_lists: Vec<Vec<Detectable>>,
+    pub detection_suspects: [u16; DetectableType::COUNT],
+    pub maximal_detection_suspect: u16,
+    pub worst_detected_type: DetectableType,
+
+    pub has_given_money_to_beggar: bool,
+
+    pub custom_values: [i32; NpcCustomValue::COUNT],
+
+    pub fried_pikachu: bool,
+    pub display_double_status_bar: bool,
+
+    // -- Cross-module reference: AI controller --
+    /// The NPC's AI brain — either an enemy AI or a civilian AI.
+    pub ai_brain: AiBrain,
+
+    /// `true` once this NPC has spotted a hostile and is actively pursuing
+    /// or attacking.  Kept in sync with `ai_state == Attacking` by
+    /// `EngineInner::tick_enemy_ai`.  Exists as a cheap flag so combat checks
+    /// don't need to crack open the full AI controller.
+    pub alerted: bool,
+
+    /// Real view radius (map units).  Initialized from
+    /// the engine's standard-view-radius helper at level load —
+    /// day/night dependent — and subsequently mutated by the AI
+    /// (alertness,
+    /// drunk cone iterator, lean-out, etc).  For now we only track the
+    /// base value; the per-frame mutation logic in `RefreshView` is
+    /// not yet ported.
+    pub view_radius: u16,
+
+    /// Eye / view status — controls whether the NPC can see at all.
+    /// When set to `EyeStatus::Closed` or
+    /// `EyeStatus::DieOrGetUnconscious` the vision pipeline returns
+    /// 0.0 visibility.
+    pub eye_status: EyeStatus,
+
+    /// Live half-aperture (radians) used for NPC vision geometry.
+    /// The *real* vision cone is built with this value; it starts at
+    /// `NORMAL_HALF_APERTURE` but is mutated at runtime by alert
+    /// state, drunk-cone iterator, `ViewconeGrow` status, lean-out
+    /// posture, and the forest-level Royalist 180° special case.
+    ///
+    /// **Mutation is not yet fully ported.**  The value stays at the
+    /// initial `NORMAL_HALF_APERTURE` until the RefreshView logic
+    /// lands.  The view cone overlay and AI vision code read this
+    /// field so the port is ready to pick up the real values once
+    /// mutation is wired.
+    pub half_aperture: f32,
+
+    /// "Real" half-aperture after all modifiers (stare, drunk, etc.).
+    /// Updated by `ai_vision::refresh_view` each frame.
+    pub real_half_aperture: f32,
+
+    // -- View state --
+    // Populated by `ai_vision::refresh_view` each frame.
+    /// View angle offset from body direction (radians).  Head turns
+    /// (look-left/right) and stare/follow rotate the view cone
+    /// relative to the body.
+    pub view_angle: f32,
+
+    /// Per-frame angle step for view transitions (default π/16).
+    pub view_angle_step: f32,
+
+    /// Set when the body direction or eye status changes; cleared
+    /// when the view angle reaches its goal.
+    pub view_transition: bool,
+
+    /// Maximum angular deviation from body direction during head turns.
+    pub view_half_angle_range: f32,
+
+    /// Base view radius before modifiers (longrange, drunk, rider).
+    /// The final computed radius is stored in `view_radius`.
+    pub view_radius_base: u16,
+
+    /// Target radius for grow / death-shrink animations.
+    pub view_radius_goal: u16,
+
+    /// Accelerating step for the death-shrink radius animation.
+    pub view_radius_step: u16,
+
+    /// Alpha intensity for the view cone overlay (0-255).
+    pub view_alpha_start: u16,
+
+    /// Long-range radius multiplier (default 1.0).
+    pub view_longrange_radius_factor: f32,
+
+    /// Computed view direction (body direction rotated by `view_angle`).
+    /// Updated by `refresh_view` each frame.
+    pub view_direction: [f32; 2],
+
+    /// Whether the NPC is currently leaning out.
+    pub view_lean_out: bool,
+
+    /// Four phase iterators for drunken vision cone wobble.
+    pub drunken_cone_iterators: [f32; 4],
+
+    /// Point the NPC is staring at (for `EyeStatus::Stare`).
+    pub stare_point: GeoPoint2D,
+
+    /// Entity the view cone follows (for `EyeStatus::Follow`).
+    pub follow_target: Option<EntityId>,
+}
+
+/// View / eye status enum.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Default,
+    robin_state_hash_derive::StateHash,
+)]
+#[repr(u8)]
+pub enum EyeStatus {
+    Closed = 0,
+    #[default]
+    LookForward,
+    LookToTheLeft,
+    LookToTheRight,
+    LookDownwards,
+    DieOrGetUnconscious,
+    Follow,
+    Stare,
+    ViewconeGrow,
+}
+
+impl EyeStatus {
+    /// `true` when the NPC's eyes are non-functional and visibility
+    /// must short-circuit to 0.
+    #[inline]
+    pub fn is_blind(self) -> bool {
+        matches!(self, Self::Closed | Self::DieOrGetUnconscious)
+    }
+}
+
+impl Default for NpcData {
+    fn default() -> Self {
+        Self {
+            life_points: 100,
+            // Seed `MAX_NPC_ARROWS` for every NPC unconditionally —
+            // civilians, friendlies, hostile soldiers — even those
+            // who never use a bow.  Arrows are only consumed when a
+            // bow shot resolves, so the spare quiver on non-archers
+            // is harmless. Without this seed, bow-carrying enemy
+            // soldiers would spawn with 0 arrows and fire nothing
+            // until the `FleeingRunForArrowReserves` refill path
+            // triggers.
+            number_of_arrows: crate::parameters_ai::MAX_NPC_ARROWS as u16,
+            direction_old: 0,
+            initial_view_direction: Vector2D::default(),
+            initial_position_x: 0.0,
+            initial_position_y: 0.0,
+            initial_position_sector: None,
+            initial_position_level: 0,
+            register_number: 0,
+            inform_my_friends: false,
+            money: 0,
+            wasp_victim: false,
+            body_visitors: 0,
+            old_cover_noise_deafness: 0,
+            old_cover_noise_deafness_frame_counter: 0,
+            stuck_on_ladder_emergency_counter: 0,
+            scroll_attached: false,
+            detectable_lists: vec![Vec::new(); DetectableType::COUNT],
+            detection_suspects: [0; DetectableType::COUNT],
+            maximal_detection_suspect: 0,
+            worst_detected_type: DetectableType::None,
+            has_given_money_to_beggar: false,
+            custom_values: [0; NpcCustomValue::COUNT],
+            fried_pikachu: false,
+            display_double_status_bar: false,
+            ai_brain: AiBrain::None,
+            alerted: false,
+            // The engine overwrites this with the correct day/night
+            // view radius during level load via `InitViewRadius()`,
+            // but 400 is a safe fallback if nothing wires it up.
+            view_radius: 400,
+            eye_status: EyeStatus::LookForward,
+            // `NORMAL_HALF_APERTURE = 0.5 rad` (~28.6°). This is the
+            // initial value before per-alert mutation kicks in.
+            half_aperture: crate::ai_vision::NORMAL_HALF_APERTURE,
+            real_half_aperture: crate::ai_vision::NORMAL_HALF_APERTURE,
+            view_angle: 0.0,
+            view_angle_step: crate::ai_vision::NORMAL_ANGLE_STEP,
+            view_transition: false,
+            view_half_angle_range: crate::ai_vision::NORMAL_HALF_ANGLE_RANGE,
+            view_radius_base: 400,
+            view_radius_goal: 400,
+            view_radius_step: 0,
+            view_alpha_start: crate::ai_vision::ALPHA_START,
+            view_longrange_radius_factor: 1.0,
+            view_direction: [1.0, 0.0],
+            view_lean_out: false,
+            drunken_cone_iterators: [0.0; 4],
+            stare_point: GeoPoint2D { x: 0.0, y: 0.0 },
+            follow_target: None,
+        }
+    }
+}
+
+impl NpcData {
+    /// Current AI top-level state, read from the owning [`AiController`]
+    /// (single source of truth).  NPCs without an AI brain report
+    /// [`AiTopState::Default`], matching the pre-consolidation default
+    /// value of the removed stored field.
+    pub fn ai_state(&self) -> AiTopState {
+        self.ai_brain
+            .base()
+            .map(|b| b.current_state)
+            .unwrap_or(AiTopState::Default)
+    }
+
+    /// Current AI substate, read from the owning [`AiController`]
+    /// (single source of truth).  NPCs without an AI brain report
+    /// [`AiSubstate::DefaultOnPost`], matching the pre-consolidation
+    /// default value of the removed stored field.
+    pub fn ai_substate(&self) -> AiSubstate {
+        self.ai_brain
+            .base()
+            .map(|b| b.current_substate)
+            .unwrap_or(AiSubstate::DefaultOnPost)
+    }
+
+    /// Returns the current cover-noise deafness after applying decay.
+    /// The engine should call this each frame via the hearing path.
+    ///
+    /// `cover_volume` is the max of every active sound source's
+    /// covering-volume-at-position at the NPC's position.  The caller
+    /// supplies it because `NpcData` has no access to the engine's
+    /// `SoundSourceManager`; pass `0` when no sound sources should
+    /// mask hearing.
+    pub fn get_deafness(&mut self, current_frame: u32, cover_volume: u16) -> u16 {
+        use crate::parameters_ai;
+
+        // Same-frame short-circuit.  Only fires when the
+        // function has already been called this frame; the
+        // `cover_volume` argument is irrelevant here because the prior
+        // call already folded the per-frame covering volume into the
+        // stored value.
+        if self.old_cover_noise_deafness_frame_counter == current_frame {
+            return self.old_cover_noise_deafness;
+        }
+
+        // Catch-up decay loop.  Runs until the counter catches up OR
+        // the deafness reaches zero.  No iteration cap — the decay
+        // rate guarantees a bounded number of steps before deafness
+        // reaches zero (slow decay alone needs at most
+        // ceil(300 / AI_DEAFNESS_MINUS) iterations to bottom out).
+        while self.old_cover_noise_deafness_frame_counter < current_frame
+            && self.old_cover_noise_deafness > 0
+        {
+            // Stepped fast decay above 300.  The integer division
+            // `(deaf / RADIUS)` evaluates BEFORE the multiplication,
+            // giving a stepped reduction:
+            //   deaf in [300, 599]  → subtract 50 * 1
+            //   deaf in [600, 899]  → subtract 50 * 2
+            //   …
+            // Slow decay below 300 subtracts a flat `AI_DEAFNESS_MINUS`.
+            if self.old_cover_noise_deafness > parameters_ai::AI_QUICK_DEAFNESS_RADIUS as u16 {
+                let fast = (parameters_ai::AI_QUICK_DEAFNESS_MINUS as u32
+                    * (self.old_cover_noise_deafness as u32
+                        / parameters_ai::AI_QUICK_DEAFNESS_RADIUS as u32))
+                    as u16;
+                self.old_cover_noise_deafness = self.old_cover_noise_deafness.saturating_sub(fast);
+            } else {
+                self.old_cover_noise_deafness = self
+                    .old_cover_noise_deafness
+                    .saturating_sub(parameters_ai::AI_DEAFNESS_MINUS as u16);
+            }
+            self.old_cover_noise_deafness_frame_counter = self
+                .old_cover_noise_deafness_frame_counter
+                .saturating_add(1);
+        }
+        // If we exited the loop because deafness hit zero before the
+        // counter caught up, snap the counter forward so the same-frame
+        // short-circuit at the top of the function fires correctly on
+        // subsequent calls this frame.
+        self.old_cover_noise_deafness_frame_counter = current_frame;
+
+        // Take the max of current deafness and the covering volume
+        // from active sound sources at this position.  The caller
+        // pre-computes `cover_volume` because `NpcData` lacks access
+        // to the `SoundSourceManager`.
+        if cover_volume > self.old_cover_noise_deafness {
+            self.old_cover_noise_deafness = cover_volume;
+        }
+
+        self.old_cover_noise_deafness
+    }
+
+    /// Zeroes every per-detectable suspect accumulator and the cached
+    /// worst-threat summary.  Called when the NPC transitions into
+    /// unconsciousness so the pre-knockout hostility tint / blip color
+    /// doesn't leak to wake-up.
+    pub fn clear_all_suspects(&mut self) {
+        for slot in self.detection_suspects.iter_mut() {
+            *slot = 0;
+        }
+        self.maximal_detection_suspect = 0;
+        self.worst_detected_type = DetectableType::None;
+    }
+}
+
+/// Soldier-specific data.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, robin_state_hash_derive::StateHash)]
+pub struct SoldierData {
+    pub apple_smell: u32,
+    /// References soldier profile data.
+    pub soldier_profile_index: SoldierProfileIdx,
+    /// Cached from profile at creation time.
+    pub cached_max_life_points: i16,
+    /// Cached from profile at creation time.
+    pub cached_camp: Camp,
+    /// Whether this soldier is mounted on a horse.
+    pub rider: bool,
+}
+
+/// Civilian-specific data.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, robin_state_hash_derive::StateHash)]
+pub struct CivilianData {
+    pub current_scroll_set: u32,
+    /// References civilian profile data.
+    pub civilian_profile_index: CivilianProfileIdx,
+    /// Cached from profile at creation time.
+    pub cached_camp: Camp,
+    /// Cached civilian type (Beggar/Child/Vip/Standard) from profile
+    /// at load time.
+    pub cached_civilian_type: crate::profiles::CivilianType,
+    /// Per-scroll-set scroll IDs for beggar civilians (10 sets).
+    /// `None` for non-beggar civilians.
+    pub beggar_scroll_sets: Option<Vec<Vec<u16>>>,
+}
+
+/// FX-level data.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, robin_state_hash_derive::StateHash)]
+pub struct FxData {
+    pub restore_background: bool,
+    pub force_display: bool,
+    pub animation: Animation,
+    /// Masking polyline for display order interleaving.  FX entities
+    /// with a non-empty polyline participate in the animation merge
+    /// pass of `SortForDisplay` (characters can walk behind them).
+    pub display_polyline: Vec<Point2D>,
+    /// If this FX entity is a patch's animation element, the patch
+    /// index (into `GameHost::patches`).  Used by the animation tick
+    /// to apply reversed playback and detect transition completion.
+    pub patch_index: Option<crate::patch::PatchIndex>,
+    /// Rendering properties (`Blocky` vs `NeedShadow`) selected from
+    /// the blit-type byte at level load.  `NeedShadow` selects the
+    /// `BlitAlphaKeying` path (sprite gets the global shadow tint
+    /// composited on); `Blocky` selects plain `Blit` with no shadow
+    /// compositing.
+    pub rendering_properties: RenderingProperties,
+}
+
+/// Target-level data.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct TargetData {
+    pub animation: Animation,
+    /// Raw frame-progression ordinal from level data.
+    pub progression: u32,
+    pub linked_fx: Vec<EntityId>,
+    /// Action filter flags determining which PC actions interact with this target.
+    /// See `TargetFilter` bitflags.
+    pub action_filter: TargetFilter,
+    /// Action point — the position the PC walks to when interacting
+    /// with this target.
+    pub action_position: Point2D,
+    /// Action point sector.
+    pub action_sector: u16,
+    /// Action point layer.
+    pub action_layer: u16,
+    /// Optional Z height for elevated targets (negative = no Z).
+    pub position_z: i16,
+    /// Sprite filename (.rhs file).
+    pub sprite_filename: String,
+    /// Sprite profile name within the .rhs.
+    pub sprite_profile_name: String,
+    /// Masking polyline used for blit clipping.
+    pub display_polyline: Vec<Point2D>,
+    /// Rendering properties (`Blocky` vs `NeedShadow`) selected from the
+    /// blit type byte in the level data.
+    pub rendering_properties: RenderingProperties,
+    /// Script class name driving this target's per-instance script
+    /// (`IElementTargetScript` implementation).  Loaded from the proto
+    /// stream's target script-class field.  Each target carries its
+    /// own VM, with named functions like `ActivatedByListenable`,
+    /// `ActivatedByApple`, etc.  Empty string means "no script
+    /// attached" (the dispatcher skips such targets).
+    pub script_class: String,
+}
+
+impl Default for TargetData {
+    fn default() -> Self {
+        Self {
+            // Initial animation is `WaitingUpright`.
+            // `Animation::default()` would otherwise give ordinal 0
+            // (`WaitingUprightBored`), which is a different pose.
+            animation: Animation::WaitingUpright,
+            progression: 0,
+            linked_fx: Vec::new(),
+            action_filter: TargetFilter::empty(),
+            action_position: Point2D::default(),
+            action_sector: 0,
+            action_layer: 0,
+            position_z: -1,
+            sprite_filename: String::new(),
+            sprite_profile_name: String::new(),
+            display_polyline: Vec::new(),
+            rendering_properties: RenderingProperties::Blocky,
+            script_class: String::new(),
+        }
+    }
+}
+
+/// Object-level data.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ObjectData {
+    pub associated_action: Action,
+    pub terminate: bool,
+    pub quantity: u16,
+    pub object_type: ObjectType,
+    pub animation: Animation,
+    pub reference: Option<EntityId>,
+    pub belongs_to_beggar: bool,
+    pub taken: bool,
+    pub register_number: u16,
+}
+
+impl Default for ObjectData {
+    fn default() -> Self {
+        Self {
+            associated_action: Action::default(),
+            terminate: false,
+            quantity: 1,
+            object_type: ObjectType::default(),
+            // Initial animation is `WaitingUpright`, not the enum-zero
+            // `WaitingUprightBored`.
+            animation: Animation::WaitingUpright,
+            reference: None,
+            belongs_to_beggar: false,
+            taken: false,
+            register_number: 0,
+        }
+    }
+}
+
+/// A single waypoint on a precomputed ballistic trajectory.
+///
+/// The projectile moves linearly from its current position to
+/// `position` over `time` frames before popping the next point from
+/// the trajectory list.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct TrajectoryPoint {
+    pub position: Point3D,
+    /// Number of frames to reach this point from the previous position.
+    pub time: u16,
+}
+
+/// Projectile-level data.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ProjectileData {
+    pub start: Point3D,
+    pub end: Point3D,
+    pub start_of_trajectory_x: f32,
+    pub start_of_trajectory_y: f32,
+    /// Layer of the launch point.  Stored alongside the x/y/sector so
+    /// landing events (apple drop, arrow pickup) can fire on the
+    /// *launch* layer instead of the current one.
+    pub start_of_trajectory_layer: u16,
+    /// Sector of the launch point.  Paired with
+    /// `start_of_trajectory_layer`.
+    pub start_of_trajectory_sector: Option<crate::position_interface::SectorHandle>,
+    pub flight_direction: u16,
+    pub shooter: Option<EntityId>,
+    pub frame_count: u16,
+    pub flying: bool,
+    pub dive: bool,
+    pub disappear: bool,
+    pub magic_bullet: bool,
+    /// Precomputed trajectory waypoints.  `tick_arrows` pops points
+    /// from the front and interpolates position toward each one over
+    /// `time` frames.
+    pub trajectory: Vec<TrajectoryPoint>,
+    /// Per-frame position delta for the current trajectory segment.
+    /// Recomputed each time a new waypoint is popped.
+    pub velocity_increment: Point3D,
+    /// Frames remaining in the current trajectory segment.
+    /// When this reaches 0, the next `TrajectoryPoint` is popped.
+    pub trajectory_frame_count: u16,
+    /// True for normal/down shots (flat trajectory), false for long/high
+    /// shots.  Determines arrow mass for gravity and damage lookup.
+    pub flat_shot: bool,
+    /// Precomputed damage for this projectile.  Set at spawn time from the
+    /// shooter's bow profile via `BowState::get_damage()`.  Applied on hit
+    /// by `apply_arrow_hit`.
+    pub damage: u16,
+    /// True when the arrow has been deflected (by a shield or target) and
+    /// is falling to the ground.  Falling arrows skip shield and victim
+    /// collision checks.
+    pub falling: bool,
+    /// Sector (0..15) used by a falling arrow's visual rotation.
+    /// Seeded in `MakeFallingDown` (`(sector + 4) & 15` for shield
+    /// deflection or `sector ^ 8` for target bounce-off) and advanced
+    /// by `(falling_direction + 14) % 16` each tick while falling.  The sprite rotation itself is a rendering-pipeline
+    /// concern tracked separately — this field stores the state so a
+    /// future arrow-refresh pass has the right value.
+    pub falling_direction: u16,
+    /// Last horizontal sector (0..15) returned by `GetOrientations`.
+    /// Cached on trajectory-non-empty ticks and returned verbatim
+    /// when the trajectory is empty.  Rust only reads orientation
+    /// when the trajectory is actively advancing, so this field is
+    /// maintained purely for serialize-layout / future Refresh-pass
+    /// parity.
+    pub last_sector: u8,
+    /// Last vertical pitch angle (degrees, clamped to [-60, 60]).
+    /// Paired cache with `last_sector`; stored for the same reason;
+    /// no consumer in Rust yet.
+    pub last_azimut: i16,
+    /// True when the arrow struck a shield / non-hurtable victim and
+    /// the engine should play impact FX 510 on the next Refresh.
+    /// Gated by `GetImpactFx` which returns 510 iff
+    /// `play_impact && !falling`.  In practice every call-site that
+    /// sets `play_impact = true` also flips `falling = true` via
+    /// `MakeFallingDown`, so the 510 gate evaluates false and no FX
+    /// plays — Rust matches that by leaving `impact_fx = None` in
+    /// those branches.
+    pub play_impact: bool,
+    /// Purse / coin back-pointers — populated for `ObjectType::Purse`
+    /// and `ObjectType::Coin` projectiles, default for everything else.
+    /// See [`PurseData`].
+    pub purse: PurseData,
+    /// Wasp-nest / wasp state — populated for
+    /// `ObjectType::BonusWaspNest` / `ObjectType::WaspNest` parents and
+    /// each `ObjectType::Wasp` child, default for everything else.
+    /// See [`WaspData`].
+    pub wasp: WaspData,
+    /// Frames remaining in the post-impact `ObjectBursting` animation
+    /// for apples and stones.  Set on impact, decremented each tick;
+    /// the projectile despawns when it reaches 0.  Arrows never burst;
+    /// for them this stays 0 and they despawn immediately on impact.
+    pub burst_countdown: u16,
+}
+
+impl Default for ProjectileData {
+    fn default() -> Self {
+        Self {
+            start: Point3D::default(),
+            end: Point3D::default(),
+            start_of_trajectory_x: 0.0,
+            start_of_trajectory_y: 0.0,
+            start_of_trajectory_layer: 0,
+            start_of_trajectory_sector: None,
+            flight_direction: 0,
+            shooter: None,
+            frame_count: 0,
+            flying: false,
+            dive: false,
+            disappear: false,
+            magic_bullet: false,
+            trajectory: Vec::new(),
+            velocity_increment: Point3D::default(),
+            trajectory_frame_count: 0,
+            flat_shot: true,
+            damage: 0,
+            falling: false,
+            falling_direction: 0,
+            last_sector: 0,
+            last_azimut: 0,
+            play_impact: false,
+            purse: PurseData::default(),
+            wasp: WaspData::default(),
+            burst_countdown: 0,
+        }
+    }
+}
+
+/// Net-specific data.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, robin_state_hash_derive::StateHash)]
+pub struct NetData {
+    pub victims: Vec<EntityId>,
+    /// Pre-landing countdown (frames). Set at spawn time to
+    /// `total_trajectory_frames - 15`.  Decrements during flight;
+    /// when it reaches 0 the net switches its sprite animation to
+    /// `NetUnfolding` (or `NetUnfoldingCrumpled`).
+    pub time_till_unfolding: i32,
+    pub crumpled: bool,
+    pub was_flying: bool,
+    /// IDs of the (up to two) `RepulsivePoint`s registered on
+    /// `AiGlobalState` while the net sits on the ground.  Cleared on
+    /// despawn.
+    pub repulsive_point_ids: Vec<i32>,
+    /// True once the post-landing animation transition has fired
+    /// (NetUnfolding → ObjectLying / NetMoving, or
+    /// NetUnfoldingCrumpled → NetLyingCrumpled). Prevents repeating
+    /// the transition each frame.
+    pub landed_animation_resolved: bool,
+}
+
+/// Purse / coin back-pointers.
+///
+/// A single struct serves both roles since purses and coins are
+/// sibling kinds of projectile: purses populate `child_coins` /
+/// `number_of_coins` and leave `source_purse` empty; coins populate
+/// `source_purse` and leave the other fields empty.  Lives on
+/// [`ProjectileData`] so it travels with the existing
+/// `Entity::Projectile(ElementProjectile)` payload — no extra entity
+/// variant needed.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, robin_state_hash_derive::StateHash)]
+pub struct PurseData {
+    /// On a coin: handle of the purse it was ejected from.  On a
+    /// purse: always `None`.
+    pub source_purse: Option<EntityId>,
+    /// On a purse: list of child coins spawned by `HitObstacle`.  On
+    /// a coin: empty.
+    pub child_coins: Vec<EntityId>,
+    /// On a purse: number of coins still owed (decremented each burst).
+    /// Initialised to `inventory::COINS_PER_PURSE` at spawn.  On a
+    /// coin: always 0.
+    pub number_of_coins: u16,
+    /// On a purse: true once `HitObstacle` has fired and child coins
+    /// are in flight.  Used by `Hourglass` to know when to switch to
+    /// the "drain children, then despawn" idle phase.
+    pub burst: bool,
+    /// On a coin: layer the coin should snap to on landing.  Stored
+    /// at spawn so `HitObstacle` can re-key the coin onto its goal
+    /// layer.  On a purse: always 0.
+    pub layer_goal: u16,
+    /// On a coin: sector the coin should snap to on landing (None
+    /// when the scatter target wasn't resolved against a known
+    /// sector).
+    pub sector_goal: Option<crate::position_interface::SectorHandle>,
+}
+
+/// Wasp-nest / wasp shared fields.  Lives on [`ProjectileData`] so both
+/// the wasp-nest parent (`ObjectType::BonusWaspNest`) and each spawned
+/// wasp (`ObjectType::Wasp`) can share the storage without a separate
+/// entity variant.
+///
+/// `flying_wasp_count` is decremented when a wasp dies and is checked
+/// each tick to decide whether to keep emitting the buzz sound.
+/// `source_nest` is the back-pointer so the wasp can notify its nest
+/// on death.
+///
+/// Wasp AI (chase/sting soldiers) lives in `engine::wasp_nest`; when a
+/// wasp dies it decrements the nest's counter through `source_nest`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, robin_state_hash_derive::StateHash)]
+pub struct WaspData {
+    /// On a wasp nest: remaining wasps in flight.  Incremented to
+    /// `NUMBER_OF_WASPS` on burst, decremented when each wasp dies.
+    /// On a wasp: always 0.
+    pub flying_wasp_count: u16,
+    /// On a wasp nest: true once the nest has burst and the 20 wasps
+    /// have been spawned, to prevent re-bursting each tick.  On a
+    /// wasp: always false.
+    pub burst: bool,
+    /// On a wasp: handle of the parent nest (for decrementing
+    /// `flying_wasp_count` on death).  On a wasp nest: always `None`.
+    pub source_nest: Option<EntityId>,
+    /// On a wasp: handle of the currently targeted soldier, or `None`.
+    /// Cleared when the distance exceeds `VICTIM_FORGET_DISTANCE` or
+    /// when the wasp dies.
+    pub victim: Option<EntityId>,
+    /// On a wasp: `true` once the wasp has closed to `STING_DISTANCE`
+    /// and committed to stinging its victim; movement stops and the
+    /// sting-timeout counter runs down.
+    pub stinging: bool,
+    /// On a wasp: frame counter until next direction change (or, while
+    /// stinging, until the sting fires).
+    pub timeout: u16,
+    /// On a wasp: current per-frame movement vector (3D velocity).
+    /// Stored as a `Point3D` to avoid introducing a separate Vec3 —
+    /// the math is identical.
+    pub movement: Point3D,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Concrete entity structs
+// ═══════════════════════════════════════════════════════════════════
+
+/// Player character entity.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ActorPc {
+    pub element: ElementData,
+    pub actor: ActorData,
+    pub human: HumanData,
+    pub pc: PcData,
+}
+
+/// Soldier NPC entity.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ActorSoldier {
+    pub element: ElementData,
+    pub actor: ActorData,
+    pub human: HumanData,
+    pub npc: NpcData,
+    pub soldier: SoldierData,
+}
+
+/// Civilian NPC entity.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ActorCivilian {
+    pub element: ElementData,
+    pub actor: ActorData,
+    pub human: HumanData,
+    pub npc: NpcData,
+    pub civilian: CivilianData,
+}
+
+/// Basic visual effect entity.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ElementFx {
+    pub element: ElementData,
+    pub fx: FxData,
+}
+
+/// Target / activator entity.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ElementTarget {
+    pub element: ElementData,
+    pub fx: FxData,
+    pub target: TargetData,
+}
+
+/// Bonus / pickup object entity.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ElementBonus {
+    pub element: ElementData,
+    pub object: ObjectData,
+}
+
+/// Scroll (mission pickup) entity.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, robin_state_hash_derive::StateHash)]
+pub struct ElementScroll {
+    pub element: ElementData,
+    pub object: ObjectData,
+    /// Per-difficulty presence flags (Easy/Medium/Hard).
+    pub presence: [bool; 3],
+    /// Tutorial flag — scrolls flagged as tutorial behave specially.
+    pub tutorial: bool,
+    /// Mission-stream script class name, bound at scroll init time.
+    /// Empty when the scroll has no script.
+    pub script_class: String,
+    /// Counter (0..25) driving the per-scroll script `Hourglass(0)`
+    /// dispatch.  Incremented every active tick; when it reaches 25
+    /// the scroll's script `Hourglass` fires and the counter resets.
+    pub script_hourglass_timeout: u32,
+}
+
+/// Projectile entity (arrows, stones, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ElementProjectile {
+    pub element: ElementData,
+    pub object: ObjectData,
+    pub projectile: ProjectileData,
+}
+
+/// Net (trap net) entity.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub struct ElementNet {
+    pub element: ElementData,
+    pub object: ObjectData,
+    pub projectile: ProjectileData,
+    pub net: NetData,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Entity enum — dynamic dispatch over all entity types
+// ═══════════════════════════════════════════════════════════════════
+
+/// Any game entity.  Provides enum-based dispatch over all concrete types.
+#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
+pub enum Entity {
+    Pc(ActorPc),
+    Soldier(ActorSoldier),
+    Civilian(ActorCivilian),
+    Fx(ElementFx),
+    Target(ElementTarget),
+    Bonus(ElementBonus),
+    Scroll(ElementScroll),
+    Projectile(ElementProjectile),
+    Net(ElementNet),
+}
+
+/// Helper macro — dispatch `$self` to the `element` field of every variant.
+macro_rules! dispatch_element {
+    ($self:expr_2021, $field:ident) => {
+        match $self {
+            Entity::Pc(e) => &e.element.$field,
+            Entity::Soldier(e) => &e.element.$field,
+            Entity::Civilian(e) => &e.element.$field,
+            Entity::Fx(e) => &e.element.$field,
+            Entity::Target(e) => &e.element.$field,
+            Entity::Bonus(e) => &e.element.$field,
+            Entity::Scroll(e) => &e.element.$field,
+            Entity::Projectile(e) => &e.element.$field,
+            Entity::Net(e) => &e.element.$field,
+        }
+    };
+}
+
+impl Entity {
+    // — Element data access —
+
+    pub fn element_data(&self) -> &ElementData {
+        match self {
+            Self::Pc(e) => &e.element,
+            Self::Soldier(e) => &e.element,
+            Self::Civilian(e) => &e.element,
+            Self::Fx(e) => &e.element,
+            Self::Target(e) => &e.element,
+            Self::Bonus(e) => &e.element,
+            Self::Scroll(e) => &e.element,
+            Self::Projectile(e) => &e.element,
+            Self::Net(e) => &e.element,
+        }
+    }
+
+    pub fn element_data_mut(&mut self) -> &mut ElementData {
+        match self {
+            Self::Pc(e) => &mut e.element,
+            Self::Soldier(e) => &mut e.element,
+            Self::Civilian(e) => &mut e.element,
+            Self::Fx(e) => &mut e.element,
+            Self::Target(e) => &mut e.element,
+            Self::Bonus(e) => &mut e.element,
+            Self::Scroll(e) => &mut e.element,
+            Self::Projectile(e) => &mut e.element,
+            Self::Net(e) => &mut e.element,
+        }
+    }
+
+    pub fn kind(&self) -> ElementKind {
+        *dispatch_element!(self, kind)
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.element_data().active
+    }
+
+    pub fn posture(&self) -> Posture {
+        self.element_data().posture
+    }
+
+    /// Set posture through the corpse-transition guard.  Delegates to
+    /// [`ElementData::set_posture`].
+    pub fn set_posture(&mut self, p: Posture) {
+        self.element_data_mut().set_posture(p);
+    }
+
+    /// Reveal a blipped shadow.  Pulls `direction` from the actor's
+    /// `PositionInterface` and delegates to
+    /// [`ElementData::reveal_blip`].
+    pub fn reveal_blip(&mut self) {
+        let direction = (self.position_iface().get_direction().as_u8()) as u16;
+        self.element_data_mut().reveal_blip(direction);
+    }
+
+    /// Per-frame update. Returns false if entity should be removed.
+    /// Subtype-specific logic will be added as behaviors are ported.
+    pub fn hourglass(&mut self) -> bool {
+        match self {
+            // legacy implementation `RHElementProjectile::Hourglass` returns false when
+            // inactive, causing the engine to unlink thrown/fired objects.
+            Self::Projectile(projectile) => projectile.element.active,
+            // `RHScript::Deactivate` only flips `mbActive`; ordinary
+            // bonuses, scrolls, FX, targets, and actors remain in both the
+            // engine element array and the script element array.
+            _ => true,
+        }
+    }
+
+    // — Sub-data accessors (return None if the entity doesn't have that level) —
+
+    pub fn actor_data(&self) -> Option<&ActorData> {
+        match self {
+            Self::Pc(e) => Some(&e.actor),
+            Self::Soldier(e) => Some(&e.actor),
+            Self::Civilian(e) => Some(&e.actor),
+            _ => None,
+        }
+    }
+
+    pub fn actor_data_mut(&mut self) -> Option<&mut ActorData> {
+        match self {
+            Self::Pc(e) => Some(&mut e.actor),
+            Self::Soldier(e) => Some(&mut e.actor),
+            Self::Civilian(e) => Some(&mut e.actor),
+            _ => None,
+        }
+    }
+
+    pub fn human_data(&self) -> Option<&HumanData> {
+        match self {
+            Self::Pc(e) => Some(&e.human),
+            Self::Soldier(e) => Some(&e.human),
+            Self::Civilian(e) => Some(&e.human),
+            _ => None,
+        }
+    }
+
+    pub fn npc_data(&self) -> Option<&NpcData> {
+        match self {
+            Self::Soldier(e) => Some(&e.npc),
+            Self::Civilian(e) => Some(&e.npc),
+            _ => None,
+        }
+    }
+
+    pub fn human_data_mut(&mut self) -> Option<&mut HumanData> {
+        match self {
+            Self::Pc(e) => Some(&mut e.human),
+            Self::Soldier(e) => Some(&mut e.human),
+            Self::Civilian(e) => Some(&mut e.human),
+            _ => None,
+        }
+    }
+
+    /// Get mutable references to both HumanData and life points simultaneously.
+    ///
+    /// These live on disjoint fields (human vs pc/npc), so both can be
+    /// borrowed mutably at the same time — the single match arm proves
+    /// non-aliasing to the borrow checker.
+    pub fn human_and_life_points_mut(&mut self) -> Option<(&mut HumanData, &mut i16)> {
+        match self {
+            Self::Pc(e) => Some((&mut e.human, &mut e.pc.life_points)),
+            Self::Soldier(e) => Some((&mut e.human, &mut e.npc.life_points)),
+            Self::Civilian(e) => Some((&mut e.human, &mut e.npc.life_points)),
+            _ => None,
+        }
+    }
+
+    /// Get mutable references to both HumanData and the entity's Posture simultaneously.
+    ///
+    /// These live on disjoint fields (human vs element.posture), so both can be
+    /// borrowed mutably at the same time.
+    ///
+    /// Test-only: production posture mutations must go through
+    /// [`Entity::set_posture`] or the focused entity helpers below.
+    #[cfg(test)]
+    pub fn human_and_posture_mut(&mut self) -> Option<(&mut HumanData, &mut Posture)> {
+        match self {
+            Self::Pc(e) => Some((&mut e.human, &mut e.element.posture)),
+            Self::Soldier(e) => Some((&mut e.human, &mut e.element.posture)),
+            Self::Civilian(e) => Some((&mut e.human, &mut e.element.posture)),
+            _ => None,
+        }
+    }
+
+    pub fn tie_up_unconscious_human(&mut self) -> bool {
+        fn apply(element: &mut ElementData, human: &mut HumanData) {
+            assert!(human.unconscious, "cannot tie up a conscious entity");
+            element.set_posture(Posture::Tied);
+            if human.concussion_of_the_brain < crate::combat::CONCUSSION_WAKEUP_THRESHOLD {
+                human.concussion_of_the_brain = crate::combat::CONCUSSION_WAKEUP_THRESHOLD;
+            }
+        }
+
+        match self {
+            Self::Pc(e) => {
+                apply(&mut e.element, &mut e.human);
+                true
+            }
+            Self::Soldier(e) => {
+                apply(&mut e.element, &mut e.human);
+                true
+            }
+            Self::Civilian(e) => {
+                apply(&mut e.element, &mut e.human);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn set_posture_stuck_under_net_for_human(&mut self) -> bool {
+        match self {
+            Self::Pc(e) => {
+                e.element.set_posture(Posture::StuckUnderNet);
+                true
+            }
+            Self::Soldier(e) => {
+                e.element.set_posture(Posture::StuckUnderNet);
+                true
+            }
+            Self::Civilian(e) => {
+                e.element.set_posture(Posture::StuckUnderNet);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn remove_net_from_human(&mut self) -> bool {
+        fn apply(element: &mut ElementData, human: &mut HumanData) -> bool {
+            let prev_counter = human.stuck_under_nets_counter;
+            if human.stuck_under_nets_counter > 0 {
+                human.stuck_under_nets_counter -= 1;
+            }
+            if human.stuck_under_nets_counter == 0 && element.posture == Posture::StuckUnderNet {
+                element.set_posture(Posture::Lying);
+            }
+            prev_counter > 0 && human.stuck_under_nets_counter == 0
+        }
+
+        match self {
+            Self::Pc(e) => apply(&mut e.element, &mut e.human),
+            Self::Soldier(e) => apply(&mut e.element, &mut e.human),
+            Self::Civilian(e) => apply(&mut e.element, &mut e.human),
+            _ => false,
+        }
+    }
+
+    pub fn npc_data_mut(&mut self) -> Option<&mut NpcData> {
+        match self {
+            Self::Soldier(e) => Some(&mut e.npc),
+            Self::Civilian(e) => Some(&mut e.npc),
+            _ => None,
+        }
+    }
+
+    pub fn soldier_data(&self) -> Option<&SoldierData> {
+        match self {
+            Self::Soldier(e) => Some(&e.soldier),
+            _ => None,
+        }
+    }
+
+    pub fn soldier_data_mut(&mut self) -> Option<&mut SoldierData> {
+        match self {
+            Self::Soldier(e) => Some(&mut e.soldier),
+            _ => None,
+        }
+    }
+
+    pub fn pc_data(&self) -> Option<&PcData> {
+        match self {
+            Self::Pc(e) => Some(&e.pc),
+            _ => None,
+        }
+    }
+
+    pub fn pc_data_mut(&mut self) -> Option<&mut PcData> {
+        match self {
+            Self::Pc(e) => Some(&mut e.pc),
+            _ => None,
+        }
+    }
+
+    pub fn object_data(&self) -> Option<&ObjectData> {
+        match self {
+            Self::Bonus(e) => Some(&e.object),
+            Self::Scroll(e) => Some(&e.object),
+            Self::Projectile(e) => Some(&e.object),
+            Self::Net(e) => Some(&e.object),
+            _ => None,
+        }
+    }
+
+    pub fn object_data_mut(&mut self) -> Option<&mut ObjectData> {
+        match self {
+            Self::Bonus(e) => Some(&mut e.object),
+            Self::Scroll(e) => Some(&mut e.object),
+            Self::Projectile(e) => Some(&mut e.object),
+            Self::Net(e) => Some(&mut e.object),
+            _ => None,
+        }
+    }
+
+    pub fn fx_data(&self) -> Option<&FxData> {
+        match self {
+            Self::Fx(e) => Some(&e.fx),
+            Self::Target(e) => Some(&e.fx),
+            _ => None,
+        }
+    }
+
+    /// For FX-kind entities (Fx / Target) the per-frame draw is
+    /// suppressed when the player has disabled "Display Animations"
+    /// in the graphics options, unless one of the override conditions
+    /// holds:
+    ///   - `force_display` is set on this FX,
+    ///   - the FX is a patch animation (`patch_index.is_some()`),
+    ///   - the FX is elevated (z != 0).
+    ///
+    /// Non-FX entities (PCs, NPCs, soldiers, civilians, …) always
+    /// display — the check exists only on FX-base entities.
+    pub fn is_to_be_displayed(&self, display_anim: bool) -> bool {
+        let Some(fx) = self.fx_data() else {
+            return true;
+        };
+        let elem = self.element_data();
+        fx.force_display || fx.patch_index.is_some() || elem.position().z != 0.0 || display_anim
+    }
+
+    /// Return the display masking polyline for this entity.
+    ///
+    /// FX-base entities (Fx, Target) may have a polyline that
+    /// determines whether other entities render in front of or behind
+    /// them.  For Targets the polyline lives on `TargetData`; for Fx
+    /// it lives on `FxData`.
+    pub fn display_polyline(&self) -> &[Point2D] {
+        match self {
+            Self::Target(e) => &e.target.display_polyline,
+            Self::Fx(e) => &e.fx.display_polyline,
+            _ => &[],
+        }
+    }
+
+    // — Type checks (delegated to ElementKind) —
+
+    pub fn is_actor(&self) -> bool {
+        self.kind().is_actor()
+    }
+    pub fn is_human(&self) -> bool {
+        self.kind().is_human()
+    }
+    pub fn is_pc(&self) -> bool {
+        self.kind().is_pc()
+    }
+    pub fn is_npc(&self) -> bool {
+        self.kind().is_npc()
+    }
+    pub fn is_soldier(&self) -> bool {
+        self.kind().is_soldier()
+    }
+    pub fn is_civilian(&self) -> bool {
+        self.kind().is_civilian()
+    }
+    pub fn is_fx(&self) -> bool {
+        self.kind().is_fx()
+    }
+    pub fn is_fx_target(&self) -> bool {
+        self.kind().is_fx_target()
+    }
+    pub fn is_object(&self) -> bool {
+        self.kind().is_object()
+    }
+    pub fn is_projectile(&self) -> bool {
+        self.kind().is_projectile()
+    }
+    pub fn is_bonus(&self) -> bool {
+        self.kind().is_bonus()
+    }
+
+    /// Camp allegiance for fighter-camp-keyed iteration.  PCs are
+    /// always `Royalists`; Soldiers/Civilians read from their cached
+    /// camp.  Non-actor entities have no camp and return
+    /// `Camp::Error`.
+    pub fn camp(&self) -> Camp {
+        match self {
+            Self::Pc(_) => Camp::Royalists,
+            Self::Soldier(s) => s.soldier.cached_camp,
+            Self::Civilian(c) => c.civilian.cached_camp,
+            _ => Camp::Error,
+        }
+    }
+
+    /// Build a [`crate::gate::ActorAuthInfo`] for door/gate authorization checks.
+    ///
+    /// Extracts the kind, lock-bypass abilities, rider status and posture
+    /// from the entity.  For PCs the auth bit is `1 << profile_index`
+    /// and lockpick/climb availability comes from `disabled_actions`.
+    pub fn actor_auth_info(&self) -> crate::gate::ActorAuthInfo {
+        let kind = self.kind();
+        let posture = self.element_data().posture;
+
+        // PC-specific fields
+        let (pc_auth_bit, has_lockpick, has_climb, has_jump) = if let Some(pc) = self.pc_data() {
+            let auth_bit = 1u16 << u32::from(pc.profile_index).min(15);
+            (auth_bit, pc.has_lockpick, pc.has_climb, pc.has_jump)
+        } else {
+            (0, false, false, false)
+        };
+
+        let is_rider = self.soldier_data().map(|s| s.rider).unwrap_or(false);
+
+        crate::gate::ActorAuthInfo {
+            kind,
+            pc_auth_bit,
+            has_lockpick,
+            has_climb,
+            has_jump,
+            is_rider,
+            posture,
+        }
+    }
+
+    // — Virtual method equivalents with per-type dispatch —
+
+    pub fn is_immortal(&self) -> bool {
+        match self {
+            Self::Pc(e) => e.pc.immortal,
+            _ => false,
+        }
+    }
+
+    pub fn is_dead(&self) -> bool {
+        match self {
+            Self::Pc(e) => e.pc.life_points <= 0,
+            Self::Soldier(e) => e.npc.life_points <= 0,
+            Self::Civilian(e) => e.npc.life_points <= 0,
+            _ => true,
+        }
+    }
+
+    pub fn is_transporting(&self) -> bool {
+        match self {
+            Self::Pc(e) => e.element.posture == Posture::CarryingCorpse,
+            _ => false,
+        }
+    }
+
+    /// Door-transit half of "is inside a building": true while an
+    /// actor is in the middle of a pass-door animation, before its
+    /// sector pointer has been swapped to the inside-building sector.
+    pub fn is_in_door_transit(&self) -> bool {
+        !self.position_iface().get_door().is_null()
+    }
+
+    /// `IsInMotion` folded onto `Entity` so `&Entity` callers (e.g.
+    /// the right-click handler) don't need to downcast to a concrete
+    /// actor variant.  See [`Actor::is_in_motion`] for the semantic.
+    pub fn is_in_motion(&self) -> bool {
+        let pi = self.position_iface();
+        let goal = pi.get_position_goal_map();
+        let pos = pi.get_position_map();
+        (goal != pos && goal != crate::geo2d::Point2D::default()) || pi.is_moving_map()
+    }
+
+    // — Cross-module accessors —
+
+    /// Get the entity's sprite.
+    pub fn sprite(&self) -> &Sprite {
+        &self.element_data().sprite
+    }
+
+    /// Get a mutable reference to the entity's sprite.
+    pub fn sprite_mut(&mut self) -> &mut Sprite {
+        &mut self.element_data_mut().sprite
+    }
+
+    /// Get the entity's position interface. Every entity has one (it's
+    /// stored on the sprite).
+    pub fn position_iface(&self) -> &PositionInterface {
+        &self.element_data().sprite.position_iface
+    }
+
+    /// Get the entity's position interface mutably.
+    pub fn position_iface_mut(&mut self) -> &mut PositionInterface {
+        &mut self.element_data_mut().sprite.position_iface
+    }
+
+    /// 2D projection of the 3D position.  Returns `(map.x, map.y + z)`
+    /// where Z is the elevation from the entity's ground plane.
+    pub fn position_ground(&self) -> crate::geo2d::Point2D {
+        let map = self.element_data().position_map();
+        let z = self
+            .position_iface()
+            .get_plane()
+            .map(|plane| plane.compute_z(map.x, map.y))
+            .unwrap_or(0.0);
+        crate::geo2d::Point2D {
+            x: map.x,
+            y: map.y + z,
+        }
+    }
+
+    /// Get the NPC's base AI controller, if this is an NPC with AI.
+    pub fn ai_controller(&self) -> Option<&AiController> {
+        match self {
+            Self::Soldier(e) => e.npc.ai_brain.base(),
+            Self::Civilian(e) => e.npc.ai_brain.base(),
+            _ => None,
+        }
+    }
+
+    /// Get the NPC's base AI controller mutably.
+    pub fn ai_controller_mut(&mut self) -> Option<&mut AiController> {
+        match self {
+            Self::Soldier(e) => e.npc.ai_brain.base_mut(),
+            Self::Civilian(e) => e.npc.ai_brain.base_mut(),
+            _ => None,
+        }
+    }
+
+    /// Get the enemy AI subclass, if this is a soldier with enemy AI.
+    pub fn enemy_ai(&self) -> Option<&EnemyAi> {
+        match self {
+            Self::Soldier(e) => e.npc.ai_brain.enemy(),
+            _ => None,
+        }
+    }
+
+    /// Get the enemy AI subclass mutably.
+    pub fn enemy_ai_mut(&mut self) -> Option<&mut EnemyAi> {
+        match self {
+            Self::Soldier(e) => e.npc.ai_brain.enemy_mut(),
+            _ => None,
+        }
+    }
+
+    /// Get the friendly AI subclass, if this is a civilian with AI.
+    pub fn friendly_ai(&self) -> Option<&FriendlyAi> {
+        match self {
+            Self::Civilian(e) => e.npc.ai_brain.friendly(),
+            _ => None,
+        }
+    }
+
+    /// Get the friendly AI subclass mutably.
+    pub fn friendly_ai_mut(&mut self) -> Option<&mut FriendlyAi> {
+        match self {
+            Self::Civilian(e) => e.npc.ai_brain.friendly_mut(),
+            _ => None,
+        }
+    }
+
+    /// Compute the 3D eye point of a Human actor (PC / soldier / civilian).
+    ///
+    /// Used by the shadow polygon / view cone overlay: the overlay
+    /// only renders when `eye.z >= 0`, which filters out dead or
+    /// teleported-away characters.
+    ///
+    /// `override_posture`: if `Some`, use this posture instead of the
+    /// entity's current one.  Default (None) reads `element.posture`.
+    ///
+    /// Returns `None` for non-Human entities (FX, objects).
+    pub fn compute_eyes_point(&self, override_posture: Option<Posture>) -> Option<Point3D> {
+        // Only Human actors have posture-dependent eye offsets.
+        let (e, _) = match self {
+            Self::Pc(e) => (&e.element, true),
+            Self::Soldier(e) => (&e.element, true),
+            Self::Civilian(e) => (&e.element, true),
+            _ => return None,
+        };
+
+        // Rider flag — only mounted soldiers ride.
+        let is_rider = matches!(self, Self::Soldier(s) if s.soldier.rider);
+
+        // Emergency-lying-box halves crawling offsets.
+        let emergency_lying = self.position_iface().is_using_emergency_lying_box();
+
+        // The authoritative ground position lives in
+        // `element.position_map`; see `human_feet_point_3d`.
+        let mut eyes = self.human_feet_point_3d();
+        // `element.posture` is not initialised at entity load (only
+        // combat / ability code writes to it), so we treat
+        // `Undefined` as `Upright` here to match the normal human
+        // resting state.
+        let raw_posture = override_posture.unwrap_or(e.posture);
+        let posture = if raw_posture == Posture::Undefined {
+            Posture::Upright
+        } else {
+            raw_posture
+        };
+        let dir = (e.direction().rem_euclid(16)) as usize;
+
+        use Posture::*;
+        match posture {
+            HelpingToClimb | CarryingOnShoulders | Upright | OnLadder | OnWall | Flying
+            | CarryingCorpse | Leisure | Spy | AnonymousArcher | Siesta => {
+                eyes.z += if is_rider { 60.0 } else { 45.0 };
+            }
+            OnShoulders => {
+                eyes.z += 85.0;
+            }
+            Crouched | Sitting | SimulatingBeggar | Tree => {
+                eyes.z += 25.0;
+            }
+            Lying | Dead | DeadBack | StuckUnderNet | Tied => {
+                let scale = if emergency_lying { 0.5 } else { 1.0 };
+                eyes.x += scale * CRAWLING_OFFSETS_X[dir];
+                eyes.y += scale * CRAWLING_OFFSETS_Y[dir];
+                eyes.z += 5.0;
+            }
+            LeaningOut => {
+                // Bend forward by 40 units along the facing direction.
+                let (dx, dy) = direction_vector_16(e.direction());
+                eyes.x += dx * 40.0;
+                eyes.y += dy * 40.0;
+                eyes.z += 45.0;
+            }
+            // Carried / Unused / Undefined — return the feet position
+            // with a small offset so the overlay still works.
+            _ => {
+                eyes.z += 25.0;
+            }
+        }
+
+        Some(eyes)
+    }
+
+    /// Compute the detection point of a human actor.
+    ///
+    /// This is the *target side* 3D point used by NPC
+    /// `compute_visibility`.
+    ///
+    /// Differs from [`compute_eyes_point`]:
+    /// - Lying / Dead / DeadBack / StuckUnderNet / Tied: z+2, no
+    ///   `crawlingOffsets` lateral shift (eyes uses z+5 with shift).
+    /// - Carried: enumerated at z+25 (eyes asserts).
+    ///
+    /// Returns `None` for non-Human entities.
+    pub fn compute_detection_point(&self) -> Option<Point3D> {
+        let (e, _) = match self {
+            Self::Pc(e) => (&e.element, true),
+            Self::Soldier(e) => (&e.element, true),
+            Self::Civilian(e) => (&e.element, true),
+            _ => return None,
+        };
+
+        let is_rider = matches!(self, Self::Soldier(s) if s.soldier.rider);
+
+        let mut pt = self.human_feet_point_3d();
+        let raw_posture = e.posture;
+        let posture = if raw_posture == Posture::Undefined {
+            Posture::Upright
+        } else {
+            raw_posture
+        };
+
+        use Posture::*;
+        match posture {
+            Upright | Spy | Leisure | Siesta | CarryingCorpse | HelpingToClimb
+            | CarryingOnShoulders | AnonymousArcher | OnLadder | OnWall | Flying => {
+                pt.z += if is_rider { 60.0 } else { 45.0 };
+            }
+            LeaningOut => {
+                let (dx, dy) = direction_vector_16(e.direction());
+                pt.x += dx * 40.0;
+                pt.y += dy * 40.0;
+                pt.z += 45.0;
+            }
+            OnShoulders => {
+                pt.z += 85.0;
+            }
+            Crouched | Sitting | SimulatingBeggar | Tree | Carried => {
+                pt.z += 25.0;
+            }
+            Lying | Dead | DeadBack | StuckUnderNet | Tied => {
+                pt.z += 2.0;
+            }
+            // Unused / Undefined — mirror eyes-point's permissive
+            // fallback so callers don't crash on unset postures during
+            // entity load.
+            _ => {
+                pt.z += 25.0;
+            }
+        }
+
+        Some(pt)
+    }
+
+    /// Compute the position for star titbits above a human actor.
+    ///
+    /// Differs from [`compute_eyes_point`] for specific postures:
+    /// - **Dead/DeadBack**: offset 30 units along/against facing direction
+    /// - **Carried**: half-crawling offset, z+32
+    /// - **LeaningOut**: offset 10 units along facing direction
+    /// - **Rider**: offset -10 along direction, z+65
+    /// - **Default**: falls through to `compute_eyes_point`
+    ///
+    /// Returns `None` for non-Human entities.
+    pub fn compute_stars_point(&self) -> Option<Point3D> {
+        let (e, _) = match self {
+            Self::Pc(e) => (&e.element, true),
+            Self::Soldier(e) => (&e.element, true),
+            Self::Civilian(e) => (&e.element, true),
+            _ => return None,
+        };
+
+        // Live feet point — see note on `human_feet_point_3d`.
+        let base = self.human_feet_point_3d();
+
+        // Rider: offset backward from facing direction, high Z.
+        let is_rider = matches!(self, Self::Soldier(s) if s.soldier.rider);
+        if is_rider {
+            let (dx, dy) = direction_vector_16(e.direction());
+            return Some(Point3D {
+                x: base.x - dx * 10.0,
+                y: base.y - dy * 10.0,
+                z: base.z + 65.0,
+            });
+        }
+
+        use Posture::*;
+        match e.posture {
+            Lying | StuckUnderNet | Tied => {
+                //   pt_map = position_sprite + sprite_hotspot
+                //   pt_stars = (pt_map.x, pt_map.y + elev+5, elev+5)
+                // The sprite-position floor (`floor(position_map -
+                // sprite_center)`) is applied before the row hotspot
+                // is added, so the titbit anchor matches the rendered
+                // body.
+                //
+                // Y carries `elevation + 5` to match the codebase-wide
+                // iso-Y invariant (`y = map.y + z`) — same as every
+                // other arm built off `human_feet_point_3d`.
+                let sprite = self.sprite();
+                let map = self.element_data().position_map();
+                let center = sprite.center;
+                let hp = sprite.hotspot_for_row(sprite.current_row);
+                let elevation = base.z;
+                Some(Point3D {
+                    x: (map.x - center.x).floor() + hp.x,
+                    y: (map.y - center.y).floor() + hp.y + elevation + 5.0,
+                    z: elevation + 5.0,
+                })
+            }
+            Dead => {
+                // Head fell forward — offset 30 units along facing.
+                let (dx, dy) = direction_vector_16(e.direction());
+                Some(Point3D {
+                    x: base.x + dx * 30.0,
+                    y: base.y + dy * 30.0,
+                    z: base.z + 5.0,
+                })
+            }
+            DeadBack => {
+                // Fell backward — offset 30 units against facing.
+                let (dx, dy) = direction_vector_16(e.direction());
+                Some(Point3D {
+                    x: base.x - dx * 30.0,
+                    y: base.y - dy * 30.0,
+                    z: base.z + 5.0,
+                })
+            }
+            Carried => {
+                // Flip direction by 180° (`(dir + 8) & 15`) when the
+                // current animation is `BeingCarriedLittleJohn` or
+                // `BeingCarriedPeasantC`.  `Posture::Carried` is only
+                // set after the lift transition completes, so when
+                // posture is Carried the animation is always one of
+                // those two and we apply the flip unconditionally.
+                let flipped_dir = ((e.direction().wrapping_add(8)) & 15) as usize;
+                Some(Point3D {
+                    x: base.x + 0.5 * CRAWLING_OFFSETS_X[flipped_dir],
+                    y: base.y + 0.5 * CRAWLING_OFFSETS_Y[flipped_dir],
+                    z: base.z + 32.0,
+                })
+            }
+            LeaningOut => {
+                // Leaning forward out of a window — small forward offset.
+                let (dx, dy) = direction_vector_16(e.direction());
+                Some(Point3D {
+                    x: base.x + dx * 10.0,
+                    y: base.y + dy * 10.0,
+                    z: base.z + 45.0,
+                })
+            }
+            // All other postures use the general eyes point.
+            _ => self.compute_eyes_point(None),
+        }
+    }
+
+    /// Compute the belt point (centre of mass) of a human actor.
+    ///
+    /// Returns `None` for non-Human entities (FX, objects).
+    pub fn compute_belt_point(&self) -> Option<Point3D> {
+        let (e, _) = match self {
+            Self::Pc(e) => (&e.element, true),
+            Self::Soldier(e) => (&e.element, true),
+            Self::Civilian(e) => (&e.element, true),
+            _ => return None,
+        };
+
+        let is_rider = matches!(self, Self::Soldier(s) if s.soldier.rider);
+        let mut belt = self.human_feet_point_3d();
+        let posture = if e.posture == Posture::Undefined {
+            Posture::Upright
+        } else {
+            e.posture
+        };
+
+        use Posture::*;
+        match posture {
+            Upright | Spy | LeaningOut | Leisure | Siesta | CarryingCorpse | HelpingToClimb
+            | CarryingOnShoulders | AnonymousArcher | OnLadder | OnWall | Flying => {
+                belt.z += if is_rider {
+                    RIDER_ELEVATION_BELT_UPRIGHT
+                } else {
+                    HUMAN_ELEVATION_BELT_UPRIGHT
+                };
+            }
+            OnShoulders => belt.z += 65.0,
+            Carried => belt.z += 55.0,
+            Sitting | Crouched | SimulatingBeggar | Tree => belt.z += 10.0,
+            Lying | Dead | DeadBack | StuckUnderNet | Tied => belt.z += 5.0,
+            // Unknown postures get a safe fallback.
+            _ => belt.z += 10.0,
+        }
+
+        Some(belt)
+    }
+
+    /// Live base 3D feet point for a Human actor:
+    /// `(map.x, map.y + elevation, elevation)`.  Y carries the
+    /// elevation so the codebase-wide invariant
+    /// `position.y = map.y + position.z` (set in
+    /// `position_interface::position_3d_from_map`) holds for every
+    /// `compute_*_point` output.
+    fn human_feet_point_3d_with_elevation(e: &ElementData, elevation: f32) -> Point3D {
+        Point3D {
+            x: e.position_map().x,
+            y: e.position_map().y + elevation,
+            z: elevation,
+        }
+    }
+
+    /// Shorthand that reads elevation from the position interface.
+    fn human_feet_point_3d(&self) -> Point3D {
+        let elevation = self.position_iface().get_elevation();
+        Self::human_feet_point_3d_with_elevation(self.element_data(), elevation)
+    }
+
+    /// Compute the hand point of a human actor.
+    ///
+    /// Per-frame sprite hand-anchor for the current animation row,
+    /// with `+elevation` folded into Y.
+    ///
+    /// `forced_elevation`: when `Some(value)`, the Z is set to
+    /// `elevation + value` and the posture switch is skipped.
+    ///
+    /// Returns `None` for non-Human entities.
+    pub fn compute_hand_point(&self, forced_elevation: Option<f32>) -> Option<Point3D> {
+        let (e, _) = match self {
+            Self::Pc(e) => (&e.element, true),
+            Self::Soldier(e) => (&e.element, true),
+            Self::Civilian(e) => (&e.element, true),
+            _ => return None,
+        };
+
+        let is_rider = matches!(self, Self::Soldier(s) if s.soldier.rider);
+        // Seed X/Y from the per-frame sprite hotspot; fall back to
+        // the feet point if the sprite has no script bound (headless
+        // test).
+        let pi = self.position_iface();
+        let elevation = pi.get_elevation();
+        let mut hand = match self.sprite().current_hotspot() {
+            Some(hp) => {
+                let ps = pi.get_position_sprite();
+                Point3D {
+                    x: ps.x + hp.x,
+                    y: ps.y + hp.y + elevation,
+                    z: elevation,
+                }
+            }
+            None => self.human_feet_point_3d(),
+        };
+
+        // When `forced_elevation` is provided, skip the posture switch.
+        if let Some(fe) = forced_elevation {
+            hand.z = elevation + fe;
+            return Some(hand);
+        }
+
+        let posture = if e.posture == Posture::Undefined {
+            Posture::Upright
+        } else {
+            e.posture
+        };
+
+        use Posture::*;
+        match posture {
+            Upright | Spy | Leisure | Siesta | CarryingCorpse | HelpingToClimb
+            | CarryingOnShoulders | AnonymousArcher | OnLadder | OnWall | Flying => {
+                hand.z = elevation
+                    + if is_rider {
+                        45.0
+                    } else {
+                        HUMAN_ELEVATION_BELT_UPRIGHT
+                    };
+            }
+            LeaningOut => hand.z = elevation + 25.0,
+            OnShoulders => hand.z = elevation + 65.0,
+            Sitting | Crouched | SimulatingBeggar | Tree => hand.z = elevation + 10.0,
+            Lying | Dead | DeadBack | StuckUnderNet | Tied => hand.z = elevation + 5.0,
+            // Unknown postures get a safe fallback.
+            _ => hand.z = elevation + 10.0,
+        }
+
+        Some(hand)
+    }
+
+    /// Compute the hand point with explicit direction, animation, and posture.
+    ///
+    /// Used for throwing projectiles where the animation and facing
+    /// direction may differ from the entity's current state.
+    ///
+    /// Returns `None` for non-Human entities.
+    pub fn compute_hand_point_for_posture(
+        &self,
+        direction: i16,
+        animation: OrderType,
+        posture: Posture,
+    ) -> Option<Point3D> {
+        // Validate this is a human entity.
+        match self {
+            Self::Pc(_) | Self::Soldier(_) | Self::Civilian(_) => {}
+            _ => return None,
+        }
+
+        let is_rider = matches!(self, Self::Soldier(s) if s.soldier.rider);
+        // Seed X/Y from the sprite hotspot for the requested
+        // animation+direction (mirrors bow_shot::shoot_order_type_for_mode
+        // sprite lookup pattern).  Fall back to feet point if the lookup
+        // fails (e.g. unmapped animation).
+        let pi = self.position_iface();
+        let elevation = pi.get_elevation();
+        let mut hand = match self.sprite().get_point(animation, direction as u16) {
+            Some(hp) => {
+                let ps = pi.get_position_sprite();
+                Point3D {
+                    x: ps.x + hp.x,
+                    y: ps.y + hp.y + elevation,
+                    z: elevation,
+                }
+            }
+            None => self.human_feet_point_3d(),
+        };
+        let posture = if posture == Posture::Undefined {
+            Posture::Upright
+        } else {
+            posture
+        };
+
+        use Posture::*;
+        match posture {
+            Upright | Spy | Leisure | Siesta | CarryingCorpse | HelpingToClimb
+            | CarryingOnShoulders | AnonymousArcher | OnLadder | OnWall | Flying => {
+                hand.z = elevation
+                    + if is_rider {
+                        40.0
+                    } else {
+                        HUMAN_ELEVATION_BELT_UPRIGHT
+                    };
+            }
+            LeaningOut => hand.z = elevation + 25.0,
+            OnShoulders => hand.z = elevation + 65.0,
+            Sitting | Crouched | SimulatingBeggar | Tree => hand.z = elevation + 10.0,
+            Lying | Dead | DeadBack | StuckUnderNet | Tied => hand.z = elevation + 5.0,
+            _ => hand.z = elevation + 10.0,
+        }
+
+        Some(hand)
+    }
+
+    /// Compute the feet point of a human actor.
+    ///
+    /// Used by the Lock titbit kind to display at foot level.
+    ///
+    /// Returns `None` for non-Human entities.
+    pub fn compute_feet_point(&self) -> Option<Point3D> {
+        let (e, _) = match self {
+            Self::Pc(e) => (&e.element, true),
+            Self::Soldier(e) => (&e.element, true),
+            Self::Civilian(e) => (&e.element, true),
+            _ => return None,
+        };
+
+        let emergency_lying = self.position_iface().is_using_emergency_lying_box();
+
+        let mut feet = self.human_feet_point_3d();
+        let posture = if e.posture == Posture::Undefined {
+            Posture::Upright
+        } else {
+            e.posture
+        };
+
+        use Posture::*;
+        match posture {
+            // Standing postures: feet at ground level + 5.
+            Upright | Spy | LeaningOut | Leisure | Siesta | CarryingCorpse | HelpingToClimb
+            | CarryingOnShoulders | AnonymousArcher | OnLadder | OnWall | Flying => {
+                feet.z += 5.0;
+            }
+            // Crouching/sitting: same small offset.
+            Tree | Crouched | Sitting | SimulatingBeggar => {
+                feet.z += 5.0;
+            }
+            // On shoulders / carried: elevated.
+            OnShoulders | Carried => {
+                feet.z += 45.0;
+            }
+            // Lying/dead: feet displaced opposite to facing direction.
+            Lying | Dead | DeadBack | StuckUnderNet | Tied => {
+                let dir = (e.direction().rem_euclid(16)) as usize;
+                let scale = if emergency_lying { 0.5 } else { 1.0 };
+                feet.x -= scale * CRAWLING_OFFSETS_X[dir];
+                feet.y -= scale * CRAWLING_OFFSETS_Y[dir];
+                feet.z += 5.0;
+            }
+            _ => {
+                feet.z += 5.0;
+            }
+        }
+
+        Some(feet)
+    }
+
+    /// 3D centre point used as the projectile aim anchor for FX targets.
+    ///
+    /// Start from the element position and lift `z` by half the
+    /// sprite's screen-Y extent.  In this isometric projection
+    /// screen-Y and world-Z run along the same visual axis, so the
+    /// half-pixel-height add lands the centre roughly midway up the
+    /// sprite.
+    ///
+    /// Returns `None` for non-FX-target entities — those have their own
+    /// dedicated centre helpers (`compute_eyes_point`, `compute_hand_point`,
+    /// etc.) that the caller should reach for instead.
+    pub fn compute_target_center(&self) -> Option<Point3D> {
+        if !self.is_fx_target() {
+            return None;
+        }
+        let elem = self.element_data();
+        let half_h = elem.sprite.current_max_height() as f32 * 0.5;
+        Some(Point3D {
+            x: elem.position().x,
+            y: elem.position().y,
+            z: elem.position().z + half_h,
+        })
+    }
+
+    /// Get the AI top-level state for NPCs.
+    pub fn ai_state(&self) -> Option<AiTopState> {
+        match self {
+            Self::Soldier(e) => Some(e.npc.ai_state()),
+            Self::Civilian(e) => Some(e.npc.ai_state()),
+            _ => None,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Trait hierarchy
+// ═══════════════════════════════════════════════════════════════════
+
+/// Base trait for all game entities.
+pub trait Element {
+    fn element_data(&self) -> &ElementData;
+    fn element_data_mut(&mut self) -> &mut ElementData;
+
+    fn kind(&self) -> ElementKind {
+        self.element_data().kind
+    }
+    fn is_active(&self) -> bool {
+        self.element_data().active
+    }
+    fn is_blipped(&self) -> bool {
+        self.element_data().blipped
+    }
+    fn is_unreachable(&self) -> bool {
+        self.element_data().unreachable
+    }
+    #[must_use = "method returns Point3D by value; `elem.position().x = v` silently modifies a temporary. Use `set_position` to mutate."]
+    fn position(&self) -> Point3D {
+        self.element_data().position()
+    }
+    #[must_use = "method returns Point2D by value; `elem.position_map().x = v` silently modifies a temporary. Use `set_position_map` to mutate."]
+    fn position_map(&self) -> Point2D {
+        self.element_data().position_map()
+    }
+    #[must_use]
+    fn direction(&self) -> i16 {
+        self.element_data().direction()
+    }
+    fn posture(&self) -> Posture {
+        self.element_data().posture
+    }
+    /// Set posture through the corpse-transition guard.  Delegates to
+    /// [`ElementData::set_posture`].
+    fn set_posture(&mut self, p: Posture) {
+        self.element_data_mut().set_posture(p);
+    }
+    fn class_id(&self) -> u16 {
+        self.element_data().class_id
+    }
+    fn is_in_honolulu(&self) -> bool {
+        self.element_data().in_honolulu
+    }
+
+    // — Virtual methods with default impls —
+    fn is_immortal(&self) -> bool {
+        false
+    }
+    fn is_engine_locked(&self) -> bool {
+        false
+    }
+    fn is_transporting(&self) -> bool {
+        false
+    }
+    fn is_dead(&self) -> bool {
+        true
+    }
+    fn is_obviously_hostile(&self) -> bool {
+        false
+    }
+
+    /// Per-frame update tick. Returns false if the entity should be removed.
+    fn hourglass(&mut self) -> bool {
+        true
+    }
+}
+
+/// Trait for actor entities.
+pub trait Actor: Element {
+    fn actor_data(&self) -> &ActorData;
+    fn actor_data_mut(&mut self) -> &mut ActorData;
+
+    fn action_state(&self) -> ActionState {
+        self.actor_data().action_state
+    }
+    fn wait_time(&self) -> u32 {
+        self.actor_data().wait_time
+    }
+    fn is_execution_frozen(&self) -> bool {
+        self.actor_data().execution_frozen
+    }
+    fn is_prisoner(&self) -> bool {
+        let d = self.actor_data();
+        d.is_surrendering || d.is_about_to_surrender
+    }
+    fn is_tied(&self) -> bool {
+        self.posture() == Posture::Tied
+    }
+    /// `IsInMotion` folded into the base trait since every caller is
+    /// a PC/human and the human override strictly subsumes the actor
+    /// version.  Returns true if the sprite is translating toward a
+    /// non-zero goal OR has actually moved on the map between
+    /// frames.
+    fn is_in_motion(&self) -> bool {
+        let pi = &self.element_data().sprite.position_iface;
+        let goal = pi.get_position_goal_map();
+        let pos = pi.get_position_map();
+        (goal != pos && goal != crate::geo2d::Point2D::default()) || pi.is_moving_map()
+    }
+    fn is_ignored(&self) -> bool {
+        false
+    }
+}
+
+/// Trait for human actors.
+pub trait Human: Actor {
+    fn human_data(&self) -> &HumanData;
+    fn human_data_mut(&mut self) -> &mut HumanData;
+
+    /// Life point source — must be provided by each concrete type.
+    fn life_points(&self) -> i16;
+    fn max_life_points(&self) -> i16;
+    fn camp(&self) -> Camp;
+
+    fn is_unconscious(&self) -> bool {
+        self.human_data().unconscious
+    }
+    /// OR-combine `IsDead` / `IsUnconscious` / `IsStuckUnderNet` /
+    /// `posture == Tied` / `posture == Carried` /
+    /// `IsPC() && IsInComa()`.
+    ///
+    /// The `IsInComa` branch isn't reachable here because `in_coma`
+    /// lives on `Campaign` (`PcStatus`), not on `PcData` — callers
+    /// that need the coma arm must compose it externally (see
+    /// `ai_entity_view.rs` for the campaign-aware path).
+    fn is_out_of_order(&self) -> bool {
+        self.life_points() <= 0
+            || self.is_unconscious()
+            || self.is_stuck_under_net()
+            || matches!(self.posture(), Posture::Tied | Posture::Carried)
+    }
+    fn concussion(&self) -> u16 {
+        self.human_data().concussion_of_the_brain
+    }
+    fn is_invulnerable(&self) -> bool {
+        self.human_data().invulnerable
+    }
+    fn is_carried(&self) -> bool {
+        self.human_data().carrier.is_some()
+    }
+    fn is_stuck_under_net(&self) -> bool {
+        self.human_data().stuck_under_nets_counter > 0
+    }
+    fn is_hollow_man(&self) -> bool {
+        self.human_data().hollow_man
+    }
+    fn is_killed_by_accident(&self) -> bool {
+        self.human_data().killed_by_accident
+    }
+    fn is_holding_shield(&self) -> bool {
+        self.action_state().is_shield()
+    }
+    fn tiredness(&self) -> u16 {
+        self.human_data().tiredness
+    }
+    fn is_enemy_of(&self, other_camp: Camp) -> bool {
+        self.camp() != other_camp
+    }
+    fn enemy_camp(&self) -> Camp {
+        self.camp().enemy()
+    }
+    fn is_robin(&self) -> bool {
+        false
+    }
+    fn is_able_to_fight(&self) -> bool {
+        false
+    }
+    fn is_able_to_help(&self) -> bool {
+        false
+    }
+    fn fighting_ability(&self) -> u16 {
+        0
+    }
+    fn shooting_ability(&self) -> u16 {
+        0
+    }
+    fn endurance(&self) -> u16 {
+        0
+    }
+
+    /// Whether this human is a credible menacer of `prisoner_pos`.
+    ///
+    /// Gates on the current `action_state` being one of `Waiting` /
+    /// `AimingWithBow` / `Moving` / `MovingFast`, then dot-products
+    /// the prisoner offset against the menacer's facing direction
+    /// (positive = in front).
+    ///
+    /// No in-tree callers yet (this is vestigial); the body is
+    /// provided so the first caller gets the right behaviour rather
+    /// than the ad-hoc `true`/`false` defaults that used to live on
+    /// `Element`/`ActorSoldier`.
+    fn is_dangerous_as_menacer(&self, prisoner_pos: Point2D) -> bool {
+        match self.action_state() {
+            ActionState::Waiting
+            | ActionState::AimingWithBow
+            | ActionState::Moving
+            | ActionState::MovingFast => {}
+            _ => return false,
+        }
+        let here = self.position_map();
+        let dx = prisoner_pos.x - here.x;
+        let dy = prisoner_pos.y - here.y;
+        let (vx, vy) = crate::element_kinds::direction_vector_16(self.direction());
+        dx * vx + dy * vy > 0.0
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Trait implementations
+// ═══════════════════════════════════════════════════════════════════
+
+macro_rules! impl_element_data {
+    ($ty:ty) => {
+        impl crate::element::Element for $ty {
+            fn element_data(&self) -> &ElementData {
+                &self.element
+            }
+            fn element_data_mut(&mut self) -> &mut ElementData {
+                &mut self.element
+            }
+        }
+    };
+}
+
+macro_rules! impl_actor_data {
+    ($ty:ty) => {
+        impl crate::element::Actor for $ty {
+            fn actor_data(&self) -> &ActorData {
+                &self.actor
+            }
+            fn actor_data_mut(&mut self) -> &mut ActorData {
+                &mut self.actor
+            }
+        }
+    };
+}
+
+// -- Element trait for all concrete types --
+
+impl Element for ActorPc {
+    fn element_data(&self) -> &ElementData {
+        &self.element
+    }
+    fn element_data_mut(&mut self) -> &mut ElementData {
+        &mut self.element
+    }
+    fn is_immortal(&self) -> bool {
+        self.pc.immortal
+    }
+    fn is_transporting(&self) -> bool {
+        self.posture() == Posture::CarryingCorpse
+    }
+    fn is_dead(&self) -> bool {
+        self.pc.life_points <= 0
+    }
+    fn is_obviously_hostile(&self) -> bool {
+        true
+    }
+}
+
+impl Element for ActorSoldier {
+    fn element_data(&self) -> &ElementData {
+        &self.element
+    }
+    fn element_data_mut(&mut self) -> &mut ElementData {
+        &mut self.element
+    }
+    fn is_dead(&self) -> bool {
+        self.npc.life_points <= 0
+    }
+}
+
+impl Element for ActorCivilian {
+    fn element_data(&self) -> &ElementData {
+        &self.element
+    }
+    fn element_data_mut(&mut self) -> &mut ElementData {
+        &mut self.element
+    }
+    fn is_dead(&self) -> bool {
+        self.npc.life_points <= 0
+    }
+}
+
+impl_element_data!(ElementFx);
+impl_element_data!(ElementTarget);
+impl_element_data!(ElementBonus);
+impl_element_data!(ElementProjectile);
+impl_element_data!(ElementNet);
+
+// -- Actor trait for actor types --
+
+impl_actor_data!(ActorPc);
+impl_actor_data!(ActorSoldier);
+impl_actor_data!(ActorCivilian);
+
+// -- Human trait for human types --
+
+impl Human for ActorPc {
+    fn human_data(&self) -> &HumanData {
+        &self.human
+    }
+    fn human_data_mut(&mut self) -> &mut HumanData {
+        &mut self.human
+    }
+    fn life_points(&self) -> i16 {
+        self.pc.life_points
+    }
+    fn max_life_points(&self) -> i16 {
+        100
+    }
+    fn camp(&self) -> Camp {
+        Camp::Royalists
+    }
+    fn is_robin(&self) -> bool {
+        self.pc.robin
+    }
+    /// Guards on dead/unconscious/inactive, then returns false for
+    /// disguised postures (`Tree`, `Spy`).
+    fn is_able_to_fight(&self) -> bool {
+        if self.pc.life_points <= 0 || self.is_unconscious() || !self.is_active() {
+            return false;
+        }
+        !matches!(self.posture(), Posture::Tree | Posture::Spy)
+    }
+}
+
+impl Human for ActorSoldier {
+    fn human_data(&self) -> &HumanData {
+        &self.human
+    }
+    fn human_data_mut(&mut self) -> &mut HumanData {
+        &mut self.human
+    }
+    fn life_points(&self) -> i16 {
+        self.npc.life_points
+    }
+    fn max_life_points(&self) -> i16 {
+        if self.soldier.cached_camp == Camp::Lacklandists {
+            let diff = crate::player_profile::DifficultyLevel::current();
+            diff.modify_capacity(
+                self.soldier.cached_max_life_points as u16,
+                crate::player_profile::difficulty_params::EASY_ENEMY_LIFEPOINTS,
+                crate::player_profile::difficulty_params::HARD_ENEMY_LIFEPOINTS,
+                10000,
+            ) as i16
+        } else {
+            self.soldier.cached_max_life_points
+        }
+    }
+    fn camp(&self) -> Camp {
+        self.soldier.cached_camp
+    }
+    /// Two layers: an early-false block (dead / unconscious / tied /
+    /// carried / inactive), then a state-machine switch where
+    /// `Sleeping`, `Menacing`, `Fleeing`, and the three hit-stun
+    /// `Attacking` substates all return false.
+    fn is_able_to_fight(&self) -> bool {
+        if self.npc.life_points <= 0
+            || self.is_unconscious()
+            || self.is_tied()
+            || self.is_carried()
+            || !self.is_active()
+        {
+            return false;
+        }
+        match self.npc.ai_state() {
+            AiTopState::Sleeping | AiTopState::Menacing | AiTopState::Fleeing => false,
+            AiTopState::Default | AiTopState::Wondering | AiTopState::Seeking => true,
+            AiTopState::Attacking => !matches!(
+                self.npc.ai_substate(),
+                AiSubstate::AttackingGotHit
+                    | AiSubstate::AttackingGotHitStandingUp
+                    | AiSubstate::AttackingHitting,
+            ),
+        }
+    }
+    /// Reject dead/unconscious, then state-machine:
+    /// Default/Wondering → true; Seeking restricted to officer-report
+    /// and reaction-time substates; Sleeping/Menacing/Fleeing/Attacking
+    /// → false. Note: unlike `is_able_to_fight`, this predicate does
+    /// NOT gate on tied/carried/inactive.
+    fn is_able_to_help(&self) -> bool {
+        if self.npc.life_points <= 0 || self.is_unconscious() {
+            return false;
+        }
+        match self.npc.ai_state() {
+            AiTopState::Default | AiTopState::Wondering => true,
+            AiTopState::Seeking => matches!(
+                self.npc.ai_substate(),
+                AiSubstate::SeekingSoldierGiveReportToOfficer
+                    | AiSubstate::SeekingSoldierGiveAlertingReportToOfficerStart
+                    | AiSubstate::SeekingSoldierGiveAlertingReportToOfficerPoint
+                    | AiSubstate::SeekingSoldierGiveAlertingReportToOfficerEnd
+                    | AiSubstate::SeekingRunningToOfficer
+                    | AiSubstate::SeekingRunningToOfficerSeen
+                    | AiSubstate::SeekingHeardstepsReactiontime
+                    | AiSubstate::SeekingBodyReactiontime
+            ),
+            AiTopState::Sleeping
+            | AiTopState::Menacing
+            | AiTopState::Fleeing
+            | AiTopState::Attacking => false,
+        }
+    }
+}
+
+impl Human for ActorCivilian {
+    fn human_data(&self) -> &HumanData {
+        &self.human
+    }
+    fn human_data_mut(&mut self) -> &mut HumanData {
+        &mut self.human
+    }
+    fn life_points(&self) -> i16 {
+        self.npc.life_points
+    }
+    fn max_life_points(&self) -> i16 {
+        100
+    } // civilians always 100
+    fn camp(&self) -> Camp {
+        self.civilian.cached_camp
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Concrete-type convenience methods
+// ═══════════════════════════════════════════════════════════════════
+
+impl ActorPc {
+    pub fn current_action(&self) -> Action {
+        self.pc.current_action
+    }
+    pub fn is_head_seen(&self) -> bool {
+        self.pc.head_seen
+    }
+    pub fn is_belt_seen(&self) -> bool {
+        self.pc.belt_seen
+    }
+    pub fn is_feet_seen(&self) -> bool {
+        self.pc.feet_seen
+    }
+    pub fn work_icon(&self) -> WorkIcon {
+        self.pc.work_icon
+    }
+    pub fn is_carrying(&self) -> bool {
+        self.pc.carried.is_some()
+    }
+}
+
+impl ActorSoldier {
+    pub fn is_smelling_apple(&self) -> bool {
+        self.soldier.apple_smell != 0
+    }
+
+    /// True when the soldier is in an observing attack substate
+    /// (Observe / ObserveAndMove / LastReserve).  Non-Soldier entities
+    /// should be treated as false.
+    pub fn is_soldier_observing_swordfight(&self) -> bool {
+        matches!(
+            self.npc.ai_substate(),
+            AiSubstate::AttackingObserve
+                | AiSubstate::AttackingObserveAndMove
+                | AiSubstate::AttackingLastReserve
+        )
+    }
+}
+
+impl ElementBonus {
+    pub fn is_relic(&self) -> bool {
+        matches!(
+            self.object.object_type,
+            ObjectType::BonusAmpulla
+                | ObjectType::BonusCoronationSpoon
+                | ObjectType::BonusRichardsCrown
+                | ObjectType::BonusRoyalSeal
+                | ObjectType::BonusRoyalSceptre
+                | ObjectType::BonusDomesdayBook
+                | ObjectType::BonusSwordOfTheState
+        )
+    }
+
+    /// Whether this bonus item can be picked up by a PC.
+    pub fn is_takable(&self) -> bool {
+        !self.object.taken && self.element.active && !self.is_relic()
+    }
+
+    /// The action type associated with this bonus item.
+    pub fn associated_action(&self) -> Action {
+        self.object.associated_action
+    }
+}
+
+// ─── BonusItemType / ObjectType → Action bridges ──────────────────
+//
+// The enums live in `robin_engine::element_kinds`; inherent impls here
+// would violate the orphan rule, and they can't be in the engine crate
+// because `Action` is in `crate::profiles`. Extension traits bridge it.
+
+pub trait BonusItemTypeExt {
+    fn to_action(self) -> Action;
+}
+
+impl BonusItemTypeExt for BonusItemType {
+    fn to_action(self) -> Action {
+        match self {
+            Self::Arrow => Action::Bow,
+            Self::Stone => Action::Stone,
+            Self::Apple => Action::Apple,
+            Self::Ale => Action::Ale,
+            Self::Lamb => Action::Eat,
+            Self::Plant => Action::Heal,
+            Self::Net => Action::Net,
+            Self::WaspNest => Action::WaspNest,
+            Self::Purse => Action::Purse,
+            Self::Ransom
+            | Self::Amulet
+            | Self::Blazon
+            | Self::Ampulla
+            | Self::CoronationSpoon
+            | Self::RichardsCrown
+            | Self::RoyalSeal
+            | Self::RoyalSceptre
+            | Self::DomesdayBook
+            | Self::SwordOfTheState => Action::NoAction,
+        }
+    }
+}
+
+pub trait ObjectTypeExt {
+    fn to_action(self) -> Action;
+}
+
+impl ObjectTypeExt for ObjectType {
+    fn to_action(self) -> Action {
+        match self {
+            Self::Arrow | Self::BonusArrow => Action::Bow,
+            Self::Stone | Self::BonusStone => Action::Stone,
+            Self::Apple | Self::BonusApple => Action::Apple,
+            Self::Ale | Self::BonusAle => Action::Ale,
+            Self::BonusLambLeg => Action::Eat,
+            Self::BonusPlants => Action::Heal,
+            Self::Net | Self::BonusNet => Action::Net,
+            Self::WaspNest | Self::BonusWaspNest => Action::WaspNest,
+            Self::Purse | Self::BonusPurse => Action::Purse,
+            _ => Action::NoAction,
+        }
+    }
+}
+
+impl ElementProjectile {
+    pub fn is_flying(&self) -> bool {
+        self.projectile.flying
+    }
+    pub fn shooter(&self) -> Option<EntityId> {
+        self.projectile.shooter
+    }
+
+    /// Advance the projectile by one trajectory frame: pop the next
+    /// waypoint when the current segment timer expires, then apply the
+    /// per-frame velocity increment to the position / map / direction.
+    ///
+    /// Returns `true` when the trajectory was exhausted on this call
+    /// (the caller is responsible for the resulting impact handling —
+    /// e.g. arrow despawn, coin landing, purse burst).  When the
+    /// trajectory is exhausted the `flying` flag is cleared.
+    ///
+    /// The bow-shot tick already inlines this for arrows; the helper
+    /// exists so the purse / coin path can call into the same logic
+    /// (the coin `HitObstacle` runs `Hourglass` once before
+    /// registration).
+    pub fn advance_trajectory_one_frame(&mut self) -> bool {
+        advance_trajectory_one_frame(&mut self.element, &mut self.projectile)
+    }
+}
+
+/// Free-function form of [`ElementProjectile::advance_trajectory_one_frame`]
+/// so [`ElementNet`] (which has the same `element` + `projectile` fields plus
+/// extra net state) can share the same step-one-trajectory-waypoint logic.
+pub fn advance_trajectory_one_frame(
+    element: &mut ElementData,
+    projectile: &mut ProjectileData,
+) -> bool {
+    if projectile.trajectory_frame_count == 0 {
+        if projectile.trajectory.is_empty() {
+            projectile.flying = false;
+            return true;
+        }
+        let point = projectile.trajectory.remove(0);
+        let time = point.time.max(1);
+        projectile.trajectory_frame_count = time - 1;
+        let current = element.position();
+        let factor = 1.0 / time as f32;
+        projectile.velocity_increment = Point3D {
+            x: (point.position.x - current.x) * factor,
+            y: (point.position.y - current.y) * factor,
+            z: (point.position.z - current.z) * factor,
+        };
+        projectile.end = point.position;
+    } else {
+        projectile.trajectory_frame_count -= 1;
+    }
+
+    let mut p = element.position();
+    p.x += projectile.velocity_increment.x;
+    p.y += projectile.velocity_increment.y;
+    p.z += projectile.velocity_increment.z;
+    element.set_position(p);
+    element.set_position_map(Point2D {
+        x: p.x,
+        y: p.y - p.z,
+    });
+    let vx = projectile.velocity_increment.x;
+    let vy = projectile.velocity_increment.y;
+    if vx != 0.0 || vy != 0.0 {
+        // Flight direction uses the iso-aspect 0..15 sector.
+        element.set_direction_instantly(crate::position_interface::vector_to_sector_0_to_15_iso(
+            vx, vy,
+        ));
+        projectile.flight_direction = element.direction() as u16;
+    }
+
+    projectile.frame_count = projectile.frame_count.saturating_add(1);
+    false
+}
+
+impl ElementNet {
+    pub fn is_crumpled(&self) -> bool {
+        self.net.crumpled
+    }
+    pub fn has_victim(&self, id: EntityId) -> bool {
+        self.net.victims.contains(&id)
+    }
+
+    /// Step the net's ballistic trajectory one frame.  Shares the same
+    /// logic as [`ElementProjectile::advance_trajectory_one_frame`].
+    pub fn advance_trajectory_one_frame(&mut self) -> bool {
+        advance_trajectory_one_frame(&mut self.element, &mut self.projectile)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn element_kind_type_checks() {
+        assert!(ElementKind::ActorPc.is_actor());
+        assert!(ElementKind::ActorPc.is_human());
+        assert!(ElementKind::ActorPc.is_pc());
+        assert!(!ElementKind::ActorPc.is_npc());
+
+        assert!(ElementKind::ActorSoldier.is_actor());
+        assert!(ElementKind::ActorSoldier.is_human());
+        assert!(ElementKind::ActorSoldier.is_npc());
+        assert!(ElementKind::ActorSoldier.is_soldier());
+        assert!(!ElementKind::ActorSoldier.is_civilian());
+
+        assert!(ElementKind::ActorCivilian.is_civilian());
+        assert!(ElementKind::ActorCivilian.is_npc());
+
+        assert!(ElementKind::Fx.is_fx());
+        assert!(ElementKind::Target.is_fx());
+        assert!(!ElementKind::Fx.is_actor());
+
+        assert!(ElementKind::ObjectBonus.is_object());
+        assert!(ElementKind::ObjectBonus.is_bonus());
+        assert!(ElementKind::ObjectProjectile.is_projectile());
+        assert!(ElementKind::ObjectNet.is_projectile());
+    }
+
+    #[test]
+    fn posture_checks() {
+        assert!(Posture::Dead.is_dead());
+        assert!(Posture::DeadBack.is_dead());
+        assert!(!Posture::Upright.is_dead());
+
+        assert!(Posture::Lying.is_lying());
+        assert!(Posture::Tied.is_lying());
+        assert!(!Posture::Upright.is_lying());
+    }
+
+    #[test]
+    fn inactive_script_level_objects_survive_hourglass() {
+        let mut bonus = Entity::Bonus(ElementBonus {
+            element: ElementData {
+                kind: ElementKind::ObjectBonus,
+                active: false,
+                ..ElementData::default()
+            },
+            object: ObjectData::default(),
+        });
+        assert!(bonus.hourglass());
+
+        let mut projectile = Entity::Projectile(ElementProjectile {
+            element: ElementData {
+                kind: ElementKind::ObjectProjectile,
+                active: false,
+                ..ElementData::default()
+            },
+            object: ObjectData::default(),
+            projectile: ProjectileData::default(),
+        });
+        assert!(!projectile.hourglass());
+    }
+
+    /// Corpse-transition guard: a dead corpse can only flip to
+    /// `Carried`; every other posture write on a `Dead` / `DeadBack`
+    /// sprite is silently dropped.
+    #[test]
+    fn set_posture_undead_guard() {
+        // Alive → any posture is applied normally.
+        let mut elem = ElementData {
+            posture: Posture::Upright,
+            ..Default::default()
+        };
+        elem.set_posture(Posture::Lying);
+        assert_eq!(elem.posture, Posture::Lying);
+        elem.set_posture(Posture::Crouched);
+        assert_eq!(elem.posture, Posture::Crouched);
+
+        // Dead + non-Carried → silently dropped (no undead!).
+        let mut dead = ElementData {
+            posture: Posture::Dead,
+            ..Default::default()
+        };
+        dead.set_posture(Posture::Upright);
+        assert_eq!(
+            dead.posture,
+            Posture::Dead,
+            "stun on corpse must not revive"
+        );
+        dead.set_posture(Posture::Lying);
+        assert_eq!(dead.posture, Posture::Dead);
+        dead.set_posture(Posture::Crouched);
+        assert_eq!(dead.posture, Posture::Dead);
+
+        // Dead + Carried → allowed (pickup corpse).
+        dead.set_posture(Posture::Carried);
+        assert_eq!(dead.posture, Posture::Carried);
+
+        // Same semantics for DeadBack.
+        let mut dead_back = ElementData {
+            posture: Posture::DeadBack,
+            ..Default::default()
+        };
+        dead_back.set_posture(Posture::Upright);
+        assert_eq!(dead_back.posture, Posture::DeadBack);
+        dead_back.set_posture(Posture::Carried);
+        assert_eq!(dead_back.posture, Posture::Carried);
+
+        // Once flipped to Carried the entity is no longer "dead
+        // posture", so normal writes apply again — Carried lifts the
+        // lock.
+        dead_back.set_posture(Posture::Dead);
+        assert_eq!(dead_back.posture, Posture::Dead);
+    }
+
+    #[test]
+    fn entity_set_posture_updates_authoritative_posture() {
+        let mut entity = Entity::Soldier(ActorSoldier {
+            element: ElementData {
+                posture: Posture::Upright,
+                ..Default::default()
+            },
+            actor: ActorData::default(),
+            human: HumanData::default(),
+            npc: NpcData::default(),
+            soldier: SoldierData::default(),
+        });
+
+        entity.set_posture(Posture::Crouched);
+
+        assert_eq!(entity.element_data().posture, Posture::Crouched);
+        assert_eq!(entity.posture(), Posture::Crouched);
+
+        entity.set_posture(Posture::Dead);
+        entity.set_posture(Posture::Upright);
+
+        assert_eq!(entity.element_data().posture, Posture::Dead);
+        assert_eq!(entity.posture(), Posture::Dead);
+    }
+
+    #[test]
+    fn posture_allows_transition_to() {
+        // Non-dead → any.
+        assert!(Posture::Upright.allows_transition_to(Posture::Lying));
+        assert!(Posture::Lying.allows_transition_to(Posture::Upright));
+        assert!(Posture::Crouched.allows_transition_to(Posture::Dead));
+        // Dead → Carried only.
+        assert!(Posture::Dead.allows_transition_to(Posture::Carried));
+        assert!(Posture::DeadBack.allows_transition_to(Posture::Carried));
+        assert!(!Posture::Dead.allows_transition_to(Posture::Upright));
+        assert!(!Posture::Dead.allows_transition_to(Posture::Lying));
+        assert!(!Posture::DeadBack.allows_transition_to(Posture::Dead));
+    }
+
+    #[test]
+    fn action_state_groups() {
+        assert!(ActionState::Moving.is_moving());
+        assert!(ActionState::MovingFast.is_moving());
+        assert!(!ActionState::Waiting.is_moving());
+
+        assert!(ActionState::AimingWithBow.is_bow());
+        assert!(ActionState::AimingWithBowUp.is_bow());
+        assert!(!ActionState::Waiting.is_bow());
+
+        assert!(ActionState::WaitingSword.is_sword());
+        assert!(ActionState::ParryingSwordLow.is_sword());
+        assert!(!ActionState::Waiting.is_sword());
+
+        assert!(ActionState::HoldingShield.is_shield());
+        assert!(ActionState::ParryingShield.is_shield());
+        assert!(ActionState::MovingShield.is_shield());
+    }
+
+    #[test]
+    fn camp_enemy() {
+        assert_eq!(Camp::Royalists.enemy(), Camp::Lacklandists);
+        assert_eq!(Camp::Lacklandists.enemy(), Camp::Royalists);
+    }
+
+    #[test]
+    fn command_swordstrike() {
+        assert!(Command::SwordstrikeThrustA.is_swordstrike());
+        assert!(Command::SwordstrikeThrustI.is_swordstrike());
+        assert!(!Command::Move.is_swordstrike());
+        assert!(!Command::SwordstrikeTired.is_swordstrike());
+    }
+
+    #[test]
+    fn entity_serde_roundtrip() {
+        let pc = ActorPc {
+            element: ElementData {
+                kind: ElementKind::ActorPc,
+                ..ElementData::default()
+            },
+            actor: ActorData::default(),
+            human: HumanData::default(),
+            pc: PcData::default(),
+        };
+
+        let entity = Entity::Pc(pc);
+        let json = serde_json::to_string(&entity).unwrap();
+        let back: Entity = serde_json::from_str(&json).unwrap();
+
+        assert!(back.is_pc());
+        assert!(back.is_actor());
+        assert!(back.is_human());
+        assert!(!back.is_npc());
+    }
+
+    #[test]
+    fn entity_sub_data_accessors() {
+        let soldier = Entity::Soldier(ActorSoldier {
+            element: ElementData {
+                kind: ElementKind::ActorSoldier,
+                active: true,
+                ..ElementData::default()
+            },
+            actor: ActorData::default(),
+            human: HumanData::default(),
+            npc: NpcData {
+                life_points: 75,
+                ..NpcData::default()
+            },
+            soldier: SoldierData::default(),
+        });
+
+        assert!(soldier.element_data().active);
+        assert!(soldier.actor_data().is_some());
+        assert!(soldier.human_data().is_some());
+        assert!(soldier.npc_data().is_some());
+        assert!(soldier.object_data().is_none());
+    }
+
+    #[test]
+    fn entity_is_dead_dispatch() {
+        let alive = Entity::Soldier(ActorSoldier {
+            element: ElementData {
+                kind: ElementKind::ActorSoldier,
+                ..ElementData::default()
+            },
+            actor: ActorData::default(),
+            human: HumanData::default(),
+            npc: NpcData {
+                life_points: 50,
+                ..NpcData::default()
+            },
+            soldier: SoldierData::default(),
+        });
+        assert!(!alive.is_dead());
+
+        let dead = Entity::Soldier(ActorSoldier {
+            element: ElementData {
+                kind: ElementKind::ActorSoldier,
+                ..ElementData::default()
+            },
+            actor: ActorData::default(),
+            human: HumanData::default(),
+            npc: NpcData {
+                life_points: 0,
+                ..NpcData::default()
+            },
+            soldier: SoldierData::default(),
+        });
+        assert!(dead.is_dead());
+
+        // Non-actors default to dead = true
+        let fx = Entity::Fx(ElementFx {
+            element: ElementData {
+                kind: ElementKind::Fx,
+                ..ElementData::default()
+            },
+            fx: FxData::default(),
+        });
+        assert!(fx.is_dead());
+    }
+
+    #[test]
+    fn bonus_is_relic() {
+        let mut bonus = ElementBonus {
+            element: ElementData {
+                kind: ElementKind::ObjectBonus,
+                ..ElementData::default()
+            },
+            object: ObjectData {
+                object_type: ObjectType::BonusRichardsCrown,
+                ..ObjectData::default()
+            },
+        };
+        assert!(bonus.is_relic());
+
+        bonus.object.object_type = ObjectType::BonusArrow;
+        assert!(!bonus.is_relic());
+    }
+
+    #[test]
+    fn trait_human_on_soldier() {
+        let s = ActorSoldier {
+            element: ElementData {
+                kind: ElementKind::ActorSoldier,
+                active: true,
+                ..ElementData::default()
+            },
+            actor: ActorData::default(),
+            human: HumanData::default(),
+            npc: NpcData {
+                life_points: 50,
+                ..NpcData::default()
+            },
+            soldier: SoldierData {
+                cached_max_life_points: 80,
+                cached_camp: Camp::Lacklandists,
+                ..SoldierData::default()
+            },
+        };
+
+        assert_eq!(Human::life_points(&s), 50);
+        assert!(!s.is_out_of_order());
+        assert_eq!(s.camp(), Camp::Lacklandists);
+        assert!(s.is_enemy_of(Camp::Royalists));
+        assert!(s.is_able_to_fight());
+    }
+
+    #[test]
+    fn trait_human_dead_soldier() {
+        let s = ActorSoldier {
+            element: ElementData {
+                kind: ElementKind::ActorSoldier,
+                ..ElementData::default()
+            },
+            actor: ActorData::default(),
+            human: HumanData::default(),
+            npc: NpcData {
+                life_points: 0,
+                ..NpcData::default()
+            },
+            soldier: SoldierData::default(),
+        };
+
+        assert!(Element::is_dead(&s));
+        assert!(s.is_out_of_order());
+        assert!(!s.is_able_to_fight());
+    }
+
+    #[test]
+    fn trait_pc_immortal() {
+        let pc = ActorPc {
+            element: ElementData {
+                kind: ElementKind::ActorPc,
+                ..ElementData::default()
+            },
+            actor: ActorData::default(),
+            human: HumanData::default(),
+            pc: PcData {
+                immortal: true,
+                ..PcData::default()
+            },
+        };
+
+        assert!(Element::is_immortal(&pc));
+        assert!(!pc.is_robin()); // robin defaults to false
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Cross-module integration tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn entity_sprite_reference() {
+        use crate::sprite::Sprite;
+
+        let mut entity = Entity::Fx(ElementFx {
+            element: ElementData {
+                kind: ElementKind::Fx,
+                ..ElementData::default()
+            },
+            fx: FxData::default(),
+        });
+
+        // Every entity carries a sprite by default (non-Option).
+        assert_eq!(entity.sprite().current_frame, 0);
+
+        // Re-attach a fresh sprite.
+        entity.element_data_mut().sprite = Sprite::default();
+        assert_eq!(entity.sprite().current_frame, 0);
+    }
+
+    #[test]
+    fn entity_grid_cell_tracking() {
+        let mut data = ElementData {
+            kind: ElementKind::ActorPc,
+            ..ElementData::default()
+        };
+        data.set_position_map(Point2D { x: 200.0, y: 300.0 });
+
+        data.update_grid_cell();
+        // 200/64 = 3, 300/64 = 4
+        assert_eq!(data.grid_cell, Some((3, 4)));
+    }
+
+    #[test]
+    fn entity_position_map_geo_conversion() {
+        let mut data = ElementData {
+            kind: ElementKind::ActorSoldier,
+            ..ElementData::default()
+        };
+        data.set_position_map(Point2D { x: 42.5, y: 99.0 });
+
+        let geo_pt = data.position_map_geo();
+        assert!((geo_pt.x - 42.5).abs() < 1e-6);
+        assert!((geo_pt.y - 99.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lying_stars_point_uses_floored_sprite_top_left_plus_hotspot() {
+        use crate::sprite::Sprite;
+        use crate::sprite_script::SpriteScript;
+        use std::sync::Arc;
+
+        let mut sprite = Sprite {
+            center: crate::geo2d::pt(30.0, 70.0),
+            scripts: Arc::new(vec![SpriteScript {
+                hotspot: crate::geo2d::pt(46.0, 18.0),
+                ..SpriteScript::default()
+            }]),
+            ..Sprite::default()
+        };
+        sprite.current_row = 0;
+
+        let mut element = ElementData {
+            kind: ElementKind::ActorSoldier,
+            posture: Posture::Lying,
+            sprite,
+            ..ElementData::default()
+        };
+        element.set_position_map(Point2D {
+            x: 200.75,
+            y: 300.75,
+        });
+
+        let entity = Entity::Soldier(ActorSoldier {
+            element,
+            actor: ActorData::default(),
+            human: HumanData::default(),
+            npc: NpcData::default(),
+            soldier: SoldierData::default(),
+        });
+
+        let stars = entity.compute_stars_point().unwrap();
+
+        assert_eq!(stars.x, 216.0);
+        assert_eq!(stars.y - stars.z, 248.0);
+        assert_eq!(stars.z, 5.0);
+    }
+
+    // `actor_pathfinder_waypoints` deleted — the waypoint state it
+    // covered (ActorData::path_waypoints / path_waypoint_index,
+    // set_path, next_waypoint, advance_waypoint, has_path) moved to
+    // the active Move element's order queue during the order-queue
+    // refactor.  Integration-level coverage now lives in the
+    // movement tick tests.
+
+    #[test]
+    fn npc_ai_controller_reference() {
+        use crate::ai::AiState;
+        use crate::ai_enemy::EnemyAi;
+
+        let entity_id = EntityId(42);
+        let mut enemy_ai = EnemyAi::new(7);
+        enemy_ai.base.owner_entity_id = Some(entity_id);
+        assert_eq!(enemy_ai.base.me, 7);
+        assert_eq!(enemy_ai.base.owner_entity_id, Some(entity_id));
+        assert_eq!(enemy_ai.base.current_state, AiState::Default);
+
+        let mut soldier = ActorSoldier {
+            element: ElementData {
+                kind: ElementKind::ActorSoldier,
+                ..ElementData::default()
+            },
+            actor: ActorData::default(),
+            human: HumanData::default(),
+            npc: NpcData::default(),
+            soldier: SoldierData::default(),
+        };
+
+        // Attach AI brain
+        enemy_ai.base.current_state = AiTopState::Attacking;
+        enemy_ai.base.current_substate = AiSubstate::AttackingSwordfight;
+        soldier.npc.ai_brain = AiBrain::Enemy(Box::new(enemy_ai));
+
+        // Access via Entity enum
+        let entity = Entity::Soldier(soldier);
+        assert_eq!(entity.ai_state(), Some(AiTopState::Attacking));
+
+        let ai_ref = entity.ai_controller().unwrap();
+        assert_eq!(ai_ref.owner_entity_id, Some(entity_id));
+
+        // Can also access the enemy-specific subclass
+        assert!(entity.enemy_ai().is_some());
+    }
+
+    #[test]
+    fn entity_cross_module_serde_roundtrip() {
+        use crate::ai_enemy::EnemyAi;
+
+        // Verify that entities with the new fields still serialize/deserialize.
+        let mut enemy_ai = EnemyAi::new(0);
+        enemy_ai.base.current_state = AiTopState::Seeking;
+        let soldier = Entity::Soldier(ActorSoldier {
+            element: ElementData {
+                kind: ElementKind::ActorSoldier,
+                ..ElementData::default()
+            },
+            actor: ActorData {
+                pathfinder_speed: PathFinderSpeed::Fast,
+                ..ActorData::default()
+            },
+            human: HumanData::default(),
+            npc: NpcData {
+                ai_brain: AiBrain::Enemy(Box::new(enemy_ai)),
+                ..NpcData::default()
+            },
+            soldier: SoldierData::default(),
+        });
+
+        let json = serde_json::to_string(&soldier).unwrap();
+        let back: Entity = serde_json::from_str(&json).unwrap();
+
+        assert!(back.is_soldier());
+        assert_eq!(back.ai_state(), Some(AiTopState::Seeking));
+        // Sprite is now serialised (no serde-skip), so it survives round-trip.
+        assert_eq!(back.sprite().current_frame, 0);
+    }
+
+    #[test]
+    fn entity_position_iface_accessor() {
+        let pc = Entity::Pc(ActorPc {
+            element: ElementData {
+                kind: ElementKind::ActorPc,
+                ..ElementData::default()
+            },
+            actor: ActorData::default(),
+            human: HumanData::default(),
+            pc: PcData::default(),
+        });
+
+        // PI now always exists (it lives on every sprite).
+        assert_eq!(
+            pc.position_iface().get_direction(),
+            crate::position_interface::Direction::NORTH
+        );
+    }
+}

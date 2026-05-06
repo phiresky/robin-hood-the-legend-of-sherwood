@@ -1,0 +1,56 @@
+#!/bin/bash
+set -e
+
+base="main"
+worktree_dir=".claude/worktrees"
+
+if [ -e "$(git rev-parse --git-dir)/MERGE_HEAD" ]; then
+    echo "A merge is already in progress. Resolve or abort it before running this script."
+    exit 1
+fi
+
+if [ ! -d "$worktree_dir" ]; then
+    echo "No worktrees directory found."
+    exit 0
+fi
+
+merged=0
+skipped=0
+failed=0
+failed_list=""
+
+for branch in $(git branch --list 'worktree-*' | sed 's/^[+ ]*//'); do
+    ahead=$(git rev-list --count "$base".."$branch" 2>/dev/null || echo 0)
+
+    if [ "$ahead" -eq 0 ]; then
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    behind=$(git rev-list --count "$branch".."$base" 2>/dev/null || echo 0)
+    echo "=== $branch: $ahead ahead, $behind behind ==="
+    git log "$base".."$branch" --oneline
+
+    if git merge "$branch" -m "Merge branch '$branch' into $base" 2>&1; then
+        merged=$((merged + 1))
+    else
+        echo "CONFLICT in $branch — aborting merge"
+        git merge --abort 2>/dev/null || true
+        failed=$((failed + 1))
+        failed_list="$failed_list  $branch\n"
+    fi
+    echo
+done
+
+echo "--- Summary ---"
+echo "Merged:   $merged"
+echo "Skipped:  $skipped (0 ahead)"
+echo "Failed:   $failed (conflicts)"
+
+if [ "$failed" -gt 0 ]; then
+    echo
+    echo "Failed branches:"
+    echo -e "$failed_list"
+    echo "These need manual conflict resolution."
+    exit 1
+fi

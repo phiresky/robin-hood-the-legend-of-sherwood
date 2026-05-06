@@ -1,0 +1,47 @@
+# Build output
+/build/
+/target/
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/assets/Data/datadir.bin
+
+# Editor / IDE
+*.swp
+*~
+.idea/
+.vscode/
+*.orig
+/compile_commands.json
+
+# copied from the game install
+/datadirs
+
+# playwright cache
+/.playwright-mcp/
+
+# screenshots / logs
+/robin_*.png
+/*.log
+
+# local Ferris source/render outputs
+/assets/ferris/*.blend
+/datadirs/ferris_overlay/
+
+# Claude agent state
+/.claude
+!/.claude/settings.json
+
+# Sandbox-created empty dotfiles
+/.bash_profile
+/.bashrc
+/.gitconfig
+/.gitmodules
+/.mcp.json
+/.profile
+/.ripgreprc
+/.zprofile
+/.zshrc
+/tmp/
+/binaries
+/.codex

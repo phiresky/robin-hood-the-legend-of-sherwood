@@ -1,0 +1,134 @@
+cargo-features = ["codegen-backend"]
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/robin_rs",
+    "crates/robin_engine",
+    "crates/robin_util",
+    "crates/robin_assets",
+    "crates/robin_state_hash_derive",
+]
+exclude = [
+    "third_party/librashader",
+]
+
+[workspace.dependencies]
+windows = "0.62"
+windows-core = "0.62"
+ash = "0.38"
+spirv-cross2 = { version = "0.6", default-features = false }
+objc2-metal = { version = "0.3" }
+objc2 = { version = "0.6" }
+glow = { version = "0.16.0" }
+glfw = { version = "0.59.0" }
+wgpu = { version = "29", default-features = false }
+wgpu-types = { version = "29" }
+clap = { version = "=4.3.0", features = ["derive"] }
+rayon = { version = "1.10.0" }
+gpu-allocator = { version = "0.28.0", default-features = false, features = ["hashbrown"] }
+image = { version = "0.25.8", features = ["tga", "jpeg", "png", "bmp"], default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+# codegen-units = 1
+
+# Dev profile tuned for fast incremental iteration.
+# - debug = "line-tables-only": file:line in backtraces, no locals/types.
+#   Workflow is --replay + trace! logging, not interactive debugging.
+# - split-debuginfo = "unpacked": keep debuginfo out of the main binary so
+#   relinking doesn't rewrite megabytes on every change.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+codegen-backend = "cranelift"
+
+# Optimize dependencies once; they rarely change and this makes debug runtime
+# dramatically faster without slowing down our own crate's rebuilds.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Workspace crates stay unoptimized so incremental rebuilds are fast.
+[profile.dev.package.robin_rs]
+opt-level = 0
+[profile.dev.package.robin_engine]
+opt-level = 0
+[profile.dev.package.robin_util]
+opt-level = 0
+[profile.dev.package.robin_assets]
+opt-level = 0
+[profile.dev.package.robin_state_hash_derive]
+opt-level = 0
+
+# Full-debuginfo profile for interactive debugging (gdb/lldb).
+# `debug` is a reserved cargo profile name (alias for `dev`), so this is
+# named `dev-debug`. Use with `cargo build --profile dev-debug`.
+[profile.dev-debug]
+inherits = "dev"
+debug = 2
+
+# Lightly-optimized native development build.  This keeps dev-style
+# debuginfo/incrementality but gives our workspace crates enough
+# optimization to make live multiplayer timing usable while debug-mode
+# hot spots are still being cleaned up.
+# Use with `cargo build --profile dev-opt1 --bin robin`.
+[profile.dev-opt1]
+inherits = "dev"
+opt-level = 1
+
+[profile.dev-opt1.package.robin_rs]
+opt-level = 1
+[profile.dev-opt1.package.robin_engine]
+opt-level = 1
+[profile.dev-opt1.package.robin_util]
+opt-level = 1
+[profile.dev-opt1.package.robin_assets]
+opt-level = 1
+[profile.dev-opt1.package.robin_state_hash_derive]
+opt-level = 1
+
+# Wasm profiles — inherit from dev/release but force the LLVM codegen
+# backend (cranelift can't target wasm and errors at compile time
+# instead of falling back).
+#
+# Build (wasm32-unknown-unknown + wasm-bindgen):
+#   cargo build --profile wasm-dev --target wasm32-unknown-unknown \
+#       --no-default-features -p robin_rs --bin robin
+# Then run wasm-bindgen --target web on the produced .wasm to emit
+# the JS glue under wasm-www/.  See `README.md`.
+[profile.wasm-dev]
+inherits = "dev"
+codegen-backend = "llvm"
+
+[profile.wasm-dev.package."*"]
+codegen-backend = "llvm"
+
+[profile.wasm-release]
+inherits = "release"
+codegen-backend = "llvm"
+opt-level = "z"
+lto = true
+codegen-units = 1
+debug = 0
+strip = "debuginfo"
+panic = "abort"
+# The deployed module is further shrunk with `wasm-opt -Oz` and
+# `wasm-strip` (wabt) — both as explicit post-build steps.
+
+# Android cross builds need LLVM.  The workspace dev profile uses
+# cranelift for native Linux iteration, but cranelift does not target
+# Android.  Use `--profile android-dev` for fast APK iteration and
+# `--profile android-release` for installable release builds.
+[profile.android-dev]
+inherits = "dev"
+codegen-backend = "llvm"
+
+[profile.android-dev.package."*"]
+codegen-backend = "llvm"
+
+[profile.android-release]
+inherits = "release"
+codegen-backend = "llvm"
+panic = "abort"

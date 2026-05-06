@@ -1,0 +1,2025 @@
+//! Damage application, death handling, and knockout effects.
+//!
+//! Extracted from the original `melee.rs` mega-file.
+
+use super::*;
+use crate::combat::{self, SwordAttackerContext, SwordDamageParams, SwordDefenderContext};
+use crate::element::{ActionState, Camp, Entity, EntityId, EyeStatus, Posture};
+use crate::weapons::SwordStrike;
+
+impl EngineInner {
+    /// Nudge the victim to the nearest authorised position so the
+    /// corpse doesn't overlap props or other actors.  Invoked at
+    /// dispatch time instead of on every `DYING_*` / `FALLING_BACK_*`
+    /// Execute init pass — same effect, fewer per-frame redundant
+    /// relocations.
+    pub(super) fn find_place_to_die(&mut self, victim_id: EntityId) {
+        const BOX_LYING_X: f32 = 10.0;
+        const BOX_LYING_Y: f32 = 5.0;
+        let (start, layer) = match self.get_entity(victim_id) {
+            Some(e) => (e.element_data().position_map(), e.element_data().layer()),
+            None => return,
+        };
+        let mut bbox = crate::geo2d::BBox2D::from_corners(
+            crate::geo2d::pt(start.x - BOX_LYING_X, start.y - BOX_LYING_Y),
+            crate::geo2d::pt(start.x + BOX_LYING_X, start.y + BOX_LYING_Y),
+        );
+        // Use the click-biased `find_authorized_position_toward` so
+        // the box stays pulled toward the actor's original spot; the
+        // plain variant only gathers lines intersecting the moving
+        // box and can drift further.
+        let click = crate::geo2d::pt(start.x, start.y);
+        if self
+            .fast_grid
+            .find_authorized_position_toward(&mut bbox, click, layer)
+        {
+            let center = bbox.center();
+            if let Some(Some(entity)) = self.entities.get_mut(victim_id.0 as usize) {
+                entity
+                    .element_data_mut()
+                    .set_position_map(crate::element::Point2D {
+                        x: center.x,
+                        y: center.y,
+                    });
+            }
+        }
+    }
+
+    /// Push `anim` as the next order on `damage_element` and bind the
+    /// owning actor's `active_ai_anim` to it with SequenceElement
+    /// completion.  The element transitions into the new order on the
+    /// next `do_next_order` invocation.
+    ///
+    /// The element's `NonInterruptable` priority bump (when needed) is
+    /// applied lazily by `anim_forces_non_interruptable_on_start` in
+    /// `tick_entity_animations` on MotionState::Start of the new
+    /// animation.
+    pub(super) fn queue_damage_anim(
+        &mut self,
+        victim_id: EntityId,
+        damage_element: (crate::sequence::SequenceId, usize),
+        anim: OrderType,
+    ) {
+        let _ = victim_id;
+        let (dseq, didx) = damage_element;
+        self.push_new_order(dseq, didx, anim, 0.0, 0.0);
+    }
+
+    // ─── Damage application ─────────────────────────────────────────
+
+    /// Build, launch and synchronously dispatch a `ReceiveSwordDamage`
+    /// sequence element targeting `victim_id`.
+    ///
+    /// Use this from sword-strike resolution paths
+    /// (`tick_active_sweeps`, `tick_active_rider_charges`, etc.) so the
+    /// hit-reaction animations flow through `do_next_order` instead of
+    /// the legacy direct `combat_anim` writes.  Damage applies
+    /// same-tick because the launch + dispatch are inline.
+    pub(crate) fn launch_sword_damage_now(
+        &mut self,
+        assets: &LevelAssets,
+        victim_id: EntityId,
+        attacker_id: EntityId,
+        sword_strike: SwordStrike,
+        attacker_profile_idx: u32,
+    ) {
+        let Some(victim) = self.get_entity(victim_id) else {
+            return;
+        };
+        // Dead/unconscious humans are pruned from active swordfight
+        // state: setting concussion calls quit_swordfight, victim
+        // discovery rejects unconscious/dead, and the CheckOpponents
+        // invariant asserts no such opponent remains.  Sweep/charge
+        // queues can otherwise keep a stale victim into a later frame,
+        // so do not launch fresh damage.
+        if victim.is_dead() || victim.human_data().is_some_and(|h| h.unconscious) {
+            tracing::debug!(
+                ?victim_id,
+                ?attacker_id,
+                ?sword_strike,
+                "sword damage skipped: victim already dead or unconscious"
+            );
+            return;
+        }
+
+        let mut elem = crate::sequence::SequenceElement::new(
+            1,
+            crate::element::Command::ReceiveSwordDamage,
+            Some(victim_id),
+        );
+        elem.data = crate::sequence::SequenceElementData::new_sword_damage(
+            attacker_id,
+            sword_strike,
+            attacker_profile_idx,
+        );
+        let seq_id = self.launch_element(elem);
+        // launch_element wraps in a fresh single-element sequence, so
+        // the element is at index 0.
+        let elem_idx = 0;
+        // Instruct arbitration first — damage may be Abandoned (e.g.
+        // against an immune posture) or PostponeCurrent the victim's
+        // existing in-progress element.
+        if !self.arbitrate_instruct(seq_id, elem_idx) {
+            return;
+        }
+        self.dispatch_receive_damage(assets, victim_id, seq_id, elem_idx);
+    }
+
+    /// Apply sword damage to a victim.
+    ///
+    /// Reads attacker and defender profiles, calls `combat::receive_sword_damage`,
+    /// then handles death/KO transitions.
+    ///
+    /// `damage_element` identifies the receive-damage sequence
+    /// element this call is fulfilling.  The hit-reaction animations
+    /// (simple-hit / standup / stunned-recovery) are pushed onto that
+    /// element via `push_order_on` and consumed by `do_next_order`.
+    /// Direct sword-strike resolution paths use
+    /// `launch_sword_damage_now` to build, launch, and synchronously
+    /// dispatch a real `ReceiveSwordDamage` element so this function
+    /// always receives a valid `damage_element`.
+    pub(super) fn apply_sword_damage(
+        &mut self,
+        assets: &LevelAssets,
+        victim_id: EntityId,
+        attacker_id: Option<EntityId>,
+        sword_strike: Option<SwordStrike>,
+        attacker_profile_idx: Option<u32>,
+        damage_element: (crate::sequence::SequenceId, usize),
+    ) {
+        if self.is_scroll_protected_civilian(victim_id) {
+            tracing::debug!(?victim_id, "sword damage blocked: scroll-carrying beggar");
+            return;
+        }
+        let strike = match sword_strike {
+            Some(s) => s,
+            None => {
+                tracing::warn!(?victim_id, "apply_sword_damage: no strike type");
+                return;
+            }
+        };
+
+        // Ladder/wall arm — route to `translate_ladder_wall_fall`
+        // before any damage / push / hit-reaction work.  Same
+        // early-out as `apply_generic_damage` and
+        // `apply_piercing_damage`.
+        let pre_drop_posture = self
+            .get_entity(victim_id)
+            .map(|e| e.element_data().posture)
+            .unwrap_or_default();
+        if matches!(pre_drop_posture, Posture::OnLadder | Posture::OnWall) {
+            self.translate_ladder_wall_fall(victim_id, damage_element);
+            return;
+        }
+
+        // CarryingCorpse arm — drop the corpse instantly (the
+        // carrier then falls through to the base-class sword-damage
+        // path which runs damage application + push handling + hit
+        // reaction below). Done up-front so the carrier's posture is
+        // already Upright by the time `apply_push_effect` and the
+        // hit-reaction animation pick run.
+        if pre_drop_posture == Posture::CarryingCorpse {
+            self.force_drop_carried_corpse_instant(victim_id);
+        }
+
+        // Look up the attacker's weapon profile
+        let attacker_profile = attacker_profile_idx
+            .and_then(|idx| assets.profile_manager.get_hth_weapon(idx))
+            .cloned();
+        let default_profile;
+        let attacker_profile = match attacker_profile {
+            Some(p) => p,
+            None => {
+                tracing::warn!(
+                    ?victim_id,
+                    ?attacker_profile_idx,
+                    "apply_sword_damage: no attacker profile, using defaults"
+                );
+                // Use a zeroed-out default so damage still flows
+                // through the protection/concussion pipeline (which
+                // may still produce knockdowns from concussion alone).
+                default_profile = crate::profiles::HtHWeaponProfile::default();
+                default_profile
+            }
+        };
+
+        // Read attacker context — real fighting_ability from profile,
+        // is_rank_soldier checks the RANK_SOLDIER flag from soldier
+        // profile.  Note: the protection-direction sector is computed
+        // from defender → attacker, not the other way around.
+        let (
+            attacker_dir,
+            def_to_atk_dir,
+            attacker_elevation,
+            fighting_ability,
+            atk_is_rank_soldier,
+        ) = if let Some(attacker) = attacker_id {
+            let (dir, elev) = self
+                .get_entity(attacker)
+                .map(|e| {
+                    let elem = e.element_data();
+                    (elem.direction(), elem.position().z)
+                })
+                .unwrap_or((0, 0.0));
+            let def_to_atk = direction_to(&self.entities, victim_id, attacker);
+            let ability = self
+                .get_entity(attacker)
+                .map(|e| fighting_ability_from_profile(e, &assets.profile_manager))
+                .unwrap_or(50);
+            let is_rank = self
+                .get_entity(attacker)
+                .map(|e| is_rank_soldier(e, &assets.profile_manager))
+                .unwrap_or(false);
+            (dir, def_to_atk, elev, ability, is_rank)
+        } else {
+            // No attacker (scripted damage): zero elevation — for
+            // un-sited sources the elevated-defender branch only fires
+            // when the defender truly stands higher.
+            (0, 0, 0.0, 50, false)
+        };
+
+        // Read defender context
+        let victim = match self
+            .entities
+            .get(victim_id.0 as usize)
+            .and_then(|s| s.as_ref())
+        {
+            Some(e) => e,
+            None => return,
+        };
+        let defender_dir = victim.element_data().direction();
+        let defender_elevation = victim.element_data().position().z;
+        let defender_action = victim
+            .actor_data()
+            .map(|a| a.action_state)
+            .unwrap_or(ActionState::Waiting);
+
+        // Look up defender's weapon profile
+        let defender_profile_idx = get_hth_weapon_id_full(victim, &assets.profile_manager);
+        let defender_profile = defender_profile_idx
+            .and_then(|idx| assets.profile_manager.get_hth_weapon(idx))
+            .cloned();
+
+        let ctx = concussion_ctx_full(victim, self.weather.is_forest_level, self.campaign.as_ref());
+
+        // Build params and apply damage
+        let attacker_ctx = SwordAttackerContext {
+            direction: attacker_dir,
+            direction_to_attacker: def_to_atk_dir,
+            elevation: attacker_elevation,
+            fighting_ability,
+            is_rank_soldier: atk_is_rank_soldier,
+        };
+        let defender_ctx = SwordDefenderContext {
+            action_state: defender_action,
+            direction: defender_dir,
+            elevation: defender_elevation,
+        };
+        let victim_max_hp = get_max_life_points(victim);
+        let params = SwordDamageParams {
+            defender: &defender_ctx,
+            defender_profile: defender_profile.as_ref(),
+            attacker_profile: &attacker_profile,
+            strike,
+            attacker: &attacker_ctx,
+            concussion_ctx: &ctx,
+            max_life_points: victim_max_hp,
+        };
+
+        // Apply damage (requires mutable access to human_data + life_points)
+        let victim = match self
+            .entities
+            .get_mut(victim_id.0 as usize)
+            .and_then(|s| s.as_mut())
+        {
+            Some(e) => e,
+            None => return,
+        };
+        let (human, lp) = match victim.human_and_life_points_mut() {
+            Some(pair) => pair,
+            None => return,
+        };
+
+        let (result, cutting_inflicted) = combat::receive_sword_damage(human, lp, &params);
+
+        let life_points_after = *lp;
+        // Use the attempted damage (not the clamped lp delta) so
+        // overkill hits display the same number as a non-overkill hit
+        // would have shown.
+        if cutting_inflicted > 0 {
+            self.add_damage_number(victim_id, cutting_inflicted);
+        }
+
+        tracing::debug!(
+            ?victim_id,
+            ?attacker_id,
+            ?strike,
+            ?result,
+            life_points_after,
+            "Sword damage applied"
+        );
+
+        // Play impact sound effect (queued for next audio hourglass).
+        // Different sounds for parried vs armor hit, light vs heavy
+        // strikes.
+        {
+            use crate::sound::ImpactKind;
+
+            let victim_pos = self
+                .get_entity(victim_id)
+                .map(|e| {
+                    let p = e.element_data().position_map();
+                    crate::geo2d::pt(p.x, p.y)
+                })
+                .unwrap_or_else(|| crate::geo2d::pt(0.0, 0.0));
+
+            // Real weapon/armor materials from character/soldier profiles
+            let atk_weapon_mat = attacker_id
+                .and_then(|id| self.get_entity(id))
+                .map(|e| weapon_material_from_profile(e, &assets.profile_manager))
+                .unwrap_or(crate::profiles::WeaponMaterial::SteelAndWood);
+            let def_armor_mat = self
+                .get_entity(victim_id)
+                .map(|e| armor_material_from_profile(e, &assets.profile_manager))
+                .unwrap_or(crate::profiles::ArmorMaterial::Plate);
+
+            // Light strikes (A, B, D, E) get light impact; others get
+            // heavy.
+            let impact_kind = match strike {
+                SwordStrike::A | SwordStrike::B | SwordStrike::D | SwordStrike::E => {
+                    ImpactKind::LightArmor
+                }
+                _ => ImpactKind::HeavyArmor,
+            };
+
+            // For parried strikes, play strike FX (parry sound)
+            // instead of impact FX.
+            if result.contains(combat::SwordDamageResult::NO_DAMAGE_PARRIED) {
+                use crate::sound::StrikeKind;
+                let parry_kind = match strike {
+                    SwordStrike::A | SwordStrike::B | SwordStrike::D | SwordStrike::E => {
+                        StrikeKind::LightParade
+                    }
+                    _ => StrikeKind::HeavyParade,
+                };
+                let def_weapon_mat = self
+                    .get_entity(victim_id)
+                    .map(|e| weapon_material_from_profile(e, &assets.profile_manager))
+                    .unwrap_or(crate::profiles::WeaponMaterial::SteelAndWood);
+                self.pending_side_effects
+                    .sounds
+                    .push(super::SoundCommand::StrikeFx {
+                        strike_kind: parry_kind,
+                        weapon1: atk_weapon_mat,
+                        weapon2: def_weapon_mat,
+                        position: victim_pos,
+                    });
+
+                // Parry early-return: when the defender wasn't
+                // already in a parry state, push the parry-to-waiting
+                // transition anim onto the damage element; then return
+                // immediately, skipping push/XP/SayOuch/hero-speech/
+                // provoke/AI-stim and the regular hit-reaction.
+                if defender_action != ActionState::ParryingSword
+                    && defender_action != ActionState::ParryingSwordLow
+                {
+                    let (dseq, didx) = damage_element;
+                    self.push_new_order(
+                        dseq,
+                        didx,
+                        crate::order::OrderType::TransitionParryingSwordWaitingSword,
+                        0.0,
+                        0.0,
+                    );
+                }
+                return;
+            } else {
+                self.pending_side_effects
+                    .sounds
+                    .push(super::SoundCommand::ImpactFx {
+                        impact_kind,
+                        weapon: atk_weapon_mat,
+                        armor: def_armor_mat,
+                        position: victim_pos,
+                    });
+            }
+        }
+
+        // Handle push effect — the push path handles animations and
+        // death/KO internally, so skip the regular hit anim and
+        // `handle_post_damage` when pushed.
+        let pushed = if combat::strike_has_push_effect(&attacker_profile, strike) {
+            let thrust = &attacker_profile.thrusts[strike as usize];
+            if let Some(attacker) = attacker_id {
+                let push_info = PushStrikeInfo {
+                    repulsion: thrust.repulsion,
+                    kind: thrust.kind,
+                    strike,
+                    max_distance: thrust.maximal_distance as f32,
+                };
+                self.apply_push_effect(
+                    assets,
+                    victim_id,
+                    attacker,
+                    &push_info,
+                    result,
+                    damage_element,
+                )
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Award XP if the victim died
+        let victim_died = self
+            .get_entity(victim_id)
+            .map(|e| get_life_points(e) <= 0)
+            .unwrap_or(false);
+        if victim_died && let Some(atk_id) = attacker_id {
+            self.award_sword_kill_xp(assets, atk_id, victim_id);
+        }
+
+        // SayOuch on the victim (unless parried or push already said it).
+        if !pushed
+            && !result.is_empty()
+            && !result.contains(combat::SwordDamageResult::NO_DAMAGE_PARRIED)
+        {
+            self.say_ouch(assets, victim_id, Some(cutting_inflicted));
+        }
+
+        // Hero speech for PC attacker:
+        // - HERO_KILLED_OPPONENT if dead
+        // - HERO_SUCCESSFULL_BLOW if unconscious + cutting > 50
+        // - HERO_STUN_ENNEMY if unconscious otherwise
+        let attacker_is_pc = attacker_id
+            .and_then(|id| self.get_entity(id))
+            .map(|e| e.kind().is_pc())
+            .unwrap_or(false);
+        let victim_is_unconscious = self
+            .get_entity(victim_id)
+            .and_then(|e| e.human_data())
+            .map(|h| h.unconscious)
+            .unwrap_or(false);
+        let victim_is_lacklandist = self
+            .get_entity(victim_id)
+            .map(|e| match e {
+                Entity::Soldier(s) => s.soldier.cached_camp == crate::element::Camp::Lacklandists,
+                _ => false,
+            })
+            .unwrap_or(false);
+
+        if attacker_is_pc
+            && victim_is_lacklandist
+            && !result.is_empty()
+            && let Some(atk_id) = attacker_id
+        {
+            if victim_died {
+                self.hero_speaking(assets, atk_id, HERO_KILLED_OPPONENT);
+            } else if victim_is_unconscious {
+                let cutting = combat::get_strike_cutting_effect(
+                    &attacker_profile,
+                    strike,
+                    attacker_ctx.fighting_ability,
+                    attacker_ctx.is_rank_soldier,
+                );
+                if cutting > 50 {
+                    self.hero_speaking(assets, atk_id, HERO_SUCCESSFULL_BLOW);
+                } else {
+                    self.hero_speaking(assets, atk_id, HERO_STUN_ENNEMY);
+                }
+            }
+        }
+
+        // Provoke after sword strike — random taunt.
+        if !result.is_empty()
+            && !result.contains(combat::SwordDamageResult::NO_DAMAGE_PARRIED)
+            && let Some(atk_id) = attacker_id
+        {
+            // Suppress Provoke when the attacker is the currently-
+            // selected PC — the player's controlled character
+            // shouldn't taunt on hit.
+            let attacker_is_selected_pc = self
+                .get_entity(atk_id)
+                .map(|e| e.kind().is_pc())
+                .unwrap_or(false)
+                && self.selected_pc_ids().contains(&atk_id);
+            if !attacker_is_selected_pc {
+                let provoke_chance = (0.2 * attacker_ctx.fighting_ability as f32) as u32;
+                if crate::sim_rng::u32(0..100) < provoke_chance {
+                    // Launch PROVOKE on the attacker
+                    self.launch_provoke(atk_id);
+                }
+            }
+        }
+
+        // Soldier learning: bad sword strike experience.
+        if let Some(Some(Entity::Soldier(_))) = self.entities.get(victim_id.0 as usize)
+            && attacker_id.is_some()
+            && !result.is_empty()
+            && !result.contains(combat::SwordDamageResult::NO_DAMAGE_PARRIED)
+        {
+            self.make_bad_sword_strike_experience(assets, victim_id, strike, true);
+        }
+
+        // Play posture-based hit reaction animation for non-lethal hits
+        // (BeingHitSword / FallingBackBow / etc.) when there IS damage
+        // but the victim is still alive and conscious.  Skip for push
+        // strikes — the push path handles its own anims.
+        if !pushed
+            && !result.is_empty()
+            && !result.contains(combat::SwordDamageResult::NO_DAMAGE_PARRIED)
+        {
+            let still_alive = life_points_after > 0;
+            let still_conscious = self
+                .get_entity(victim_id)
+                .and_then(|e| e.human_data())
+                .map(|h| !h.unconscious)
+                .unwrap_or(false);
+            // Shoulder-posture victims route through
+            // `translate_shoulder_damage` *unconditionally* — even for
+            // lethal/KO hits — so the partner's carrier/carried
+            // linkage still unwinds via the Fall sub-sequence that
+            // helper launches.  The normal hit-reaction anim is only
+            // picked for alive+conscious victims on a non-shoulder
+            // posture; dead or KO'd non-shoulder victims fall through
+            // to the regular post-damage pipeline below.
+            let victim_posture = self
+                .get_entity(victim_id)
+                .map(|e| e.element_data().posture)
+                .unwrap_or_default();
+            let is_shoulder_posture = matches!(
+                victim_posture,
+                Posture::OnShoulders | Posture::CarryingOnShoulders | Posture::HelpingToClimb
+            );
+            if is_shoulder_posture {
+                self.translate_shoulder_damage(assets, victim_id, damage_element);
+            } else if still_alive && still_conscious {
+                let anims = self.get_entity(victim_id).and_then(|e| {
+                    let posture = e.element_data().posture;
+                    let action = e.actor_data().map(|a| a.action_state).unwrap_or_default();
+                    select_combat_animations(posture, action)
+                });
+                if let Some(a) = anims {
+                    let (dseq, didx) = damage_element;
+                    if result.contains(combat::SwordDamageResult::STUNNING_DAMAGE) {
+                        // Stunning hit chain: fall-back, roll,
+                        // stand-up, optional in-place stun if the
+                        // defender is mid-swordfight with concussion
+                        // above the threshold.
+                        self.push_new_order(dseq, didx, a.falling_back, 0.0, 0.0);
+                        self.try_queue_roll(assets, victim_id, damage_element);
+                        self.push_new_order(dseq, didx, a.standing_up, 0.0, 0.0);
+                        let (is_swordfighting, concussion) = self
+                            .get_entity(victim_id)
+                            .and_then(|e| e.human_data())
+                            .map(|h| (!h.opponents.is_empty(), h.concussion_of_the_brain))
+                            .unwrap_or((false, 0));
+                        if is_swordfighting && concussion > STUNNING_THRESHOLD {
+                            self.push_new_order(
+                                dseq,
+                                didx,
+                                crate::order::OrderType::BeingStunnedSword,
+                                0.0,
+                                0.0,
+                            );
+                        }
+                    } else if result.contains(combat::SwordDamageResult::CUTTING_DAMAGE) {
+                        // Cutting hit, no follow-up roll / stand-up.
+                        self.push_new_order(dseq, didx, a.simple_hit, 0.0, 0.0);
+                    }
+                }
+            }
+        }
+
+        // Dispatch combat stimulus to attacker's AI: EventLethalStrike
+        // if victim died, EventGoodStrike if damage was dealt.
+        if !result.is_empty()
+            && !result.contains(combat::SwordDamageResult::NO_DAMAGE_PARRIED)
+            && let Some(atk_id) = attacker_id
+        {
+            let stimulus_type = if victim_died {
+                crate::ai::StimulusType::EventLethalStrike
+            } else {
+                crate::ai::StimulusType::EventGoodStrike
+            };
+            self.dispatch_ai_stimulus(atk_id, crate::ai::Stimulus::new(stimulus_type));
+        }
+
+        // Death push-vs-drop selector: a non-rider killed by a strike
+        // with positive stunning effect falls on his back rather than
+        // dropping forward.
+        let dying_anim_override = if victim_died {
+            let is_rider = matches!(
+                self.get_entity(victim_id),
+                Some(Entity::Soldier(s)) if s.soldier.rider
+            );
+            let stunning_effect = attacker_profile.thrusts[strike as usize].stunning;
+            if !is_rider && stunning_effect > 0 {
+                self.get_entity(victim_id)
+                    .and_then(|e| {
+                        let posture = e.element_data().posture;
+                        let action = e.actor_data().map(|a| a.action_state).unwrap_or_default();
+                        select_combat_animations(posture, action)
+                    })
+                    .map(|a| a.falling_back)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Handle state transitions after damage — skip for push strikes,
+        // since apply_push_effect already handled death/KO transitions.
+        if !pushed {
+            self.handle_post_damage(
+                assets,
+                victim_id,
+                attacker_id,
+                result.is_empty(),
+                damage_element,
+                dying_anim_override,
+            );
+        }
+    }
+
+    /// Forced instantaneous corpse drop.  Used when a PC carrying a
+    /// body takes any damage (arrow/stone, generic, hit, push, sword
+    /// fall-through arms) and when an `EnterSwordfight` transition
+    /// fires while the PC is still carrying a body: the corpse is
+    /// snapped to the carrier's feet, postures are reset, and the
+    /// carried link is cleared so the next action can proceed on an
+    /// un-carriered PC.
+    pub(crate) fn force_drop_carried_corpse_instant(&mut self, carrier_id: EntityId) {
+        let (
+            carrier_pos,
+            carrier_layer,
+            carrier_sector,
+            carrier_obstacle,
+            carrier_plane,
+            carrier_dir,
+            carried_id,
+            carried_posture,
+        ) = {
+            let carrier = match self.get_entity(carrier_id) {
+                Some(e) => e,
+                None => return,
+            };
+            if !carrier.is_pc() {
+                return;
+            }
+            let pc = match carrier.pc_data() {
+                Some(p) => p,
+                None => return,
+            };
+            let carried_id = match pc.carried {
+                Some(id) => id,
+                None => return,
+            };
+            let elem = carrier.element_data();
+            // `sync_carried_positions` runs every tick while the body is
+            // held and copies the carrier's plane Z onto the carried;
+            // reading it from the carrier's already-resolved
+            // `PositionInterface` here mirrors that path and avoids
+            // re-resolving from `assets.static_sight_obstacles`.
+            let plane = carrier.position_iface().get_plane().copied();
+            (
+                elem.position_map(),
+                elem.layer(),
+                elem.sector(),
+                elem.obstacle_index(),
+                plane,
+                elem.direction(),
+                carried_id,
+                pc.carried_posture,
+            )
+        };
+
+        // Gate the post-drop hulk flash on dead/unconscious bodies
+        // dropped inside a building so they remain visible through
+        // walls.
+        let in_building = is_in_building_sector(carrier_sector, &self.fast_grid);
+
+        if let Some(carried) = self.get_entity_mut(carried_id) {
+            let elem = carried.element_data_mut();
+            elem.set_obstacle_index(carrier_obstacle, carrier_plane);
+            elem.set_layer(carrier_layer);
+            elem.set_sector(carrier_sector);
+            elem.set_position_map(carrier_pos);
+            // direction = (carrier_dir + 12) & 15.
+            elem.set_direction_instantly((carrier_dir + 12) & 15);
+            // Stop tracking the carrier's display order.
+            elem.sprite.display_order_ref = None;
+            elem.sprite.behind_display_order_ref = false;
+            carried.set_posture(carried_posture);
+            if let Some(human) = carried.human_data_mut() {
+                human.carrier = None;
+            }
+            if let Some(actor) = carried.actor_data_mut() {
+                actor.execution_frozen = false;
+                actor.action_state = ActionState::Waiting;
+            }
+        }
+
+        if let Some(carrier) = self.get_entity_mut(carrier_id) {
+            carrier.set_posture(Posture::Upright);
+            if let Some(actor) = carrier.actor_data_mut() {
+                actor.action_state = ActionState::Waiting;
+            }
+            if let Some(pc) = carrier.pc_data_mut() {
+                pc.carried = None;
+            }
+        }
+
+        // Inside a building, dead/unconscious bodies get a hulk flash
+        // and `SetActive(true)` so they stay visible through walls.
+        // Mirrors the same fan-out the animated `DropDone` handler
+        // runs in `engine/combat.rs`.
+        if in_building && let Some(carried) = self.get_entity_mut(carried_id) {
+            let is_dead = carried.is_dead();
+            let is_unconscious = carried.human_data().is_some_and(|h| h.unconscious);
+            if is_dead || is_unconscious {
+                crate::engine::door_pass::start_hulk_on(carried, 1.0);
+                carried.element_data_mut().hidden_in_building = false;
+            }
+        }
+
+        // Low-priority Wait element so the dropped body re-enters an
+        // idle state.
+        let mut wait_elem = crate::sequence::SequenceElement::new(
+            1,
+            crate::element::Command::Wait,
+            Some(carried_id),
+        );
+        wait_elem.priority = crate::sequence::SequencePriority::Wait;
+        self.launch_element(wait_elem);
+    }
+
+    /// Apply generic damage (falling, environmental, mobile collision).
+    pub(super) fn apply_generic_damage(
+        &mut self,
+        assets: &LevelAssets,
+        victim_id: EntityId,
+        damage: u16,
+        concussion: u16,
+        damage_element: (crate::sequence::SequenceId, usize),
+    ) {
+        if self.is_scroll_protected_civilian(victim_id) {
+            tracing::debug!(?victim_id, "generic damage blocked: scroll-carrying beggar");
+            return;
+        }
+
+        // Generic-damage early-out arms before damage math:
+        //   1. OnLadder / OnWall → translate_ladder_wall_fall.
+        //   2. Already-lying non-rider with life_points <= 0 →
+        //      terminate immediately.  Uses `life_points > 0`, not
+        //      `!is_dead()`, to keep parity with the original guard.
+        let pre_posture = self
+            .get_entity(victim_id)
+            .map(|e| e.element_data().posture)
+            .unwrap_or_default();
+        if matches!(pre_posture, Posture::OnLadder | Posture::OnWall) {
+            self.translate_ladder_wall_fall(victim_id, damage_element);
+            return;
+        }
+        if pre_posture.is_lying() {
+            let still_alive = self
+                .get_entity(victim_id)
+                .map(|e| get_life_points(e) > 0)
+                .unwrap_or(false);
+            let is_rider = matches!(
+                self.get_entity(victim_id),
+                Some(Entity::Soldier(s)) if s.soldier.rider
+            );
+            if !is_rider && !still_alive {
+                let (dseq, didx) = damage_element;
+                self.sequence_manager.element_terminated(dseq, didx);
+                return;
+            }
+        }
+
+        let victim = match self
+            .entities
+            .get(victim_id.0 as usize)
+            .and_then(|s| s.as_ref())
+        {
+            Some(e) => e,
+            None => return,
+        };
+        let ctx = concussion_ctx_full(victim, self.weather.is_forest_level, self.campaign.as_ref());
+        let max_lp = get_max_life_points(victim);
+
+        let victim = match self
+            .entities
+            .get_mut(victim_id.0 as usize)
+            .and_then(|s| s.as_mut())
+        {
+            Some(e) => e,
+            None => return,
+        };
+        let (human, lp) = match victim.human_and_life_points_mut() {
+            Some(pair) => pair,
+            None => return,
+        };
+
+        let _died = combat::receive_generic_damage(human, lp, damage, concussion, max_lp, &ctx);
+
+        // Shoulder-posture victims route through
+        // `translate_shoulder_damage` instead of the base-class
+        // handler.
+        let victim_posture = self
+            .get_entity(victim_id)
+            .map(|e| e.element_data().posture)
+            .unwrap_or_default();
+        if matches!(
+            victim_posture,
+            Posture::OnShoulders | Posture::CarryingOnShoulders | Posture::HelpingToClimb
+        ) {
+            self.translate_shoulder_damage(assets, victim_id, damage_element);
+            self.handle_post_damage(assets, victim_id, None, false, damage_element, None);
+            return;
+        }
+
+        // CarryingCorpse arm — forces an instant corpse drop and
+        // falls through to the default damage path.
+        if victim_posture == Posture::CarryingCorpse {
+            self.force_drop_carried_corpse_instant(victim_id);
+        }
+
+        self.say_ouch(assets, victim_id, None);
+
+        // Alive-conscious branch: queue the posture-dependent
+        // simple-hit animation onto the damage element and fire the
+        // roll helper.  The death / knockout outcomes are handled
+        // downstream in `handle_post_damage` →
+        // `handle_death_with_damage_element` / `handle_knockout`,
+        // which push their own animations.
+        let (life_points_after, still_conscious, still_on_ground) = {
+            let victim = self.get_entity(victim_id);
+            (
+                victim.map(get_life_points).unwrap_or(0),
+                victim
+                    .and_then(|e| e.human_data())
+                    .map(|h| !h.unconscious)
+                    .unwrap_or(false),
+                victim
+                    .map(|e| !e.element_data().posture.is_lying())
+                    .unwrap_or(false),
+            )
+        };
+        if life_points_after > 0 && still_conscious && still_on_ground {
+            let hit_anim = self
+                .get_entity(victim_id)
+                .and_then(|e| {
+                    let posture = e.element_data().posture;
+                    let action = e.actor_data().map(|a| a.action_state).unwrap_or_default();
+                    select_combat_animations(posture, action)
+                })
+                .map(|a| a.simple_hit);
+            if let Some(anim) = hit_anim {
+                let (dseq, didx) = damage_element;
+                self.push_new_order(dseq, didx, anim, 0.0, 0.0);
+            }
+            // Unconditional roll attempt (except for net damage, which
+            // routes through a different path that never reaches
+            // `apply_generic_damage`).
+            self.try_queue_roll(assets, victim_id, damage_element);
+        }
+
+        self.handle_post_damage(assets, victim_id, None, false, damage_element, None);
+    }
+
+    /// Apply piercing damage (arrows, stones).
+    ///
+    /// `is_arrow_damage` distinguishes the two entry points: arrow
+    /// damage queues `EXTRACTING_ARROW_*` for survivors; stone damage
+    /// queues the generic posture-dependent simple-hit anim.  Both
+    /// share the same piercing damage math.
+    pub(super) fn apply_piercing_damage(
+        &mut self,
+        assets: &LevelAssets,
+        victim_id: EntityId,
+        damage: u16,
+        concussion: u16,
+        is_arrow_damage: bool,
+        damage_element: (crate::sequence::SequenceId, usize),
+    ) {
+        if self.is_scroll_protected_civilian(victim_id) {
+            tracing::debug!(
+                ?victim_id,
+                "piercing damage blocked: scroll-carrying beggar"
+            );
+            return;
+        }
+
+        // Ladder/wall arm — route to `translate_ladder_wall_fall`
+        // before damage math, like `apply_generic_damage` and
+        // `apply_push_effect`.
+        let pre_posture = self
+            .get_entity(victim_id)
+            .map(|e| e.element_data().posture)
+            .unwrap_or_default();
+        if matches!(pre_posture, Posture::OnLadder | Posture::OnWall) {
+            self.translate_ladder_wall_fall(victim_id, damage_element);
+            return;
+        }
+
+        let victim = match self
+            .entities
+            .get(victim_id.0 as usize)
+            .and_then(|s| s.as_ref())
+        {
+            Some(e) => e,
+            None => return,
+        };
+        let ctx = concussion_ctx_full(victim, self.weather.is_forest_level, self.campaign.as_ref());
+        let max_lp = get_max_life_points(victim);
+
+        let victim = match self
+            .entities
+            .get_mut(victim_id.0 as usize)
+            .and_then(|s| s.as_mut())
+        {
+            Some(e) => e,
+            None => return,
+        };
+        let (human, lp) = match victim.human_and_life_points_mut() {
+            Some(pair) => pair,
+            None => return,
+        };
+
+        let _died = combat::receive_piercing_damage(human, lp, damage, concussion, max_lp, &ctx);
+        // Raw attempted damage — overkill hits show the same number
+        // as a non-overkill hit would.  `add_damage_number` no-ops on 0.
+        self.add_damage_number(victim_id, damage);
+
+        // Already-lying arm: `Lying/UnderNet/Flying/Carried/
+        // OnShoulders/Tied` falls through to `Dead/DeadBack`, which
+        // terminates the element when not a dying rider — i.e. for
+        // everything except a sleeping rider dying.  This stops arrow
+        // / stone damage that lands on an already-on-the-ground
+        // victim from re-pushing a fresh dying / corpse-idle order
+        // onto the damage element.
+        if pre_posture.is_lying() {
+            let post_dead = self
+                .get_entity(victim_id)
+                .map(|e| get_life_points(e) <= 0)
+                .unwrap_or(false);
+            let is_rider = matches!(
+                self.get_entity(victim_id),
+                Some(Entity::Soldier(s)) if s.soldier.rider
+            );
+            if !is_rider || !post_dead {
+                let (dseq, didx) = damage_element;
+                self.sequence_manager.element_terminated(dseq, didx);
+                return;
+            }
+            // Sleeping-rider-dying special case falls through to the
+            // death path in `handle_post_damage` —
+            // `select_combat_animations` returns None for lying
+            // postures, so no fresh dying anim is pushed and the
+            // corpse_anim fallback in
+            // `handle_death_with_damage_element` covers the corpse
+            // pose.
+        }
+
+        // Shoulder-posture victims route through
+        // `translate_shoulder_damage`.
+        if matches!(
+            pre_posture,
+            Posture::OnShoulders | Posture::CarryingOnShoulders | Posture::HelpingToClimb
+        ) {
+            self.translate_shoulder_damage(assets, victim_id, damage_element);
+            self.handle_post_damage(assets, victim_id, None, false, damage_element, None);
+            return;
+        }
+
+        // CarryingCorpse arm — forces an instant corpse drop and
+        // falls through to the default damage path.
+        if pre_posture == Posture::CarryingCorpse {
+            self.force_drop_carried_corpse_instant(victim_id);
+        }
+
+        self.say_ouch(assets, victim_id, Some(damage));
+
+        // Alive-conscious branch: queue the posture-dependent
+        // extract-arrow animation onto the damage element, then fire
+        // the roll helper.  For stones we push the `simple_hit`
+        // variant from the same selector.  The death / knockout
+        // outcomes are handled downstream in `handle_post_damage` →
+        // `handle_death_with_damage_element` / `handle_knockout`,
+        // which push their own animations.
+        let (life_points_after, still_conscious, still_on_ground) = {
+            let victim = self.get_entity(victim_id);
+            (
+                victim.map(get_life_points).unwrap_or(0),
+                victim
+                    .and_then(|e| e.human_data())
+                    .map(|h| !h.unconscious)
+                    .unwrap_or(false),
+                victim
+                    .map(|e| !e.element_data().posture.is_lying())
+                    .unwrap_or(false),
+            )
+        };
+        if life_points_after > 0 && still_conscious && still_on_ground {
+            let hit_anim = self
+                .get_entity(victim_id)
+                .and_then(|e| {
+                    let posture = e.element_data().posture;
+                    let action = e.actor_data().map(|a| a.action_state).unwrap_or_default();
+                    select_combat_animations(posture, action)
+                })
+                .map(|a| {
+                    if is_arrow_damage {
+                        a.arrow_extract
+                    } else {
+                        a.simple_hit
+                    }
+                });
+            if let Some(anim) = hit_anim {
+                let (dseq, didx) = damage_element;
+                self.push_new_order(dseq, didx, anim, 0.0, 0.0);
+            }
+            // Unconditional roll attempt.
+            self.try_queue_roll(assets, victim_id, damage_element);
+        }
+
+        self.handle_post_damage(assets, victim_id, None, false, damage_element, None);
+    }
+
+    /// Apply hit damage (fist/club, concussion only).
+    ///
+    /// `damage_element` (when set) identifies the receive-damage sequence
+    /// element this call is fulfilling — see `apply_sword_damage` for the
+    /// same threading; the hit-fall animation gets pushed onto the
+    /// element so `do_next_order` advances naturally instead of writing
+    /// `combat_anim` directly.
+    pub(super) fn apply_hit_damage(
+        &mut self,
+        assets: &LevelAssets,
+        victim_id: EntityId,
+        attacker_id: Option<EntityId>,
+        concussion: u16,
+        is_harder_hit: bool,
+        damage_element: (crate::sequence::SequenceId, usize),
+    ) {
+        if self.is_scroll_protected_civilian(victim_id) {
+            tracing::debug!(?victim_id, "hit damage blocked: scroll-carrying beggar");
+            return;
+        }
+        let victim = match self
+            .entities
+            .get(victim_id.0 as usize)
+            .and_then(|s| s.as_ref())
+        {
+            Some(e) => e,
+            None => return,
+        };
+        let ctx = concussion_ctx_full(victim, self.weather.is_forest_level, self.campaign.as_ref());
+        let life_points = get_life_points(victim);
+        let is_lacklandist = victim.is_soldier()
+            && victim.soldier_data().map(|s| s.cached_camp)
+                == Some(crate::element::Camp::Lacklandists);
+
+        let victim = match self
+            .entities
+            .get_mut(victim_id.0 as usize)
+            .and_then(|s| s.as_mut())
+        {
+            Some(e) => e,
+            None => return,
+        };
+        let human = match victim.human_data_mut() {
+            Some(h) => h,
+            None => return,
+        };
+
+        let _outcome =
+            combat::receive_hit_damage(human, life_points, concussion, is_lacklandist, &ctx);
+
+        // Hero speech for PC attacker hitting an unconscious opponent.
+        let attacker_is_pc = attacker_id
+            .and_then(|id| self.get_entity(id))
+            .map(|e| e.kind().is_pc())
+            .unwrap_or(false);
+        if attacker_is_pc && let Some(atk_id) = attacker_id {
+            self.hero_speaking(assets, atk_id, HERO_STUN_ENNEMY);
+        }
+
+        // Dispatch EventGotHit to the victim's AI so it can re-target
+        // the attacker.
+        if let Some(atk_id) = attacker_id {
+            let stimulus =
+                crate::ai::Stimulus::with_human(crate::ai::StimulusType::EventGotHit, atk_id.0);
+            self.dispatch_ai_stimulus(victim_id, stimulus);
+        }
+
+        // Shoulder fall routing — if the victim is currently on a
+        // carrier's shoulders, the visual goes to
+        // `translate_shoulder_damage` instead of the normal hit-fall
+        // path.
+        let victim_posture = self
+            .get_entity(victim_id)
+            .map(|e| e.element_data().posture)
+            .unwrap_or_default();
+        if matches!(
+            victim_posture,
+            Posture::OnShoulders | Posture::CarryingOnShoulders | Posture::HelpingToClimb
+        ) {
+            self.translate_shoulder_damage(assets, victim_id, damage_element);
+            self.handle_post_damage(assets, victim_id, attacker_id, false, damage_element, None);
+            return;
+        }
+
+        // CarryingCorpse arm — drop the corpse instantly (the
+        // carrier then falls through to the base-class hit-damage
+        // path which dispatches the regular hit-fall animation
+        // below).
+        if victim_posture == Posture::CarryingCorpse {
+            self.force_drop_carried_corpse_instant(victim_id);
+        }
+
+        // OnLadder / OnWall fall routing — these postures route
+        // through `translate_ladder_wall_fall`, matching the parallel
+        // push-path routing.
+        if matches!(victim_posture, Posture::OnLadder | Posture::OnWall) {
+            self.translate_ladder_wall_fall(victim_id, damage_element);
+            self.handle_post_damage(assets, victim_id, attacker_id, false, damage_element, None);
+            return;
+        }
+
+        // Play the FALLING_HIT_* animation.  Non-harder hits flight
+        // 30 units away from the antagonist under non-interruptable
+        // priority and end lying; harder hits play in place and
+        // collapse to lying on completion.
+        self.dispatch_hit_fall_animation(
+            assets,
+            victim_id,
+            attacker_id,
+            is_harder_hit,
+            damage_element,
+        );
+
+        self.handle_post_damage(assets, victim_id, attacker_id, false, damage_element, None);
+    }
+
+    /// Plays the `FALLING_HIT_*` animation appropriate to the victim's
+    /// posture and action state.  For non-harder hits, also sets up
+    /// an `ActiveFlight` that carries the victim 30 map units away
+    /// from the antagonist — validated via
+    /// `is_straight_movement_authorized` with 100/75/50/25% fractional
+    /// fallback (matching the take-off helper).  The combat animation
+    /// is marked `SequencePriority::NonInterruptable` so concurrent
+    /// damage can't clobber it mid-flight.
+    pub(super) fn dispatch_hit_fall_animation(
+        &mut self,
+        assets: &LevelAssets,
+        victim_id: EntityId,
+        attacker_id: Option<EntityId>,
+        is_harder_hit: bool,
+        damage_element: (crate::sequence::SequenceId, usize),
+    ) {
+        // Read victim posture + action state to pick the right animation.
+        let (victim_posture, victim_action, victim_pos, victim_layer, victim_move_box) = {
+            let v = match self.get_entity(victim_id) {
+                Some(e) => e,
+                None => return,
+            };
+            let posture = v.element_data().posture;
+            let action = v.actor_data().map(|a| a.action_state).unwrap_or_default();
+            let pos = v.element_data().position_map();
+            let layer = v.element_data().layer();
+            let mb = *v.position_iface().get_move_box();
+            (posture, action, pos, layer, mb)
+        };
+
+        // Early-out: posture is already falling, carried, or dead —
+        // nothing to animate.
+        let anim = match select_hit_fall_animation(victim_posture, victim_action, is_harder_hit) {
+            Some(a) => a,
+            None => return,
+        };
+
+        // Compute the flight vector: 30 units away from the antagonist,
+        // or 30 units opposite the victim's current facing if there's
+        // no antagonist.
+        let (flight_x, flight_y) = if !is_harder_hit {
+            // When the antagonist is a human currently in the
+            // rider-charging animation, the flight vector follows the
+            // rider's facing (slammed forward along the charge path)
+            // rather than the radial victim_pos − attacker_pos vector.
+            let charging_rider_dir: Option<u16> = attacker_id
+                .and_then(|id| self.get_entity(id))
+                .and_then(|e| {
+                    let is_rider = e.soldier_data().map(|s| s.rider).unwrap_or(false);
+                    let is_charging = e
+                        .actor_data()
+                        .map(|a| a.active_rider_charge.is_some())
+                        .unwrap_or(false);
+                    if is_rider && is_charging {
+                        Some(e.element_data().direction() as u16)
+                    } else {
+                        None
+                    }
+                });
+
+            let attacker_pos = attacker_id
+                .and_then(|id| self.get_entity(id))
+                .map(|e| e.element_data().position_map());
+            let (dx, dy) = if let Some(rider_dir) = charging_rider_dir {
+                sector_to_vector_iso(rider_dir, ASPECT_RATIO)
+            } else if let Some(ap) = attacker_pos {
+                let dx = victim_pos.x - ap.x;
+                let dy = victim_pos.y - ap.y;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist < 0.01 {
+                    // Antagonist is on top of us — fall back from facing.
+                    let victim_dir = self
+                        .get_entity(victim_id)
+                        .map(|e| e.element_data().direction())
+                        .unwrap_or(0);
+                    let back = ((victim_dir as u16) + 8) % 16;
+                    sector_to_vector_iso(back, ASPECT_RATIO)
+                } else {
+                    (dx / dist, dy / dist)
+                }
+            } else {
+                // No antagonist, fly opposite current direction.
+                let victim_dir = self
+                    .get_entity(victim_id)
+                    .map(|e| e.element_data().direction())
+                    .unwrap_or(0);
+                let back = ((victim_dir as u16) + 8) % 16;
+                sector_to_vector_iso(back, ASPECT_RATIO)
+            };
+            // Scale unit vector to 30 units.
+            (dx * 30.0, dy * 30.0)
+        } else {
+            (0.0, 0.0)
+        };
+
+        // Validate the flight destination with fractional fallback.
+        let (goal_x, goal_y) = if flight_x.abs() > 0.01 || flight_y.abs() > 0.01 {
+            let pt_start = crate::geo2d::pt(victim_pos.x, victim_pos.y);
+            let mut gx = victim_pos.x;
+            let mut gy = victim_pos.y;
+            for &frac in &[1.0f32, 0.75, 0.5, 0.25] {
+                let try_x = victim_pos.x + flight_x * frac;
+                let try_y = victim_pos.y + flight_y * frac;
+                let pt_try = crate::geo2d::pt(try_x, try_y);
+                if self.fast_grid.is_straight_movement_authorized(
+                    pt_start,
+                    pt_try,
+                    victim_layer,
+                    &victim_move_box,
+                ) {
+                    gx = try_x;
+                    gy = try_y;
+                    break;
+                }
+            }
+            (gx, gy)
+        } else {
+            (victim_pos.x, victim_pos.y)
+        };
+
+        // Flight duration from the sprite's per-frame delay sum:
+        // walk the delay table and use the total tick count rather
+        // than the raw frame count.
+        let frames = {
+            let from_sprite = self
+                .get_entity(victim_id)
+                .map(|e| e.sprite())
+                .map(|s| s.total_ticks_for_anim(anim))
+                .unwrap_or(0);
+            if from_sprite > 1 { from_sprite } else { 8 }
+        };
+
+        // Set direction so the sprite flies back-first
+        // ((flightSector + 8) % 16).
+        let facing_sector = if flight_x.abs() > 0.01 || flight_y.abs() > 0.01 {
+            let fs = crate::position_interface::vector_to_sector_0_to_15(flight_x, flight_y);
+            (fs + 8) % 16
+        } else {
+            self.get_entity(victim_id)
+                .map(|e| e.element_data().direction())
+                .unwrap_or(0)
+        };
+
+        if let Some(Some(entity)) = self.entities.get_mut(victim_id.0 as usize) {
+            entity
+                .element_data_mut()
+                .set_direction_instantly(facing_sector);
+            // Set both direction goal and current direction so the
+            // body sprite faces back-first immediately rather than
+            // rotating into the flight pose.
+            if entity.actor_data().is_some() {
+                entity.position_iface_mut().set_direction_instantly(
+                    crate::position_interface::Direction::from_raw(facing_sector as i32),
+                );
+            }
+        }
+        // Drive the FALLING_HIT_* animation as the next order on the
+        // active damage element, marking the element
+        // NonInterruptable.  Posture (Flying/Moving on Start;
+        // Lying/DeadBack on Terminated) and ApplyDominoEffect are
+        // applied via the active_ai_anim handler + active_flight
+        // tick.
+        self.queue_damage_anim(victim_id, damage_element, anim);
+        // ActiveFlight is applied unconditionally (it's separate from
+        // animation state — the per-frame flight tick reads it).
+        if !is_harder_hit
+            && let Some(Some(entity)) = self.entities.get_mut(victim_id.0 as usize)
+            && let Some(actor) = entity.actor_data_mut()
+        {
+            let dx = goal_x - victim_pos.x;
+            let dy = goal_y - victim_pos.y;
+            if (dx.abs() > 0.01 || dy.abs() > 0.01) && frames > 0 {
+                actor.active_flight = Some(crate::element::ActiveFlight {
+                    increment_x: dx / frames as f32,
+                    increment_y: dy / frames as f32,
+                    goal_x,
+                    goal_y,
+                    frames_remaining: frames,
+                    antagonist: attacker_id,
+                    ..Default::default()
+                });
+            }
+        }
+
+        tracing::debug!(
+            victim = ?victim_id,
+            attacker = ?attacker_id,
+            ?anim,
+            harder = is_harder_hit,
+            "Hit fall animation dispatched"
+        );
+
+        // The default arm of the hit-damage path unconditionally
+        // attempts a roll, so any upright/crouched/sitting hit on a
+        // sloped obstacle queues a `Rolling` sub-animation.  The
+        // death/KO branches in `handle_post_damage` will queue a
+        // separate roll after death/unconscious posture, but a
+        // non-fatal hit on a slope must roll too.
+        self.try_queue_roll(assets, victim_id, damage_element);
+    }
+
+    /// Per-frame net-capture execute handler.
+    ///
+    /// Counter increment is **not** done here —
+    /// `EngineInner::apply_net_falling_effect` already bumped it
+    /// eagerly on capture.  This handler only runs the next-frame
+    /// work: posture snap, detectable broadcast, and AI stimulus
+    /// dispatch.
+    ///
+    /// Two guards apply:
+    /// 1. Skip entirely if already netted (re-execution from a
+    ///    duplicate element would otherwise double-broadcast).
+    /// 2. Skip the posture snap + AI work when the victim is in a
+    ///    posture that can't transition to StuckUnderNet (tied, KO,
+    ///    dead).  Counter still tracks though, so the same victim
+    ///    netted while tied gets released correctly on un-apply.
+    pub(super) fn apply_net(&mut self, victim_id: EntityId) {
+        let (already_stuck, can_transition) = match self.get_entity(victim_id) {
+            Some(e) => {
+                let posture = e.element_data().posture;
+                let already_stuck = posture == Posture::StuckUnderNet;
+                let unconscious = e.human_data().is_some_and(|h| h.unconscious);
+                let dead = e.is_dead();
+                let can_transition = posture != Posture::Tied && !unconscious && !dead;
+                (already_stuck, can_transition)
+            }
+            None => return,
+        };
+        if already_stuck || !can_transition {
+            return;
+        }
+
+        // SetStates(StuckUnderNet, Waiting).
+        if let Some(Some(entity)) = self.entities.get_mut(victim_id.0 as usize) {
+            entity.set_posture_stuck_under_net_for_human();
+        }
+
+        // Netted NPCs broadcast as DetectableType::Body to every NPC
+        // *immediately* (not deferred via inform_my_friends) and
+        // dispatch EventNet to their own AI so they transition to
+        // Substate::WonderingUnderNet.
+        let victim_is_npc = self
+            .get_entity(victim_id)
+            .map(|e| e.is_npc())
+            .unwrap_or(false);
+        if victim_is_npc {
+            self.broadcast_body_detectable(victim_id);
+            self.dispatch_ai_stimulus(
+                victim_id,
+                crate::ai::Stimulus::new(crate::ai::StimulusType::EventNet),
+            );
+        }
+    }
+
+    // ─── Post-damage state transitions ──────────────────────────────
+
+    /// Handle death and knockout transitions after damage is applied.
+    ///
+    /// Checks the entity's life points and concussion, applying the
+    /// appropriate state change:
+    /// - Life points <= 0 → death (posture Dead, quit swordfight)
+    /// - Concussion >= threshold → knockout (unconscious, posture Lying)
+    pub(super) fn handle_post_damage(
+        &mut self,
+        assets: &LevelAssets,
+        victim_id: EntityId,
+        attacker_id: Option<EntityId>,
+        no_damage: bool,
+        damage_element: (crate::sequence::SequenceId, usize),
+        dying_anim_override: Option<crate::order::OrderType>,
+    ) {
+        if no_damage {
+            return;
+        }
+
+        // Read state without holding a borrow on self
+        let (life_points, is_unconscious, is_pc, pc_profile_idx) = {
+            let victim = match self
+                .entities
+                .get(victim_id.0 as usize)
+                .and_then(|s| s.as_ref())
+            {
+                Some(e) => e,
+                None => return,
+            };
+            (
+                get_life_points(victim),
+                victim.human_data().map(|h| h.unconscious).unwrap_or(false),
+                victim.kind().is_pc(),
+                victim.pc_data().map(|pc| pc.profile_index),
+            )
+        };
+        let is_dead = life_points <= 0;
+
+        // Outer-gate: if the PC is already in coma, the whole
+        // coma-save/parent-wounded tree is skipped — a comatose PC is
+        // unkillable by further damage.  The subtraction is applied
+        // upstream of this function, so short-circuit the
+        // death/knockout branches here to preserve the
+        // no-op-on-already-comatose semantics.
+        if is_pc
+            && let Some(profile_idx) = pc_profile_idx
+            && self
+                .campaign
+                .as_ref()
+                .and_then(|c| c.characters.get(usize::from(profile_idx)))
+                .map(|desc| desc.status.in_coma)
+                .unwrap_or(false)
+        {
+            return;
+        }
+
+        if is_dead {
+            // Check for PC coma save before death
+            let saved = if is_pc {
+                self.try_pc_coma_save(assets, victim_id, life_points.unsigned_abs())
+            } else {
+                false
+            };
+            if !saved {
+                self.handle_death_with_damage_element(
+                    assets,
+                    victim_id,
+                    damage_element,
+                    dying_anim_override,
+                );
+            }
+        } else if is_unconscious {
+            // `inform_my_friends` only fires when the attacker is a
+            // PC.  Resolve the attacker identity here so
+            // `handle_knockout` can gate the broadcast.
+            let attacker_is_pc = attacker_id
+                .and_then(|id| self.entities.get(id.0 as usize).and_then(|s| s.as_ref()))
+                .map(|e| e.kind().is_pc())
+                .unwrap_or(false);
+            self.handle_knockout(assets, victim_id, damage_element, attacker_is_pc);
+        }
+    }
+
+    /// True if `victim_id` is a civilian carrying an unrevealed beggar
+    /// scroll.  A beggar mid-reveal is immune to wound / concussion
+    /// damage.  Callers use this to short-circuit damage entry points.
+    pub(crate) fn is_scroll_protected_civilian(&self, victim_id: EntityId) -> bool {
+        match self.get_entity(victim_id) {
+            Some(Entity::Civilian(c)) => c.npc.scroll_attached,
+            _ => false,
+        }
+    }
+
+    /// Handle entity death.
+    ///
+    /// Sets posture to Dead, quits swordfight, closes eyes for NPCs,
+    /// and flags the entity as dead for the game state checks.
+    pub(crate) fn handle_death(&mut self, assets: &LevelAssets, victim_id: EntityId) {
+        // Scripted-death entry (e.g. natives `HandleDeath` cheat).
+        // Launch a synthetic `ReceiveDamage` element targeting the
+        // victim with full life points and dispatch it synchronously
+        // — this routes through `dispatch_receive_damage` →
+        // `apply_generic_damage` → `handle_post_damage` → death path,
+        // pushing the dying + corpse-idle orders onto the element so
+        // `do_next_order` chains them naturally.
+        let life_points = self.get_entity(victim_id).map(get_life_points).unwrap_or(0);
+        let lethal_damage = if life_points > 0 {
+            life_points as u16
+        } else {
+            1
+        };
+        let elem = crate::sequence::SequenceElement::new_damage(
+            1,
+            crate::element::Command::ReceiveDamage,
+            Some(victim_id),
+            None,
+            lethal_damage,
+            0,
+        );
+        let seq_id = self.launch_element(elem);
+        let elem_idx = 0;
+        if !self.arbitrate_instruct(seq_id, elem_idx) {
+            return;
+        }
+        self.dispatch_receive_damage(assets, victim_id, seq_id, elem_idx);
+    }
+
+    /// Internal entry point for `handle_death` that accepts the active
+    /// receive-damage element so the dying animation chains via
+    /// `do_next_order` instead of `combat_anim`.  The death path
+    /// inserts `animDyingForward` onto the current sequence element;
+    /// after DYING terminates, the matching `BEING_DEAD_*`
+    /// corpse-idle order keeps returning IN_PROGRESS, so the element
+    /// stays `InProgress` forever — the visual dead body is the
+    /// terminal state.  We pre-push BOTH orders so `do_next_order`
+    /// makes the transition naturally on `DYING_*` MotionState::Terminated.
+    ///
+    /// Remove `subject` from every other NPC's `detectable_lists[kind]`.
+    /// `nets.rs::delete_body_detectable_for_all_npc` is the
+    /// `DetectableType::Body` inline version; this is the general
+    /// helper the death path uses for `Friend` / `MissedFriend`.
+    pub(super) fn delete_detectable_for_all_npc(
+        &mut self,
+        subject: EntityId,
+        kind: crate::element::DetectableType,
+    ) {
+        let det_idx = kind as usize;
+        let npc_ids = self.npc_ids.clone();
+        for npc_id in npc_ids {
+            if npc_id == subject {
+                continue;
+            }
+            if let Some(Some(Entity::Soldier(s))) = self.entities.get_mut(npc_id.0 as usize)
+                && det_idx < s.npc.detectable_lists.len()
+            {
+                s.npc.detectable_lists[det_idx].retain(|d| d.element != Some(subject));
+            } else if let Some(Some(Entity::Civilian(c))) = self.entities.get_mut(npc_id.0 as usize)
+                && det_idx < c.npc.detectable_lists.len()
+            {
+                c.npc.detectable_lists[det_idx].retain(|d| d.element != Some(subject));
+            }
+        }
+    }
+
+    /// PC-only portion of the kill cascade.
+    ///
+    /// Called from every PC death site so the cascade runs once per
+    /// kill regardless of which damage path triggered it:
+    /// - Gate `dead_pc = victim` on `is_vip && amulets == 0` (the
+    ///   `MSG_CHARACTER_KILLED` handler only sets `dead_pc` when the
+    ///   victim is a VIP, combined with the `!is_vip || amulets == 0`
+    ///   guard the net condition is `is_vip && amulets == 0`).
+    /// - When `!is_vip || amulets == 0`, drop the PC from the gang.
+    /// - When `!is_vip` and a peasant replacement exists, enable the
+    ///   trumpet portrait and bump the killed-peasant mission stat.
+    /// - Always: decrement the new-PC mission stat.
+    /// - Always: burn the three macro slots belonging to the dead PC.
+    pub(super) fn apply_pc_kill_cascade(&mut self, assets: &LevelAssets, victim_id: EntityId) {
+        let pc_info = self
+            .entities
+            .get(victim_id.0 as usize)
+            .and_then(|s| s.as_ref())
+            .and_then(|e| e.pc_data())
+            .map(|pc| pc.profile_index);
+        let Some(profile_idx) = pc_info else {
+            return;
+        };
+        let (is_vip, profile_name) = self
+            .campaign
+            .as_ref()
+            .and(assets.profile_manager.get_character(profile_idx))
+            .map(|cp| (cp.vip, cp.profile_name.clone()))
+            .unwrap_or((false, String::new()));
+        let amulets = self
+            .campaign
+            .as_ref()
+            .map(|c| c.values[crate::campaign::CampaignValue::Amulets as usize])
+            .unwrap_or(0);
+        let char_idx = self
+            .campaign
+            .as_ref()
+            .and_then(|c| c.get_character_by_profile(profile_idx));
+
+        // `!is_vip || amulets == 0` forwards the kill message and
+        // gang removal.  The dead-PC slot only latches when the
+        // victim is a VIP — net effect: `dead_pc = victim` iff
+        // `is_vip && amulets == 0`.
+        if !is_vip || amulets == 0 {
+            if let (Some(idx), Some(c)) = (char_idx, self.campaign.as_mut()) {
+                c.remove_from_gang(idx);
+            }
+            if is_vip {
+                self.dead_pc = Some(victim_id);
+            }
+        }
+
+        // Peasant trumpet + killed-peasant stat.
+        if !is_vip {
+            let has_replacement = self
+                .campaign
+                .as_ref()
+                .and_then(|c| {
+                    c.get_random_peasant_from_gang(Some(profile_idx), &assets.profile_manager)
+                })
+                .is_some();
+            if has_replacement
+                && let Some(Some(entity)) = self.entities.get_mut(victim_id.0 as usize)
+                && let Some(pc) = entity.pc_data_mut()
+            {
+                pc.trumpet_enabled = true;
+            }
+            self.mission_stat.add_killed_peasant();
+        }
+
+        // Unconditional new-PC mission-stat decrement.
+        if !profile_name.is_empty() {
+            self.mission_stat.remove_new_pc(&profile_name);
+        }
+
+        // Burn the three macro slots belonging to the dead PC.  We
+        // dispatch directly into `abort_quick_action` rather than
+        // enqueuing `PlayerCommand::DeleteMacro` to keep the cascade
+        // synchronous with the kill (the player-command queue would
+        // defer by a frame).  The single-PC path skips the macro
+        // tetris fold-up that the all-PCs broadcast path performs.
+        for slot in 0..=2u8 {
+            self.abort_quick_action(victim_id, slot);
+        }
+
+        // The portrait widget burn is replaced by the
+        // `is_dead || is_coma` derivation in
+        // `crates/robin_rs/src/ui_panel.rs`.  The Human-base portion
+        // of the kill is handled by the surrounding death-path code
+        // (concussion / KO / posture resets at the call site).
+    }
+
+    pub(crate) fn handle_death_with_damage_element(
+        &mut self,
+        assets: &LevelAssets,
+        victim_id: EntityId,
+        damage_element: (crate::sequence::SequenceId, usize),
+        dying_anim_override: Option<crate::order::OrderType>,
+    ) {
+        tracing::info!(entity = ?victim_id, "Entity died");
+
+        // Snapshot the pre-death action state for corpse-idle selection.
+        let action_at_death = self
+            .get_entity(victim_id)
+            .and_then(|e| e.actor_data().map(|a| a.action_state))
+            .unwrap_or_default();
+
+        // Select dying animation (None when posture is already
+        // Lying/Dead/Carried — the "already on the ground" case).
+        // When the caller supplied an override (sword strike with a
+        // positive stunning effect against a non-rider), use it in
+        // place of the default `dying_forward`; the override is
+        // itself None when the selector returns None for the
+        // posture.
+        let dying_anim = self.get_entity(victim_id).and_then(|e| {
+            let posture = e.element_data().posture;
+            let action = e.actor_data().map(|a| a.action_state).unwrap_or_default();
+            select_combat_animations(posture, action)
+                .map(|a| dying_anim_override.unwrap_or(a.dying_forward))
+        });
+
+        // Corpse-idle always resolves (unlike `dying_anim`): even
+        // when posture is already Lying we need a pose for the
+        // sprite to clamp onto.  Selection is keyed by action_state
+        // — falling back to the action-state map when the dying anim
+        // isn't in the main three families.
+        let corpse_anim = match dying_anim {
+            Some(OrderType::DyingSword) => OrderType::BeingDeadSword,
+            Some(OrderType::DyingBow) => OrderType::BeingDeadBow,
+            Some(OrderType::DyingUpright) | Some(OrderType::DyingCrouched) => OrderType::BeingDead,
+            _ => match action_at_death {
+                a if a.is_sword() => OrderType::BeingDeadSword,
+                a if a.is_bow() => OrderType::BeingDeadBow,
+                _ => OrderType::BeingDead,
+            },
+        };
+
+        if let Some(anim) = dying_anim {
+            // Run `find_place_to_die` at dispatch time so the corpse
+            // is nudged before the animation starts driving.
+            self.find_place_to_die(victim_id);
+            self.queue_damage_anim(victim_id, damage_element, anim);
+            // Pre-push the corpse-idle as the next order so
+            // `do_next_order` advances to it on DYING TERMINATED.
+            // The BeingDead* execute path always returns IN_PROGRESS
+            // so the active_ai_anim never tears down — corpse loops
+            // forever.
+            let (dseq, didx) = damage_element;
+            self.push_new_order(dseq, didx, corpse_anim, 0.0, 0.0);
+        } else {
+            // Posture didn't map to a dying animation — the actor
+            // is already Lying / DeadBack / Carried / etc.  No
+            // fall-down transition is needed (they're already down),
+            // but we still need a corpse-idle to clamp the sprite:
+            // without it the in-flight StandingUp animation (the one
+            // the soldier was playing when the lethal blow landed)
+            // runs to completion and the corpse visually stands back
+            // up.  Push the matching BeingDead* order so the sprite
+            // snaps to the corpse pose.
+            let (dseq, didx) = damage_element;
+            self.push_new_order(dseq, didx, corpse_anim, 0.0, 0.0);
+        }
+
+        // Read the killer from the damage element so we can set the
+        // `inform_my_friends` flag below (true when the killer is a
+        // PC).  Done before `kill_owner_sequences` so we still have
+        // the damage-element data handy.
+        let killer_is_pc = self
+            .sequence_manager
+            .get_element(damage_element.0, damage_element.1)
+            .and_then(|e| match &e.data {
+                crate::sequence::SequenceElementData::Damage { origin, .. } => *origin,
+                _ => None,
+            })
+            .and_then(|k| self.entities.get(k.0 as usize).and_then(|s| s.as_ref()))
+            .map(|e| e.is_pc())
+            .unwrap_or(false);
+
+        // Throw away every sequence element the victim owns except the
+        // damage sequence (which just had `DyingSword` + corpse-idle
+        // orders queued).  The general-purpose `stop_owner` path is
+        // wrong for death — it calls `stop_movement_for_owner` which
+        // rewrites a walking order to a `TransitionWalking*Waiting*`
+        // stop-animation and lets the movement element keep playing,
+        // producing a "corpse walks a few more frames" visual.  We want
+        // a hard interrupt instead, so the only InProgress element
+        // `current_element_for_actor` finds is the damage element, and
+        // its `DyingSword` order becomes the actor's current order.
+        self.sequence_manager
+            .kill_owner_sequences(victim_id, damage_element.0);
+
+        // Remove the dying soldier from every other NPC's
+        // friend/missed-friend tracker so they don't keep looking for
+        // him after he's on the ground.
+        self.delete_detectable_for_all_npc(victim_id, crate::element::DetectableType::Friend);
+        self.delete_detectable_for_all_npc(victim_id, crate::element::DetectableType::MissedFriend);
+
+        let victim = match self
+            .entities
+            .get_mut(victim_id.0 as usize)
+            .and_then(|s| s.as_mut())
+        {
+            Some(e) => e,
+            None => return,
+        };
+
+        // Clear movement-side state on the actor so no stale path or
+        // active-movement handle is left pointing at the torn-down
+        // walk sequence.  We intentionally do NOT set `posture` or
+        // `action_state` here — the dying animation's
+        // `apply_dying_start_side_effect` (in `animation.rs`) sets
+        // them when the anim starts.  Setting posture=Dead eagerly
+        // makes the sprite snap to the corpse pose before the dying
+        // transition plays, skipping the visible animation.
+        if let Some(actor) = victim.actor_data_mut() {
+            actor.active_melee.clear();
+            actor.active_movement.clear();
+            actor.clear_path();
+        }
+
+        // NPC kill cascade: alert reset, state snap, emoticon clear,
+        // and intent-queue drain.
+        if let Some(ai) = victim.ai_controller_mut() {
+            ai.set_alert_status_with_flags(
+                crate::ai::AlertLevel::Green,
+                crate::ai::AlertFlags::INSTANT_MUSIC_CHANGE,
+                false,
+            );
+            ai.current_state = crate::ai::AiState::Sleeping;
+            ai.current_substate = crate::ai::Substate::SleepingForever;
+            ai.clear_emoticon();
+            // Drop every pending AI intent queued by the think that
+            // ran earlier in this tick.  `handle_death` is the single
+            // runtime death site, so draining the intent queues here
+            // means the downstream drain loops
+            // (`process_pending_ai_orders`, the pending-flags block
+            // in `engine/ai.rs`) naturally no-op on dead entities
+            // without needing individual `is_dead` gates.
+            ai.clear_all_pending();
+        }
+
+        if let Some(npc) = victim.npc_data_mut() {
+            // Close eyes if not already closed — the guard prevents
+            // re-triggering the eye-shut animation on an NPC killed
+            // while already sleeping (e.g. assassinated in his cot).
+            if npc.eye_status != EyeStatus::Closed {
+                crate::ai_vision::set_view_status(npc, EyeStatus::DieOrGetUnconscious);
+            }
+            npc.alerted = false;
+            // True when the killer is a PC.  The flag is cleared once
+            // the sweep fires in `tick_inform_my_friends`.
+            npc.inform_my_friends = killer_is_pc;
+            if let Some(ai) = npc.ai_brain.base_mut() {
+                ai.knocked_out_in_money_fight = false;
+            }
+        }
+
+        // PC-only kill cascade — see `apply_pc_kill_cascade`.
+        let is_pc = victim.kind().is_pc();
+        if is_pc {
+            self.apply_pc_kill_cascade(assets, victim_id);
+        }
+
+        // Clear concussion / unconscious state and drop any
+        // unconscious-stars titbit for this entity.  Without this a
+        // KO'd human killed mid-stars would leave the titbit orphaned
+        // and the dead body would serialize with residual concussion
+        // / KO flags.
+        //
+        // Read the live unconscious flag *before* zeroing it below
+        // so the predicate reflects actual entity state — the
+        // unconscious-stars cleanup runs while the flag is still
+        // true; the per-frame update reaps the titbit once the flag
+        // turns false a tick later.
+        let still_unconscious = self
+            .entities
+            .get(victim_id.0 as usize)
+            .and_then(|s| s.as_ref())
+            .and_then(|e| e.human_data())
+            .is_some_and(|h| h.unconscious);
+        self.titbit_manager.remove_unconscious_stars_if(
+            crate::titbit::ElementHandle(victim_id.0),
+            still_unconscious,
+        );
+        if let Some(Some(entity)) = self.entities.get_mut(victim_id.0 as usize)
+            && let Some(human) = entity.human_data_mut()
+        {
+            human.unconscious = false;
+            human.concussion_of_the_brain = 0;
+            human.concussion_healing_timeout = 0;
+        }
+
+        // Quit swordfight (removes from all opponents' lists)
+        self.quit_swordfight(assets, victim_id);
+
+        // Queue roll if on a slope.
+        self.try_queue_roll(assets, victim_id, damage_element);
+
+        // Mission-stat bump for Royalist soldier deaths.
+        let bump_killed_allied = self
+            .get_entity(victim_id)
+            .map(|e| e.is_soldier() && e.camp() == Camp::Royalists)
+            .unwrap_or(false);
+        if bump_killed_allied {
+            self.mission_stat.add_killed_allied();
+        }
+
+        // Campaign score bump for Lacklandist soldier deaths during
+        // a sword/generic-damage interaction.  Arrow kills route
+        // through `bow_shot::apply_arrow_hit` and never reach
+        // `handle_death_with_damage_element`, so they don't get this
+        // bump — matching the wounded-only scoping.
+        const SCORE_SOLDIER_KILLED_DURING_FIGHT: i32 = 50;
+        let bump_lacklandist_score = self
+            .get_entity(victim_id)
+            .map(|e| e.is_soldier() && e.camp() == Camp::Lacklandists)
+            .unwrap_or(false);
+        if bump_lacklandist_score && let Some(campaign) = self.campaign.as_mut() {
+            campaign.add_value(
+                crate::campaign::CampaignValue::Score as usize,
+                SCORE_SOLDIER_KILLED_DURING_FIGHT,
+            );
+        }
+    }
+
+    /// Handle entity knockout (went unconscious from concussion).
+    ///
+    /// Sets posture to Lying, quits swordfight, closes eyes for NPCs.
+    pub(super) fn handle_knockout(
+        &mut self,
+        assets: &LevelAssets,
+        victim_id: EntityId,
+        damage_element: (crate::sequence::SequenceId, usize),
+        attacker_is_pc: bool,
+    ) {
+        let concussion = self
+            .get_entity(victim_id)
+            .and_then(|e| e.human_data())
+            .map(|h| h.concussion_of_the_brain)
+            .unwrap_or(0);
+
+        tracing::info!(entity = ?victim_id, concussion, "Entity knocked out");
+
+        // Select falling-back animation.  The animation is inserted
+        // as the next order on the active damage element, with the
+        // element's priority lifted to NonInterruptable.
+        let falling_anim = self
+            .get_entity(victim_id)
+            .and_then(|e| {
+                let posture = e.element_data().posture;
+                let action = e.actor_data().map(|a| a.action_state).unwrap_or_default();
+                select_combat_animations(posture, action)
+            })
+            .map(|a| a.falling_back);
+        if let Some(anim) = falling_anim {
+            tracing::trace!(
+                ?victim_id,
+                ?anim,
+                "handle_knockout: queuing falling animation"
+            );
+            // Run `find_place_to_die` at dispatch time.
+            self.find_place_to_die(victim_id);
+            self.queue_damage_anim(victim_id, damage_element, anim);
+        } else {
+            tracing::warn!(
+                ?victim_id,
+                "handle_knockout: no falling_anim selected — entity will snap to ground without animation"
+            );
+        }
+
+        // If a falling_back animation is going to play, leave the
+        // posture where it is — the animation-completion handler in
+        // tick_entity_animations will set Posture::Lying when the anim
+        // terminates.  Setting Lying now would snap the
+        // unconscious-star titbit to the crawling-offset position
+        // while the sprite is still visually standing through the
+        // falling animation, producing a floating-above-nothing
+        // star.  If no falling animation was selected (e.g. entity
+        // was in a posture that doesn't map to one), fall back to
+        // the original immediate-lying behavior so downstream code
+        // that assumes Lying for unconscious humans still works.
+        self.apply_knockout_side_effects(assets, victim_id, attacker_is_pc, falling_anim.is_none());
+
+        // Queue roll if on a slope.
+        self.try_queue_roll(assets, victim_id, damage_element);
+    }
+
+    pub(super) fn apply_knockout_side_effects(
+        &mut self,
+        assets: &LevelAssets,
+        victim_id: EntityId,
+        attacker_is_pc: bool,
+        set_lying_now: bool,
+    ) {
+        let Some(victim) = self
+            .entities
+            .get_mut(victim_id.0 as usize)
+            .and_then(|s| s.as_mut())
+        else {
+            return;
+        };
+
+        if set_lying_now && !victim.element_data().posture.is_lying() {
+            victim.set_posture(Posture::Lying);
+        }
+
+        if let Some(actor) = victim.actor_data_mut() {
+            if actor.action_state.is_sword() || actor.action_state == ActionState::Menacing {
+                actor.action_state = ActionState::Waiting;
+            }
+            actor.active_melee.clear();
+            actor.clear_path();
+        }
+
+        if let Some(npc) = victim.npc_data_mut() {
+            crate::ai_vision::set_view_status(npc, EyeStatus::DieOrGetUnconscious);
+            npc.alerted = false;
+            // Clear suspects before the EventLoseConsciousness
+            // dispatch.
+            npc.clear_all_suspects();
+            // True when the attacker is a PC.
+            npc.inform_my_friends = attacker_is_pc;
+        }
+
+        // Quit swordfight (removes from all opponents' lists).
+        self.quit_swordfight(assets, victim_id);
+
+        // Dispatch EventLoseConsciousness to the downed NPC's own AI.
+        self.dispatch_ai_stimulus(
+            victim_id,
+            crate::ai::Stimulus::new(crate::ai::StimulusType::EventLoseConsciousness),
+        );
+
+        // Add unconscious star titbit (event-driven creation).
+        self.add_unconscious_star(victim_id);
+    }
+}

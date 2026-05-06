@@ -1,0 +1,44 @@
+[package]
+name = "robin_engine"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "robin_engine"
+
+[features]
+default = []
+# Expose `Engine::test_set_*` helpers on the facade for cross-crate
+# round-trip tests.  Enabled via `[dev-dependencies]` in `robin_rs`
+# so production builds keep the minimal sim-mutation surface.
+test-helpers = []
+
+[dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+tracing = "0.1"
+thiserror = "2"
+# Drop-in for `std::time::{Instant, SystemTime}` that works on
+# `wasm32-unknown-unknown`.  std's types compile fine for that target
+# but `Instant::now()` panics at runtime with "time not implemented
+# on this platform"; web-time uses `performance.now()` instead.
+web-time = "1"
+fastrand = "2"
+bitflags = { version = "2", features = ["serde"] }
+num_enum = "0.7"
+anyhow = "1"
+strum = "0.28.0"
+strum_macros = "0.28.0"
+byteorder = "1"
+md5_crate = { package = "md-5", version = "0.11" }
+geo = { version = "0.33", features = ["serde"] }
+robin_util = { path = "../robin_util" }
+robin_state_hash_derive = { path = "../robin_state_hash_derive" }
+bytemuck = "1"
+nonmax = { version = "0.5", features = ["serde"] }
+bitcode = { version = "0.6", features = ["serde"] }
+bincode = { version = "2", features = ["serde"] }
+[dev-dependencies]
+tempfile = "3"
+tracing-subscriber = "0.3"

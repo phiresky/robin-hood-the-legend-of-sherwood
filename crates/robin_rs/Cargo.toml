@@ -1,0 +1,158 @@
+[package]
+name = "robin_rs"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "robin_rs"
+# `cdylib` is required for `wasm-bindgen` to emit JS glue against the
+# crate.  `rlib` keeps the lib usable as a normal Rust dependency
+# (the `bin/robin.rs` entry, dev-dependencies, integration tests).
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+robin_engine = { path = "../robin_engine" }
+robin_assets = { path = "../robin_assets" }
+robin_util = { path = "../robin_util" }
+md5_crate = { package = "md-5", version = "0.11" }
+ab_glyph = "0.2"
+geo = { version = "0.33", features = ["serde"] }
+bitflags = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+serde-value = "0.7"
+tracing = "0.1"
+thiserror = "2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+jiff = "0.2"
+fastrand = "2"
+rand = "0.10"
+font8x8 = "0.3"
+anyhow = "1"
+libc = "0.2"
+num_enum = "0.7"
+bytemuck = { version = "1", features = ["derive"] }
+byteorder = "1"
+flate2 = "1"
+bzip2 = "0.6"
+strum = "0.28.0"
+strum_macros = "0.28.0"
+clap = { version = "4", features = ["derive"] }
+dirs = { version = "6", optional = true }
+ffmpeg-next = { version = "8", optional = true }
+png = "0.18"
+bitcode = { version = "0.6", features = ["serde"] }
+# Engine snapshots for multiplayer mid-mission joins.  Bitcode caps
+# enum variants at 256; some sim enums exceed that, so the snapshot
+# path uses bincode instead (no enum-size limit, slightly larger
+# wire payload — fine for a one-shot send at handshake time).
+bincode = { version = "2", features = ["serde"] }
+zstd = "0.13"
+base64 = "0.22"
+librashader = { path = "../../third_party/librashader/librashader", default-features = false, features = ["presets", "runtime-wgpu", "stable"] }
+
+# Windowing + input
+winit = { version = "0.30", features = ["android-native-activity"] }
+raw-window-handle = "0.6"
+gilrs = "0.11"
+arboard = { version = "3", optional = true }
+
+# GPU.  `webgl` enables wgpu's WebGL2 backend so wasm builds work on
+# browsers that don't yet expose WebGPU (most non-Chrome desktops as
+# of 2026).  Adds a few KiB to native; harmless to keep on.
+wgpu = { version = "29", features = ["webgl", "glsl"] }
+pollster = "0.4"
+
+# Audio
+kira = { version = "0.12", optional = true }
+# Spatial-audio coords for kira (kira's spatial API takes mint::Vector3 /
+# Quaternion; glam types convert via mint compat). We talk to it directly
+# in mint to avoid pulling glam in as a direct dep.
+mint = { version = "0.5", optional = true }
+
+# Async plumbing for the ApplicationHandler ↔ game-loop bridge.
+# The whole game loop is `async fn`; on native it runs on a dedicated
+# `std::thread` driven by `pollster::block_on`, on wasm it's a
+# `wasm_bindgen_futures::spawn_local` future on the main thread.
+async-channel = "2"
+# `web-time` is a drop-in replacement for `std::time::{Instant, SystemTime}`
+# that uses `performance.now()` on wasm and the std types on native.
+# `std::time::Instant::now()` panics on `wasm32-unknown-unknown`.
+web-time = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+# Native-only: tiny blocking HTTP server for the script-RPC endpoint.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tiny_http = "0.12"
+# Multiplayer transport.  The host/server side still uses blocking
+# tungstenite in spawned OS threads; native clients use
+# tokio-tungstenite so inbound frames and outbound game-loop messages
+# are selected without read-timeout polling.
+tungstenite = "0.28"
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
+tokio-tungstenite = "0.28"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Direct JNI calls let android_main ask the Java Activity to leave the
+# Android task before we hard-exit the process for winit's single-EventLoop
+# limitation.
+jni = "0.22.4"
+
+# Wasm-only: wasm-bindgen + web-sys glue, plus a JS-backed timer for
+# async pacing inside the game loop.  Single-threaded — no `wasm-bindgen-rayon`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "Location",
+    "Performance",
+    "Storage",
+    "Url",
+    "UrlSearchParams",
+    # Multiplayer client transport (wasm clients connect to a
+    # native --server).  `BinaryType` lets us request binary frames
+    # rather than Base64-encoded strings; `MessageEvent` carries the
+    # received frame on `onmessage`; `CloseEvent` / `ErrorEvent` for
+    # disconnect signalling; `WebSocket` is the transport itself.
+    "WebSocket",
+    "BinaryType",
+    "MessageEvent",
+    "CloseEvent",
+    "ErrorEvent",
+] }
+console_error_panic_hook = "0.1"
+tracing-wasm = "0.2"
+gloo-timers = { version = "0.4", features = ["futures"] }
+# Enable `crypto.getRandomValues` for the `getrandom` major version
+# used by the wasm dependency graph.
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+tempfile = "3"
+qoi = "0.4"
+robin_engine = { path = "../robin_engine", features = ["test-helpers"] }
+
+[features]
+default = ["native-fs", "audio", "video"]
+android = ["audio"]
+audio = ["dep:kira", "dep:mint"]
+# Cutscene video playback (Intro/Outro.ogg).  Pulls in ffmpeg-next,
+# which does not build on wasm32 — wasm builds turn the default
+# features off and re-enable selectively. Android builds should do the
+# same for now; ffmpeg packaging is TODO once the native APK boots.
+video = ["dep:ffmpeg-next", "audio"]
+# Standard filesystem-backed save / replay directory resolution via the
+# `dirs` crate.  Disabled on wasm where saves/replays go through a
+# browser-side mechanism instead of OS data dirs.
+native-fs = ["dep:dirs", "dep:arboard"]
+
+[[bin]]
+name = "robin"
+path = "src/bin/robin.rs"

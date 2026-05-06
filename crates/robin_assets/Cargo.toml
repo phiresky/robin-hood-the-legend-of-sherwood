@@ -1,0 +1,42 @@
+[package]
+name = "robin_assets"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "robin_assets"
+
+[dependencies]
+robin_util = { path = "../robin_util" }
+robin_engine = { path = "../robin_engine" }
+serde = { version = "1", features = ["derive", "rc"] }
+tracing = "0.1"
+thiserror = "2"
+anyhow = "1"
+byteorder = "1"
+bytemuck = "1"
+flate2 = "1"
+bitcode = { version = "0.6", features = ["serde"] }
+serde_json = "1"
+zstd = "0.13"
+md5_crate = { package = "md-5", version = "0.11" }
+# Official libjxl Rust port (https://github.com/libjxl/jxl-rs). Used to
+# decode terrain `.map` files when the converter has transcoded them to
+# JPEG XL. Disable default SIMD because this workspace currently uses
+# Cranelift in dev builds, and jxl's default AVX512 path hits unsupported
+# intrinsics there.
+jxl = { version = "0.4", default-features = false }
+
+# `bzip2` is only needed when reading **legacy** SBPictureSixteen data
+# (`.bfn` glyph tables, loose `.res` archives shipped by the original
+# game).  The shipping datadir format is zstd end-to-end, so wasm builds
+# — which only consume shipping blobs — don't pull this in.  The
+# pure-Rust `libbz2-rs-sys` backend also trips a `set_len > capacity`
+# UB check on wasm32 inside its spare-capacity handling; keeping the
+# dep native-only dodges that entirely.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bzip2 = "0.6"
+
+[dev-dependencies]
+tempfile = "3"

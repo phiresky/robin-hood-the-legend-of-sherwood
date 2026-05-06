@@ -1,0 +1,239 @@
+//! Replay recorder/player and rollback-checker setup.
+//!
+//! Houses the `TeeWriter` adapter, the default replay path picker, the
+//! `ReplayAndRollback` bundle, and `init_replay_and_rollback` itself.
+
+use robin_engine::engine::{Engine, LevelAssets};
+use std::sync::Arc;
+
+/// `Write` adapter that forwards bytes to a primary sink (the
+/// `.rhrec.jsonl` file on disk on native; [`std::io::sink`] on wasm
+/// where the browser has no filesystem) and also appends them to a
+/// shared in-memory mirror so the script-RPC `get-replay` endpoint
+/// can snapshot the recording directly from memory.
+///
+/// Only used by `init_replay_and_rollback`; kept here (rather than in
+/// `replay`) so the recorder itself stays filesystem-agnostic.
+struct TeeWriter {
+    primary: Box<dyn std::io::Write + Send>,
+    mirror: crate::http_server::ReplayBuffer,
+}
+
+impl std::io::Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.mirror
+            .lock()
+            .expect("replay mirror poisoned")
+            .extend_from_slice(buf);
+        self.primary.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.primary.flush()
+    }
+}
+
+fn default_replay_path() -> String {
+    use std::path::PathBuf;
+    #[cfg(feature = "native-fs")]
+    let dir = dirs::data_dir()
+        .map(|d| d.join("robin_hood").join("replays"))
+        .unwrap_or_else(|| PathBuf::from("Data/Replays"));
+    #[cfg(not(feature = "native-fs"))]
+    let dir = PathBuf::from("Data/Replays");
+    // `%:z` → `+HH:MM`; we strip the inner colon so the whole stamp is
+    // filesystem-safe (e.g. `2026-04-17T09-32-15+02-00`).
+    let stamp = jiff::Zoned::now()
+        .strftime("%Y-%m-%dT%H-%M-%S%:z")
+        .to_string()
+        .replace(':', "-");
+    dir.join(format!("{stamp}{}", crate::main_entry::RHREC_EXT))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Bundle of determinism-related mission state built by
+/// [`init_replay_and_rollback`] — replay recorder, replay player,
+/// rollback checker, and the hold-to-rewind snapshot buffer.
+pub(super) struct ReplayAndRollback {
+    pub(super) recorder: Option<crate::replay::ReplayRecorder>,
+    pub(super) player: Option<crate::replay::ReplayPlayer>,
+    pub(super) rollback_checker: Option<crate::rollback_checker::RollbackChecker>,
+    pub(super) rewind_buffer: crate::rewind::RewindBuffer,
+    /// Final value of the "start paused" toggle — true if either
+    /// `--start-paused` was passed on the command line, or a pending
+    /// `load-replay` RPC call requested it.
+    pub(super) start_paused: bool,
+}
+
+/// Wire up replay recording / playback, the runtime rollback checker,
+/// and the hold-to-rewind snapshot buffer.
+///
+/// Record-by-default: when `--record` is omitted and we're not
+/// replaying, drop a recording into `<data_dir>/robin_hood/replays/`
+/// with an ISO-8601 timestamp name so every session can be re-run
+/// deterministically later.  Pass `--record <path>` to override the
+/// destination, or `--replay <path>` to disable recording entirely.
+///
+/// Seeds the engine RNG from the replay header when playing back so
+/// the deterministic stream matches the recording bit-for-bit.
+pub(super) fn init_replay_and_rollback(
+    engine: &mut Engine,
+    assets: Arc<LevelAssets>,
+    args: &crate::main_entry::CliArgs,
+    _mission_idx: usize,
+    mission_id: &str,
+    engine_rng_seed: u64,
+    is_multiplayer: bool,
+) -> ReplayAndRollback {
+    // A `load-replay` RPC call takes precedence over `--replay`: the
+    // user asked us explicitly, live, to play this data.  `paused` is
+    // surfaced through `replay_pause_override` so the caller in
+    // `run_mission` can OR it into `manual_pause`.
+    let pending = crate::http_server::take_pending_replay();
+    let pending_paused = pending.as_ref().is_some_and(|p| p.paused);
+
+    // No recording while playing back (either source).
+    let is_playing_back = pending.is_some() || args.replay.is_some();
+    // The script-RPC `get-replay` endpoint serves a byte-for-byte
+    // mirror of the recorder's output.  Reset it here (fresh mission =
+    // fresh buffer) and tee every recorder write into it via
+    // `TeeWriter` below.
+    crate::http_server::reset_replay_buffer();
+    let rpc_buffer = crate::http_server::replay_buffer_handle();
+    let recorder = if is_playing_back {
+        None
+    } else {
+        // Native path owns an on-disk `.rhrec.jsonl` file so replays
+        // survive across sessions.  On wasm the browser has no
+        // filesystem — we fall back to `std::io::sink` for the
+        // primary and rely exclusively on the mirror buffer (which
+        // `get-replay` serializes straight back to the JS caller).
+        #[cfg(not(target_arch = "wasm32"))]
+        let primary: Option<Box<dyn std::io::Write + Send>> = {
+            let path = args.record.clone().unwrap_or_else(default_replay_path);
+            if let Some(parent) = std::path::Path::new(&path).parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                tracing::error!("Failed to create replay dir {parent:?}: {e}");
+                None
+            } else {
+                match std::fs::File::create(&path) {
+                    Ok(f) => {
+                        tracing::info!("Recording replay → {path}");
+                        Some(Box::new(f))
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to create replay file {path}: {e}");
+                        None
+                    }
+                }
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let primary: Option<Box<dyn std::io::Write + Send>> = {
+            tracing::info!("Recording replay (in-memory only — wasm)");
+            Some(Box::new(std::io::sink()))
+        };
+
+        // `mission_id` (e.g. `"Dem_Lei_MP"`, `"Sherwood"`) is the
+        // `.rhm` filename — stamped into the header so a later
+        // `--replay` picks the right mission without threading the
+        // campaign index through.  Pre-resolved by the caller;
+        // `run_mission` has already moved the campaign into the
+        // engine by now, so the `&Campaign` lookup that used to live
+        // here would see an empty stub.
+        primary.and_then(|primary| {
+            let writer: Box<dyn std::io::Write + Send> = Box::new(TeeWriter {
+                primary,
+                mirror: rpc_buffer.clone(),
+            });
+            match crate::replay::ReplayRecorder::with_writer_and_campaign(
+                writer,
+                mission_id.to_string(),
+                engine_rng_seed,
+                engine.campaign(),
+            ) {
+                Ok(rec) => Some(rec),
+                Err(e) => {
+                    tracing::error!("Failed to initialize replay recorder: {e}");
+                    None
+                }
+            }
+        })
+    };
+
+    let player = if let Some(p) = pending {
+        tracing::info!(
+            "Loaded replay (pending): {} frames, seed {}, paused={}",
+            p.data.frame_count(),
+            p.data.header.rng_seed,
+            p.paused,
+        );
+        // `pending` is the mid-session `load-replay` RPC path: the
+        // engine is already up and running with whatever RNG state the
+        // current mission produced, so we DO need to override here to
+        // reproduce the recording.  The `--replay` startup path does
+        // not need this — `Engine::new` was already constructed with
+        // `EngineArgs::rng_seed` set to the recording's header seed.
+        engine.restore_rng_from_seed(p.data.header.rng_seed);
+        Some(crate::replay::ReplayPlayer::new(p.data))
+    } else {
+        args.replay
+            .as_ref()
+            .and_then(|spec| match crate::replay_format::load_replay_spec(spec) {
+                Ok(data) => {
+                    tracing::info!(
+                        "Loaded replay: mission `{}`, {} frames, seed {}",
+                        data.header.mission_id,
+                        data.frame_count(),
+                        data.header.rng_seed,
+                    );
+                    // No restore_rng_from_seed here: see EngineArgs
+                    // setup in `load_level_and_sprite_bank` — the
+                    // engine RNG was already seeded at construction
+                    // with this header's seed.
+                    Some(crate::replay::ReplayPlayer::new(data))
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load replay: {e}");
+                    None
+                }
+            })
+    };
+
+    // Rollback checker rewinds 25 frames every sim frame and re-simulates
+    // to verify determinism. Disabled during replay playback (no new
+    // commands to verify), when `--rollback-check=false`, on wasm, and
+    // in multiplayer. Multiplayer still logs real host/client desyncs
+    // through authoritative state-hash comparison; the local rollback
+    // checker is too expensive to run inside the live netcode loop.
+    let rollback_checker = if args.rollback_check
+        && player.is_none()
+        && !cfg!(target_arch = "wasm32")
+        && !is_multiplayer
+    {
+        Some(crate::rollback_checker::RollbackChecker::new(assets))
+    } else {
+        if is_multiplayer && args.rollback_check && player.is_none() {
+            tracing::info!(
+                "multiplayer: rollback checker disabled; using host state-hash desync logs"
+            );
+        }
+        None
+    };
+
+    // Hold-to-rewind buffer keeps exponentially-spaced pre-tick sim
+    // clones so BACKSPACE can replay the game backwards at normal
+    // speed.  Disabled during replay playback because the replay path
+    // owns the command stream.
+    let rewind_buffer = crate::rewind::RewindBuffer::new();
+
+    ReplayAndRollback {
+        recorder,
+        player,
+        rollback_checker,
+        rewind_buffer,
+        start_paused: args.start_paused || pending_paused,
+    }
+}

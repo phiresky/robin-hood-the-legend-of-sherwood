@@ -1,0 +1,252 @@
+# Robin Hood — The Legend Of Sherwood
+
+A from-scratch Rust reimplementation of the 2002 stealth-tactics game
+[Robin Hood - The Legend of Sherwood](https://en.wikipedia.org/wiki/Robin_Hood:_The_Legend_of_Sherwood)
+by Spellbound. Loads the original game's data files (demo or full release -
+see [DATADIRS.md](DATADIRS.md) for known versions and where to get them)
+and plays them through a pure-Rust engine.
+
+## Status
+
+Playable mosly on the Leicester demo and the full campaign: main
+menu, campaign map, missions, save/load, replays should all _mostly_ work.
+~270K LOC across five workspace crates, ~1,600 tests. See [NEW_FEATURES.md](NEW_FEATURES.md)
+for new and future additions.
+
+## Building
+
+Currently only tested on a Linux host. Optional features: `video` (cutscenes via ffmpeg-next, on by default), `native-fs`
+(OS data-dir lookup, on by default).
+
+Theoretically, all the following platforms should be supported:
+
+- Linux (wayland or X11)
+- Windows
+- MacOS
+- Android (with touch support)
+- Browser (WASM)
+
+The toolchain (nightly Rust + cranelift
+codegen backend) is pinned via [rust-toolchain.toml](rust-toolchain.toml)
+and will be installed automatically by rustup.
+
+    cargo build --bin robin          # debug
+    cargo build --bin robin --release
+
+Debug builds are tuned for fast iteration: `mold` linker,
+`sccache` rustc wrapper, cranelift backend, dependencies built at
+`opt-level=2`. See [AGENTS.md](AGENTS.md) for the full notes.
+
+Tests and lints:
+
+    cargo test
+    cargo clippy --all-targets -- -D warnings
+    cargo fmt
+
+### WebAssembly (browser)
+
+The game builds for `wasm32-unknown-unknown` and uses `wasm-bindgen`
+browser glue.  Audio, `ffmpeg-next`, and OS-data-dir support are disabled
+for wasm builds. TODO: fix audio.
+
+    cargo build -Zbuild-std=std,panic_abort \
+        --target wasm32-unknown-unknown \
+        --profile wasm-dev            \
+        --no-default-features         \
+        -p robin_rs --bin robin
+
+Swap `--profile wasm-dev` for `--profile wasm-release` for the smallest
+optimized build.  The release wasm profile uses `opt-level = "z"`, full
+LTO, one codegen unit, no debuginfo, and aborting panics.  The two custom
+profiles (defined in the workspace `Cargo.toml`) force the LLVM codegen
+backend — cranelift doesn't target wasm.
+
+Run `wasm-bindgen --target web` on the produced `.wasm` into
+`wasm-www/pkg/`, then build the web package from `wasm-www/`:
+
+    pnpm build
+
+For the GitHub Pages shell, run:
+
+    pnpm build:shell
+
+That type-checks and bundles the TypeScript loader, then inlines the
+compiled module into `dist-inline/index.html` so Pages can still deploy a
+single HTML file. To apply the wasm optimization step to raw wasm-bindgen
+output, run:
+
+    pnpm strip:wasm-pkg
+
+To split/strip a single Cargo-produced wasm before a wasm-bindgen pass,
+call the helper with that file path:
+
+    node wasm-www/scripts/optimize-wasm.mjs target/wasm32-unknown-unknown/wasm-release/robin.wasm
+
+### WebAssembly deployment
+
+GitHub Pages is split across two repositories:
+
+- This repo deploys only `wasm-www/index.html` via
+  `.github/workflows/deploy-wasm-shell.yml`.
+- `.github/workflows/publish-wasm-binaries.yml` builds the
+  `wasm-release` binary, runs `wasm-bindgen`, optimizes the served wasm
+  with `wasm-opt -Oz` + `wasm-strip`, and pushes the versioned artifact to
+  `phiresky/robin-hood-the-legend-of-sherwood-remake-binaries` on its
+  `gh-pages` branch.
+
+The binaries Pages repo stores wasm builds under `/wasm/`, indexed by the
+same 12-character git hash that the Rust build embeds in `ROBIN_GIT_HASH`:
+
+    /wasm/<short-hash>/robin.js
+    /wasm/<short-hash>/robin_bg.wasm
+    /wasm/<short-hash>/manifest.json
+    /wasm/latest.json
+    /datadirs/demo-leicester/v3-q80.rhdata.zst
+
+The shell fetches `/wasm/latest.json` when no query parameter is present.  With
+`?replay=rhrec-<hash>-...`, it extracts `<hash>` and loads that exact
+artifact directory.  The game-data blob is not rebuilt by CI; build it
+locally and push it manually to
+`/datadirs/demo-leicester/v3-q80.rhdata.zst` in the binaries repo.
+Replay delivery itself remains handled by the existing browser/RPC path.
+Wasm logging defaults to `info`; add `?wasm-log=debug` (or `trace`,
+`warn`, `error`) to the URL to override it for browser sessions.
+
+The publishing workflow needs:
+
+- `BINARIES_REPO_TOKEN`: a token that can push to the binaries repo.
+- A manually maintained `/datadirs/demo-leicester/v3-q80.rhdata.zst` in the binaries
+  repo.
+
+### Android
+
+Android builds use winit's `android-activity` NativeActivity glue. The
+Android entry point is exported from the `robin_rs` cdylib, the
+packaging manifest lives at `android/AndroidManifest.xml`, and the
+Leicester demo shipping datadir is bundled as
+`android/assets/Data/datadir.bin` from
+`../../../binaries/datadirs/demo-leicester/v3-q80.rhdata.zst`.
+
+Prerequisites:
+
+    rustup target add aarch64-linux-android
+    # Install Android SDK/NDK, then make the NDK clang visible to cc-rs:
+    export ANDROID_NDK_HOME=/home/phire/tmp/android-sdk/ndk/29.0.14206865
+    export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+    export CC_aarch64_linux_android=aarch64-linux-android35-clang
+    export CXX_aarch64_linux_android=aarch64-linux-android35-clang++
+    export AR_aarch64_linux_android=llvm-ar
+    export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android35-clang
+
+Build the Rust shared library:
+
+    RUSTC_WRAPPER= cargo build -p robin_rs --lib \
+        --target aarch64-linux-android \
+        --profile android-dev \
+        --no-default-features --features android
+
+`RUSTC_WRAPPER=` disables the workspace `sccache` wrapper for Android
+cross builds; this environment currently rejects the wrapper for that
+target with `Operation not permitted`.
+
+The workspace's normal dev profile uses cranelift for Linux iteration;
+the `android-dev` and `android-release` profiles force LLVM for Android
+cross-compilation.
+
+The APK must load `librobin_rs.so` and use the included NativeActivity
+manifest metadata:
+
+    <meta-data android:name="android.app.lib_name" android:value="robin_rs" />
+
+Runtime data is loaded from the bundled APK asset first. Loose
+filesystem data is still supported as a developer override via
+`ROBINHOOD_DATA_DIR` or a `Data/` folder under the app files directory.
+Saves go to the app internal data directory under `saves/`. Video is
+disabled in the Android feature set for now; ffmpeg packaging is a
+follow-up once the native APK is booting on device.
+
+## Running
+
+The engine expects a `Data/` folder (and a locale subfolder like `1033/`)
+in the current working directory, or pointed at via `ROBINHOOD_DATA_DIR`:
+
+    ROBINHOOD_DATA_DIR=datadirs/demo_leicester_ecoste cargo run --bin robin
+
+Logging verbosity is controlled by `RUST_LOG` (`info`, `debug`,
+`robin_rs=debug`, `trace`, etc.).
+
+### CLI flags
+
+- `--no-sound` — disable audio
+- `--no-script` — disable mission script execution
+- `--highlander2` — spawn enemy NPCs as invulnerable
+- `--no-fog` — bypass fog sprite loading on converted data
+- `--whatsup` — show the AI debug overlay
+- `--goldeneye` — NPCs cannot see the player (debug cheat)
+- `--no-default-loose` — ignore the default mission-lost condition
+- `--record-default-key-config` — record the current shortcut config as default
+- `--check-sound-data` — validate cached sound data during startup
+- `--record <file.rhrec.jsonl>` — record a replay of this session
+- `--replay <file.rhrec.jsonl>` — replay a previously recorded session
+- `--view-cones` — render every NPC's view cone continuously
+- `--rollback-check` / `--no-rollback-check` — per-frame rewind + replay
+  desync detector (on by default in debug builds)
+
+### Developer tools
+
+Shipped as examples — built on demand with `cargo run --example <name>`:
+
+    cpf_to_json       — dump a character-profile .cpf file as JSON
+    dump_res          — inspect a .res resource archive
+    dump_save         — inspect a saved-game file
+    disasm_scb        — disassemble a compiled .scb mission script
+    run_script        — run a mission script headlessly
+    count_quads       — render diagnostics
+    batch_run         — run many missions back-to-back (CI/regression)
+    verify_rollback   — deterministic replay + state-hash verifier
+
+## Game data
+
+The repo ships without assets and requires either data from either the Demo (available online) or the actual purchased game.
+Point `ROBINHOOD_DATA_DIR` at an extracted
+installer - any of these are known to work:
+
+- Leicester demo (2002, ECoste or Pariso build) - the default target
+- Lincoln demo ("Free Lincoln" / DEMO II)
+- Full retail release (original 2003 CD, GOG, Runesoft Linux port, Steam version, …)
+
+See [DATADIRS.md](DATADIRS.md) for the exhaustive list of installers,
+hashes, and download sources for every known version and language.
+
+On my machine, several pre-laid-out datadirs live under `datadirs/` for development:
+`demo_leicester_ecoste` (default), `demo_leicester_linux`, `demo_lincoln`,
+`fullgame_linux`, `fullgame_gog`.
+
+## Workspace layout
+
+    crates/robin_engine/       pure-sim tick, entities, AI, combat, pathfinding
+    crates/robin_rs/           host: winit window/input, wgpu renderer, audio, UI, save I/O
+    crates/robin_assets/       asset decoders (sprites, sounds, scripts, levels)
+    crates/robin_util/         shared helpers
+    crates/robin_state_hash_derive/ — derive macro for rollback state hashing
+    assets/                    icons, fonts
+    datadirs/                  game data (gitignored)
+
+## Intentional divergences from the original
+
+- **Save format is serde JSON**. Saves live
+  under the OS-appropriate user data dir (`dirs::data_dir()`), not next
+  to the binary. A read-only loader exists for older binary saves.
+- **Deterministic lockstep sim**, with a per-frame state hash, replay
+  files, and a rollback checker - prerequisites for multiplayer (see
+  [MULTIPLAYER.md](MULTIPLAYER.md)).
+- **GPU-accelerated rendering** on top of the original 16-bit RGB565
+  software pipeline.
+
+Further Rust-side additions and planned features are tracked in
+[NEW_FEATURES.md](NEW_FEATURES.md).
+
+
+## AI Use disclaimer
+
+I used AI to help create most of this code. I've been a [professional software engineer](https://github.com/phiresky) for more than 10 years, but by now AI is better at slogging through hundreds of thousands of lines of code while I can spend time planning, architecting, and playing this game :)

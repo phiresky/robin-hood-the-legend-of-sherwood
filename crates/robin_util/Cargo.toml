@@ -1,0 +1,16 @@
+[package]
+name = "robin_util"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "robin_util"
+
+[dependencies]
+geo = "0.33"
+fastrand = "2"
+rustc-hash = "2"
+serde = { version = "1", features = ["derive", "rc"] }
+thiserror = "2"
+nonmax = "0.5"

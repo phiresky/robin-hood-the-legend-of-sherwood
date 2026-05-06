@@ -1,0 +1,2881 @@
+//! UI screen state machines for the menu system.
+//!
+//! These structs capture the logical state-machine behaviour (visibility,
+//! timeouts, progress tracking, screen transitions, dialog choices) without
+//! the rendering details, which are handled separately.
+//!
+//! Screens covered:
+//! - transient overlay popup
+//! - loading progress screen
+//! - yes/no confirmation dialog
+//! - scrollable text popup with pagination
+//! - character dialogue with portrait animation
+//! - post-mission debriefing
+//! - pre-mission description with blazon support
+//! - hover tooltip for missions
+//! - main menu screen
+//! - in-game pause menu
+//! - options hub screen
+//! - graphics settings
+//! - sound settings
+//! - load/save screen
+//! - new player creation
+//! - player selection
+//! - blazon purchase
+//! - keyboard shortcuts configuration
+//! - movie viewer
+//! - mission started/quit popup with transition
+
+use serde::{Deserialize, Serialize};
+
+use crate::campaign::Campaign;
+use crate::game_operation::GameCode;
+use crate::graphic_config::GraphicConfig;
+use crate::ingame_menu::resources::{
+    MT_INFOBULLE_BUTTON_CANCEL, MT_INFOBULLE_BUTTON_FARMERS_TO_BLAZON,
+    MT_INFOBULLE_BUTTON_MISSION_TO_BLAZON, MT_INFOBULLE_BUTTON_MONEY_TO_BLAZON,
+    MT_INFOBULLE_BUTTON_PLAY_MISSION,
+};
+use crate::mission::Mission;
+use crate::profiles::MissionType;
+use crate::res_descr::LevelDescriptors;
+use crate::resource_ids;
+use crate::resource_manager::ResourceManager;
+use crate::sherwood_stat::MenuTextLookup;
+use crate::sound_config::SoundConfig;
+
+// ---------------------------------------------------------------------------
+// InfoPopup
+// ---------------------------------------------------------------------------
+
+/// Transient information popup shown over the game view.
+///
+/// Models the visibility and timeout logic for sword/bow experience
+/// indicators; rendering is handled elsewhere.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InfoPopup {
+    /// Resource / string ID for the text to display.
+    pub text_id: u32,
+    /// Whether the popup is currently visible.
+    pub visible: bool,
+    /// Total number of frames the popup should remain visible.
+    pub timeout_frames: u32,
+    /// How many frames have elapsed since the popup was shown.
+    pub current_frame: u32,
+}
+
+impl InfoPopup {
+    /// Show the popup with the given text id and timeout (in frames).
+    pub fn show(&mut self, text_id: u32, timeout_frames: u32) {
+        self.text_id = text_id;
+        self.timeout_frames = timeout_frames;
+        self.current_frame = 0;
+        self.visible = true;
+    }
+
+    /// Advance one frame. Returns `true` while the popup is still active,
+    /// `false` once the timeout has expired (at which point it auto-hides).
+    pub fn tick(&mut self) -> bool {
+        if !self.visible {
+            return false;
+        }
+        self.current_frame += 1;
+        if self.current_frame >= self.timeout_frames {
+            self.visible = false;
+            return false;
+        }
+        true
+    }
+
+    /// Immediately hide the popup.
+    pub fn hide(&mut self) {
+        self.visible = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LoadingScreen
+// ---------------------------------------------------------------------------
+
+/// Loading-screen state machine.
+///
+/// Drives a sand-dissolve transition between two images and renders progress
+/// text.  This struct captures the logical progress/active state; the actual
+/// rendering (sand heightfield, surface blitting) is handled by the renderer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LoadingScreen {
+    /// Normalised progress in `0.0..=1.0`.
+    pub progress: f32,
+    /// Human-readable status message (e.g. "Loading terrain…").
+    pub message: String,
+    /// Whether the loading screen is currently being displayed.
+    pub active: bool,
+}
+
+impl LoadingScreen {
+    /// Begin a new loading sequence with the given status message.
+    pub fn start(&mut self, message: impl Into<String>) {
+        self.message = message.into();
+        self.progress = 0.0;
+        self.active = true;
+    }
+
+    /// Update the progress value. Clamped to `0.0..=1.0`.
+    pub fn set_progress(&mut self, progress: f32) {
+        self.progress = progress.clamp(0.0, 1.0);
+    }
+
+    /// Mark loading as complete and deactivate the screen.
+    pub fn finish(&mut self) {
+        self.progress = 1.0;
+        self.active = false;
+    }
+
+    /// Returns `true` while the loading screen is active.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+}
+
+// ---------------------------------------------------------------------------
+// YesNoDialog
+// ---------------------------------------------------------------------------
+
+/// User's choice in a yes/no dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum YesNoChoice {
+    #[default]
+    Unknown,
+    Yes,
+    No,
+}
+
+/// State for a yes/no confirmation dialog.
+///
+/// Modal window with two buttons and keyboard shortcuts
+/// (Return → Yes, Escape → No).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct YesNoDialog {
+    /// The message displayed to the user.
+    pub message: String,
+    /// The user's choice (set when a button is activated).
+    pub choice: YesNoChoice,
+    /// Whether the dialog has been closed (choice made).
+    pub closed: bool,
+}
+
+impl YesNoDialog {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            choice: YesNoChoice::Unknown,
+            closed: false,
+        }
+    }
+
+    /// Handle the Yes button (or Return key).
+    pub fn on_yes(&mut self) {
+        self.choice = YesNoChoice::Yes;
+        self.closed = true;
+    }
+
+    /// Handle the No button (or Escape key).
+    pub fn on_no(&mut self) {
+        self.choice = YesNoChoice::No;
+        self.closed = true;
+    }
+
+    /// Convenience: returns true if the user confirmed.
+    pub fn confirmed(&self) -> bool {
+        self.choice == YesNoChoice::Yes
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PopupScroll
+// ---------------------------------------------------------------------------
+
+/// State for a scrollable text popup with optional illustration.
+///
+/// Supports text pagination: when the rendered text overflows,
+/// `text_remaining` holds what didn't fit, and the caller should display
+/// another popup with that text.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PopupScroll {
+    /// Full text to display (may be truncated by rendering).
+    pub text: String,
+    /// Text that didn't fit and needs a follow-up page.
+    pub text_remaining: String,
+    /// Optional picture resource ID (0 = no picture).
+    pub picture_id: u32,
+    /// Text alignment mode (0 = justified, 1 = centered, etc.).
+    pub text_alignment: u32,
+    /// Whether the dialog has been closed (OK pressed).
+    pub closed: bool,
+}
+
+impl PopupScroll {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn with_picture(mut self, picture_id: u32) -> Self {
+        self.picture_id = picture_id;
+        self
+    }
+
+    pub fn with_alignment(mut self, alignment: u32) -> Self {
+        self.text_alignment = alignment;
+        self
+    }
+
+    /// Handle OK button press.  The renderer should have set
+    /// `text_remaining` before this is called.
+    pub fn on_ok(&mut self) {
+        self.closed = true;
+    }
+
+    /// Whether more pages remain after this one.
+    pub fn has_more_pages(&self) -> bool {
+        !self.text_remaining.is_empty()
+    }
+
+    /// Advance to the next page, consuming remaining text.
+    /// Returns `true` if there was a next page.
+    pub fn advance_page(&mut self) -> bool {
+        if self.text_remaining.is_empty() {
+            return false;
+        }
+        self.text = std::mem::take(&mut self.text_remaining);
+        self.closed = false;
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DialogueScreen
+// ---------------------------------------------------------------------------
+
+/// Number of valid character portrait indices.
+pub const VALID_PORTRAIT_COUNT: usize = 15;
+/// Total portrait slots (valid + 1 fallback for invalid IDs).
+pub const TOTAL_PORTRAIT_COUNT: usize = 16;
+/// Maximum times the same mouth frame is shown before a random blink.
+const MAX_FACE_COUNT: u32 = 3;
+
+/// A single sentence in a dialogue sequence.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DialogueSentence {
+    /// Text to display.
+    pub text: String,
+    /// Sound resource identifier (empty = no voice).
+    pub sound_id: String,
+    /// Character portrait index (0..VALID_PORTRAIT_COUNT-1).
+    pub portrait_index: u8,
+}
+
+/// State for a character dialogue screen with portrait animation.
+///
+/// Manages sentence progression and portrait mouth-sync animation.  Sound
+/// playback is delegated to the sound manager; rendering is handled
+/// elsewhere.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DialogueScreen {
+    /// The dialogue's resource ID.
+    pub dialogue_id: u32,
+    /// All sentences in this dialogue.
+    pub sentences: Vec<DialogueSentence>,
+    /// Index of the current sentence (-1 = not started).
+    pub current_sentence: i32,
+    /// Current portrait mouth frame (0..4).
+    pub mouth_frame: u8,
+    /// Counter for how many consecutive frames the same mouth state was shown.
+    pub same_face_count: u32,
+    /// Timer ID for sentence auto-advance (set by the menu screen timer system).
+    pub update_timer_id: Option<u32>,
+    /// Whether the dialogue has been completed or abandoned.
+    pub finished: bool,
+    /// Whether the dialogue was abandoned (Stop button) vs completed normally.
+    pub abandoned: bool,
+}
+
+impl Default for DialogueScreen {
+    fn default() -> Self {
+        Self {
+            dialogue_id: 0,
+            sentences: Vec::new(),
+            current_sentence: -1,
+            mouth_frame: 0,
+            same_face_count: 0,
+            update_timer_id: None,
+            finished: false,
+            abandoned: false,
+        }
+    }
+}
+
+impl DialogueScreen {
+    pub fn new(dialogue_id: u32, sentences: Vec<DialogueSentence>) -> Self {
+        Self {
+            dialogue_id,
+            sentences,
+            ..Default::default()
+        }
+    }
+
+    /// Advance to the next sentence.  Returns the sentence if there is one,
+    /// or `None` if the dialogue is complete.
+    pub fn next_sentence(&mut self) -> Option<&DialogueSentence> {
+        self.current_sentence += 1;
+        let idx = self.current_sentence as usize;
+        if idx < self.sentences.len() {
+            self.mouth_frame = 0;
+            self.same_face_count = 0;
+            Some(&self.sentences[idx])
+        } else {
+            self.finished = true;
+            None
+        }
+    }
+
+    /// Update the portrait mouth animation based on sound volume.
+    pub fn update_portrait(&mut self, sound_volume: f32) {
+        let new_frame = if sound_volume < 0.01 {
+            0
+        } else if sound_volume < 0.02 {
+            1
+        } else if sound_volume < 0.15 {
+            2
+        } else if sound_volume < 0.30 {
+            3
+        } else {
+            4
+        };
+
+        if new_frame == self.mouth_frame {
+            self.same_face_count += 1;
+            if self.same_face_count >= MAX_FACE_COUNT {
+                // Random blink — alternate between 0 and 1
+                self.mouth_frame = if self.mouth_frame == 0 { 1 } else { 0 };
+                self.same_face_count = 0;
+            }
+        } else {
+            self.mouth_frame = new_frame;
+            self.same_face_count = 0;
+        }
+    }
+
+    /// Handle the Skip/Continue button — advance to the next sentence.
+    pub fn on_skip(&mut self) -> Option<&DialogueSentence> {
+        self.next_sentence()
+    }
+
+    /// Handle the Stop/Abandon button — end the dialogue early.
+    pub fn on_stop(&mut self) {
+        self.abandoned = true;
+        self.finished = true;
+    }
+
+    /// Handle the timer firing (auto-advance when sound finishes).
+    pub fn on_timer(&mut self, sound_finished: bool) -> bool {
+        if sound_finished {
+            self.next_sentence().is_some()
+        } else {
+            true // still playing
+        }
+    }
+
+    /// Current sentence reference, if valid.
+    pub fn current(&self) -> Option<&DialogueSentence> {
+        let idx = self.current_sentence as usize;
+        self.sentences.get(idx)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DebriefingScreen
+// ---------------------------------------------------------------------------
+
+/// Result of the debriefing screen — what the player wants to do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DebriefingAction {
+    /// Continue playing (default — no special action).
+    #[default]
+    Continue,
+    /// Load a different save game.
+    Load,
+    /// Restart from the automatic checkpoint save.
+    Restart,
+}
+
+/// State for the post-mission debriefing screen.
+///
+/// Supports text pagination, win/loss display, and restart/load actions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DebriefingScreen {
+    /// Whether the mission was won.
+    pub win: bool,
+    /// Whether the restart option is available.
+    pub restart_allowed: bool,
+    /// Title text ("Mission Won" / "Mission Lost").
+    pub title: String,
+    /// Current page's body text.
+    pub text: String,
+    /// Text that didn't fit on the current page.
+    pub text_remaining: String,
+    /// What the player chose to do.
+    pub action: DebriefingAction,
+    /// Game operation code to return to the caller.
+    pub game_code: GameCode,
+    /// Whether a load was requested.
+    pub load_requested: bool,
+    /// Whether the dialog has been closed.
+    pub closed: bool,
+}
+
+impl DebriefingScreen {
+    pub fn new(win: bool, restart_allowed: bool, title: String, text: String) -> Self {
+        Self {
+            win,
+            restart_allowed,
+            title,
+            text,
+            game_code: GameCode::LevelInProgress,
+            ..Default::default()
+        }
+    }
+
+    /// Handle the OK button — check for text overflow, then close.
+    ///
+    /// The renderer should set `text_remaining` before calling this.
+    pub fn on_ok(&mut self) {
+        self.closed = true;
+    }
+
+    /// Whether more text pages remain.
+    pub fn has_more_pages(&self) -> bool {
+        !self.text_remaining.is_empty()
+    }
+
+    /// Advance to the next text page. Returns true if there was one.
+    pub fn advance_page(&mut self) -> bool {
+        if self.text_remaining.is_empty() {
+            return false;
+        }
+        self.text = std::mem::take(&mut self.text_remaining);
+        self.closed = false;
+        true
+    }
+
+    /// Handle the Restart button.
+    pub fn on_restart(&mut self) {
+        self.action = DebriefingAction::Restart;
+        self.game_code = GameCode::LevelLoad;
+        self.load_requested = true;
+        self.closed = true;
+    }
+
+    /// Handle the Load button — caller should present load screen, then
+    /// call `set_load_result` with the outcome.
+    pub fn on_load(&mut self) {
+        self.action = DebriefingAction::Load;
+    }
+
+    /// Set the result of the load screen interaction.
+    pub fn set_load_result(&mut self, loaded: bool) {
+        if loaded {
+            self.game_code = GameCode::LevelLoad;
+            self.load_requested = true;
+            self.closed = true;
+        }
+        // If not loaded, the debriefing remains open.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MissionDescriptionScreen
+// ---------------------------------------------------------------------------
+
+/// Widget-tree geometry for the mission description dialog.
+///
+/// Constants are grouped so a future renderer can lay the widgets out
+/// without re-deriving the geometry from comments.
+pub mod mission_description_layout {
+    /// Window bounds: `(0, 0, 496, 463)`.
+    pub const WINDOW_WIDTH: i32 = 496;
+    pub const WINDOW_HEIGHT: i32 = 463;
+
+    // ── Picture frame ──
+    //
+    // The frame is created with a zero-sized box starting at (50, 40); the
+    // widget self-sizes to its picture and is then re-anchored so its
+    // right edge sits at x = 450.
+    pub const PICTURE_FRAME_INITIAL_X: i32 = 50;
+    pub const PICTURE_FRAME_Y: i32 = 40;
+    pub const PICTURE_FRAME_RIGHT_EDGE: i32 = 450;
+
+    // ── Title ──
+    //
+    // `(50, 50)..(picture_left - 10, 125)`.
+    pub const TITLE_X: i32 = 50;
+    pub const TITLE_Y: i32 = 50;
+    pub const TITLE_BOTTOM: i32 = 125;
+    /// Gap between the title's right edge and the picture frame.
+    pub const TITLE_PICTURE_GAP: i32 = 10;
+
+    // ── Description ──
+    //
+    // Two variants:
+    // - Blazon-requiring missions:
+    //     `(50, picture_bottom + 5)..(450, 385)`
+    // - Non-blazon missions:
+    //     `(50, 125)..(450, 385)`
+    pub const DESCRIPTION_X: i32 = 50;
+    pub const DESCRIPTION_RIGHT: i32 = 450;
+    pub const DESCRIPTION_BOTTOM: i32 = 385;
+    /// Description top when the mission does *not* require blazons.
+    pub const DESCRIPTION_TOP_NO_BLAZONS: i32 = 125;
+    /// Gap between the picture's bottom edge and the description box
+    /// top when the mission *does* require blazons.
+    pub const DESCRIPTION_PICTURE_GAP: i32 = 5;
+
+    // ── Blazon set (blazon-requiring missions only) ──
+    //
+    // `(50, 125)..(picture_left - 20, 463)`.
+    pub const BLAZON_BOX_X: i32 = 50;
+    pub const BLAZON_BOX_Y: i32 = 125;
+    pub const BLAZON_BOX_BOTTOM: i32 = 463;
+    /// Gap between the blazon set's right edge and the picture frame.
+    pub const BLAZON_BOX_PICTURE_GAP: i32 = 20;
+
+    // ── Choice buttons ──
+    //
+    // Convert / start / cancel buttons all sit at y=384 and are centered
+    // horizontally across the window with an 8 px gap between neighbours.
+    pub const BUTTON_ROW_Y: i32 = 384;
+    pub const BUTTON_GAP: i32 = 8;
+}
+
+/// The player's choice on the mission description screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MissionChoice {
+    /// Start the selected mission.
+    StartMission,
+    /// Go back to view other pending missions.
+    ShowPendingMissions,
+    /// No choice made / cancelled.
+    #[default]
+    None,
+}
+
+/// Buttons the mission description dialog can show.
+///
+/// The three convert buttons only appear in the blazon-requiring layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MissionDescriptionButton {
+    /// Closes the dialog without committing.  Shortcut: Escape.
+    Cancel,
+    /// Commits the mission.  In the blazon layout this only exists when
+    /// the mission is not pseudo; in the non-blazon layout it is the
+    /// generic OK button.  Shortcut: Return / Numpad-Enter.
+    StartMission,
+    /// Opens the buy-blazons child modal.  Blazon layout only.
+    ConvertMoney,
+    /// Enters the men-to-blazon conversion mode and starts the mission.
+    /// Blazon layout only.
+    ConvertPeasants,
+    /// Swaps the pending mission list into the accessible list.  Blazon
+    /// layout only.
+    ConvertMission,
+}
+
+/// Horizontal placement for a row of buttons.
+///
+/// Given a list of button widths, returns the left-edge x of each button
+/// so the whole row is centered within the window (width `window_w`) with
+/// `gap` pixels between neighbours.
+pub fn center_horizontally_x(widths: &[i32], window_w: i32, gap: i32) -> Vec<i32> {
+    if widths.is_empty() {
+        return Vec::new();
+    }
+    let total: i32 = widths.iter().copied().sum::<i32>() + gap * (widths.len() as i32 - 1).max(0);
+    let mut x = (window_w - total) / 2;
+    let mut xs = Vec::with_capacity(widths.len());
+    for &w in widths {
+        xs.push(x);
+        x += w + gap;
+    }
+    xs
+}
+
+/// State for the pre-mission description screen.
+///
+/// Handles mission info display and blazon conversion button logic.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MissionDescriptionScreen {
+    /// Index of the mission being described.
+    pub mission_index: usize,
+    /// Title text for the mission.
+    pub title: String,
+    /// Description text for the mission.
+    pub description: String,
+    /// Picture resource ID for the mission.
+    pub picture_id: i32,
+    /// Whether this mission requires blazons (shows conversion buttons).
+    pub requires_blazons: bool,
+    /// Whether the "convert peasants" button is enabled.
+    pub can_convert_peasants: bool,
+    /// Whether the "convert money" button is enabled.
+    pub can_convert_money: bool,
+    /// Whether the "convert mission" button is enabled.
+    pub can_convert_mission: bool,
+    /// Whether the "start mission" button should be shown in the
+    /// blazon-requiring layout.  Gated on the mission's type being
+    /// non-`Pseudo`.
+    pub show_start_mission: bool,
+    /// Whether men-to-blazon conversion mode was chosen.
+    pub men_to_blazon_mode: bool,
+    /// The player's choice.
+    pub user_choice: MissionChoice,
+    /// Whether the screen has been closed.
+    pub closed: bool,
+}
+
+impl MissionDescriptionScreen {
+    /// Resolve the picture resource ID for a mission.
+    ///
+    /// Returns the `.red` descriptor's mission-description picture ID, or
+    /// `RHID_DEFAULT_POPUP_SCROLL_PICTURE` if the level descriptor is
+    /// missing.
+    pub fn get_mission_picture(level_descriptors: Option<&LevelDescriptors>) -> i32 {
+        match level_descriptors {
+            Some(d) => d.mission_description.picture_id,
+            None => resource_ids::RHID_DEFAULT_POPUP_SCROLL_PICTURE,
+        }
+    }
+
+    /// Resolve a mission narrative text entry.
+    ///
+    /// `text_index` 0 is the title and 2 is the description body; 1 is
+    /// used by the short mission description tooltip blurb.
+    pub fn get_mission_text(
+        level_descriptors: Option<&LevelDescriptors>,
+        text_resources: &mut ResourceManager,
+        text_index: usize,
+    ) -> String {
+        let Some(desc) = level_descriptors else {
+            return "Unable to find the mission resource...".to_string();
+        };
+        match text_resources.get_string(desc.mission_description.text_table_id, text_index) {
+            Ok(s) => s.to_string(),
+            Err(e) => {
+                tracing::warn!(
+                    "MissionDescription text {}.{}: {e}",
+                    desc.mission_description.text_table_id,
+                    text_index
+                );
+                "Invalid resource ID...".to_string()
+            }
+        }
+    }
+
+    /// Build the mission description dialog state for a specific
+    /// mission.  Resolves title / description / picture resources
+    /// internally and latches the blazon-conversion button enable flags
+    /// from the campaign.
+    ///
+    /// Decides which widgets to show and what their initial enable state
+    /// is.  The actual widget rendering is done by a future renderer
+    /// using [`mission_description_layout`] constants.
+    pub fn create(
+        mission_index: usize,
+        mission: &Mission,
+        campaign: &Campaign,
+        profiles: &robin_engine::profiles::ProfileManager,
+        level_descriptors: Option<&LevelDescriptors>,
+        text_resources: &mut ResourceManager,
+    ) -> Self {
+        let profile = mission.profile(profiles);
+        let requires_blazons = mission.requires_blazons(profiles);
+        let is_pseudo = profile.mission_type == MissionType::Pseudo;
+
+        let picture_id = Self::get_mission_picture(level_descriptors);
+        let title = Self::get_mission_text(level_descriptors, text_resources, 0);
+        let description = Self::get_mission_text(level_descriptors, text_resources, 2);
+
+        // Initial enable flags come straight from the campaign.  When
+        // the mission requires blazons AND is a pseudo-mission with zero
+        // peasant quotation, `convert_peasants` and `convert_mission`
+        // are further forced off.
+        let mut can_convert_peasants =
+            campaign.can_convert_merry_men_to_blazons(mission_index, profiles);
+        let can_convert_money = campaign.can_convert_money_to_blazons(mission_index, profiles);
+        let mut can_convert_mission =
+            campaign.can_convert_mission_to_blazons(mission_index, profiles);
+
+        if requires_blazons && is_pseudo && profile.peasant_to_blazon_quotation == 0 {
+            can_convert_peasants = false;
+            can_convert_mission = false;
+        }
+
+        // The start-mission button only exists in the blazon branch
+        // when the mission is *not* pseudo.  In the non-blazon branch
+        // it's always created as the generic OK button.  We store a
+        // single flag so renderer code can pick the right button to draw.
+        let show_start_mission = !requires_blazons || !is_pseudo;
+
+        Self {
+            mission_index,
+            title,
+            description,
+            picture_id,
+            requires_blazons,
+            can_convert_peasants,
+            can_convert_money,
+            can_convert_mission,
+            show_start_mission,
+            men_to_blazon_mode: false,
+            user_choice: MissionChoice::None,
+            closed: false,
+        }
+    }
+
+    /// Handle the Start Mission button.
+    pub fn on_start_mission(&mut self) {
+        self.men_to_blazon_mode = false;
+        self.user_choice = MissionChoice::StartMission;
+        self.closed = true;
+    }
+
+    /// Handle the Cancel button.
+    pub fn on_cancel(&mut self) {
+        self.user_choice = MissionChoice::None;
+        self.closed = true;
+    }
+
+    /// Handle the Convert Peasants button.
+    pub fn on_convert_peasants(&mut self) {
+        self.men_to_blazon_mode = true;
+        self.user_choice = MissionChoice::StartMission;
+        self.closed = true;
+    }
+
+    /// Handle the Convert Money button — caller should open the buy
+    /// blazons screen, then call `update_conversion_state` with new values.
+    pub fn on_convert_money(&mut self) {
+        // The buy blazons screen is shown as a child window.
+        // State is updated after it closes via update_conversion_state.
+    }
+
+    /// Handle the Convert Mission button.
+    pub fn on_convert_mission(&mut self) {
+        self.user_choice = MissionChoice::ShowPendingMissions;
+        self.closed = true;
+    }
+
+    /// Update conversion button availability (called after buy-blazons closes).
+    pub fn update_conversion_state(
+        &mut self,
+        can_peasants: bool,
+        can_money: bool,
+        can_mission: bool,
+    ) {
+        self.can_convert_peasants = can_peasants;
+        self.can_convert_money = can_money;
+        self.can_convert_mission = can_mission;
+    }
+
+    /// List of buttons the dialog should show, in dialog-creation order.
+    /// Drives both the centered button-row layout and the focus-manager
+    /// groupable order.
+    pub fn buttons(&self) -> Vec<MissionDescriptionButton> {
+        let mut buttons = Vec::new();
+        if self.requires_blazons {
+            // The three convert buttons go first in this order; then
+            // start-mission is appended when the mission is not pseudo.
+            buttons.push(MissionDescriptionButton::ConvertPeasants);
+            buttons.push(MissionDescriptionButton::ConvertMoney);
+            buttons.push(MissionDescriptionButton::ConvertMission);
+            if self.show_start_mission {
+                buttons.push(MissionDescriptionButton::StartMission);
+            }
+        } else {
+            // The generic OK / start-mission button.
+            buttons.push(MissionDescriptionButton::StartMission);
+        }
+        // Cancel is always appended last.
+        buttons.push(MissionDescriptionButton::Cancel);
+        buttons
+    }
+
+    /// Whether a given button is interactive for the current state.
+    pub fn is_enabled(&self, button: MissionDescriptionButton) -> bool {
+        match button {
+            MissionDescriptionButton::Cancel | MissionDescriptionButton::StartMission => true,
+            MissionDescriptionButton::ConvertPeasants => self.can_convert_peasants,
+            MissionDescriptionButton::ConvertMoney => self.can_convert_money,
+            MissionDescriptionButton::ConvertMission => self.can_convert_mission,
+        }
+    }
+
+    /// Tooltip string for a button.
+    pub fn tooltip(button: MissionDescriptionButton, menu_text: &dyn MenuTextLookup) -> String {
+        let id = match button {
+            MissionDescriptionButton::Cancel => MT_INFOBULLE_BUTTON_CANCEL,
+            MissionDescriptionButton::StartMission => MT_INFOBULLE_BUTTON_PLAY_MISSION,
+            MissionDescriptionButton::ConvertMoney => MT_INFOBULLE_BUTTON_MONEY_TO_BLAZON,
+            MissionDescriptionButton::ConvertPeasants => MT_INFOBULLE_BUTTON_FARMERS_TO_BLAZON,
+            MissionDescriptionButton::ConvertMission => MT_INFOBULLE_BUTTON_MISSION_TO_BLAZON,
+        };
+        menu_text.get(id)
+    }
+
+    /// Dispatch a button activation.  Disabled buttons are no-ops.
+    pub fn activate(&mut self, button: MissionDescriptionButton) {
+        if !self.is_enabled(button) {
+            return;
+        }
+        match button {
+            MissionDescriptionButton::Cancel => self.on_cancel(),
+            MissionDescriptionButton::StartMission => self.on_start_mission(),
+            MissionDescriptionButton::ConvertPeasants => self.on_convert_peasants(),
+            MissionDescriptionButton::ConvertMission => self.on_convert_mission(),
+            MissionDescriptionButton::ConvertMoney => self.on_convert_money(),
+        }
+    }
+
+    /// Dropped-initial carveout dimensions for the description text box.
+    ///
+    /// Returns `(width, height)` of the picture-shaped hole to reserve
+    /// in the top-right of the description text box so the narrative
+    /// wraps around the picture.  Only applies to the non-blazon layout;
+    /// in the blazon layout the description sits *below* the picture so
+    /// no carveout is used.
+    pub fn description_drop_cap(
+        &self,
+        picture_width: i32,
+        picture_height: i32,
+    ) -> Option<(i32, i32)> {
+        if self.requires_blazons {
+            return None;
+        }
+        let w = picture_width + 10;
+        let h = picture_height + mission_description_layout::PICTURE_FRAME_Y
+            - mission_description_layout::DESCRIPTION_TOP_NO_BLAZONS
+            + 5;
+        Some((w, h))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ShortMissionDescription
+// ---------------------------------------------------------------------------
+
+/// State for the compact mission info tooltip that follows the mouse.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShortMissionDescription {
+    /// Index of the mission being described, or None.
+    pub mission_index: Option<usize>,
+    /// Description text.
+    pub description: String,
+    /// Remaining lifetime in turns (for the expiration indicator).
+    pub remaining_lifetime: Option<u32>,
+    /// Whether blazons are shown for this mission.
+    pub show_blazons: bool,
+    /// Window position (follows mouse with offset).
+    pub position_x: f32,
+    pub position_y: f32,
+    /// Whether the tooltip is currently visible.
+    pub visible: bool,
+}
+
+/// Offset from mouse cursor to tooltip window.
+const TOOLTIP_OFFSET_X: f32 = 25.0;
+const TOOLTIP_OFFSET_Y: f32 = 25.0;
+
+impl ShortMissionDescription {
+    /// Update the mission being described.
+    pub fn set_mission(
+        &mut self,
+        index: usize,
+        description: String,
+        lifetime: Option<u32>,
+        show_blazons: bool,
+    ) {
+        let changed = self.mission_index != Some(index);
+        self.mission_index = Some(index);
+        if changed {
+            self.description = description;
+            self.remaining_lifetime = lifetime;
+            self.show_blazons = show_blazons;
+        }
+        self.visible = true;
+    }
+
+    /// Clear the tooltip (mouse left the location).
+    pub fn clear(&mut self) {
+        self.mission_index = None;
+        self.visible = false;
+    }
+
+    /// Track mouse position with clamping to screen bounds.
+    pub fn track_mouse(
+        &mut self,
+        mouse_x: f32,
+        mouse_y: f32,
+        screen_width: f32,
+        screen_height: f32,
+        tooltip_width: f32,
+        tooltip_height: f32,
+    ) {
+        let mut x = mouse_x + TOOLTIP_OFFSET_X;
+        let mut y = mouse_y + TOOLTIP_OFFSET_Y;
+
+        // Clamp to screen bounds
+        if x + tooltip_width > screen_width {
+            x = screen_width - tooltip_width;
+        }
+        if y + tooltip_height > screen_height {
+            y = screen_height - tooltip_height;
+        }
+        if x < 0.0 {
+            x = 0.0;
+        }
+        if y < 0.0 {
+            y = 0.0;
+        }
+
+        self.position_x = x;
+        self.position_y = y;
+    }
+
+    /// Lifetime indicator index (0–4) for the expiration icon.
+    pub fn lifetime_indicator(&self) -> u8 {
+        match self.remaining_lifetime {
+            Some(ttl) if ttl <= 3 => ttl as u8,
+            Some(_) => 4,
+            None => 4,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IntroScreen
+// ---------------------------------------------------------------------------
+
+/// Operation result from the intro/main menu screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum IntroOperation {
+    #[default]
+    Unknown,
+    /// Exit the game.
+    Exit,
+    /// Start a new game / continue campaign.
+    Start,
+    /// Load a saved game.
+    Load,
+    /// Re-display the menu (e.g. after resolution change).
+    Redisplay,
+}
+
+/// State for the main menu (intro) screen.
+///
+/// Buttons: Start, Load, Select Player, Movies, Credits, Options, Exit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IntroScreen {
+    /// The operation the player chose.
+    pub operation: IntroOperation,
+    /// Game code from a loaded save, if any.
+    pub game_code: GameCode,
+    /// Current player profile name.
+    pub profile_name: String,
+    /// Current player profile info text.
+    pub profile_info: String,
+    /// Whether the screen has been closed.
+    pub closed: bool,
+}
+
+impl IntroScreen {
+    pub fn new(profile_name: String, profile_info: String) -> Self {
+        Self {
+            profile_name,
+            profile_info,
+            ..Default::default()
+        }
+    }
+
+    /// Handle Start Game button.
+    pub fn on_start_game(&mut self) {
+        self.operation = IntroOperation::Start;
+        self.closed = true;
+    }
+
+    /// Handle Load button — caller should present the load/save screen
+    /// and call `set_load_result` with the outcome.
+    pub fn on_load(&mut self) {
+        // Caller opens LoadSaveScreen in load mode
+    }
+
+    /// Set the result after the load screen closes.
+    pub fn set_load_result(&mut self, loaded: bool, game_code: GameCode) {
+        if loaded && game_code == GameCode::LevelLoad {
+            self.operation = IntroOperation::Load;
+            self.game_code = game_code;
+            self.closed = true;
+        }
+    }
+
+    /// Handle Select Player button — caller opens the player selection screen.
+    /// If resolution changed, sets Redisplay.
+    pub fn set_select_player_result(&mut self, resolution_changed: bool) {
+        if resolution_changed {
+            self.operation = IntroOperation::Redisplay;
+            self.closed = true;
+        }
+    }
+
+    /// Handle Options button — if resolution changed, redisplay.
+    pub fn set_options_result(&mut self, resolution_changed: bool) {
+        if resolution_changed {
+            self.operation = IntroOperation::Redisplay;
+            self.closed = true;
+        }
+    }
+
+    /// Handle Exit button — presents confirmation dialog first.
+    pub fn on_exit(&mut self, confirmed: bool) {
+        if confirmed {
+            self.operation = IntroOperation::Exit;
+            self.closed = true;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IngameScreen
+// ---------------------------------------------------------------------------
+
+/// State for the in-game (pause) menu.
+///
+/// Buttons: Continue, Load, Save, Options, Restart, Quit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IngameScreen {
+    /// Game operation code indicating what to do next.
+    pub game_code: GameCode,
+    /// Whether game options were changed (requiring refresh).
+    pub options_changed: bool,
+    /// Whether the screen needs to be re-displayed (resolution change).
+    pub redisplay: bool,
+    /// Whether the screen has been closed.
+    pub closed: bool,
+}
+
+impl IngameScreen {
+    /// Handle Continue button (or Escape shortcut).
+    pub fn on_continue(&mut self) {
+        self.game_code = GameCode::LevelInProgress;
+        self.closed = true;
+    }
+
+    /// Set the result after the load screen closes.
+    pub fn set_load_result(&mut self, loaded: bool) {
+        if loaded {
+            self.game_code = GameCode::LevelLoad;
+            self.closed = true;
+        }
+    }
+
+    /// Set the result after the save screen closes.
+    pub fn set_save_result(&mut self, saved: bool) {
+        if saved {
+            self.game_code = GameCode::LevelSave;
+            self.closed = true;
+        }
+    }
+
+    /// Set the result after the options screen closes.
+    pub fn set_options_result(&mut self, changed: bool, resolution_changed: bool) {
+        self.options_changed = changed;
+        if resolution_changed {
+            self.redisplay = true;
+        }
+    }
+
+    /// Handle Restart button (after confirmation).
+    pub fn on_restart(&mut self, confirmed: bool) {
+        if confirmed {
+            self.game_code = GameCode::LevelRestart;
+            self.closed = true;
+        }
+    }
+
+    /// Handle Quit Game button (after confirmation).
+    pub fn on_quit(&mut self, confirmed: bool) {
+        if confirmed {
+            self.game_code = GameCode::Quit;
+            self.closed = true;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OptionsScreen
+// ---------------------------------------------------------------------------
+
+/// State for the options hub screen.
+///
+/// Delegates to Graphics, Sounds, and Shortcuts sub-screens.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OptionsScreen {
+    /// Whether any options were changed across sub-screens.
+    pub options_changed: bool,
+    /// Whether the screen needs re-display (resolution changed).
+    pub redisplay: bool,
+    /// Whether the screen has been closed.
+    pub closed: bool,
+}
+
+impl OptionsScreen {
+    /// Set the result after the graphics sub-screen closes.
+    pub fn set_graphics_result(&mut self, changed: bool, resolution_changed: bool) {
+        if changed {
+            self.options_changed = true;
+        }
+        if resolution_changed {
+            self.redisplay = true;
+        }
+    }
+
+    /// Set the result after the sounds sub-screen closes.
+    pub fn set_sounds_result(&mut self, changed: bool) {
+        if changed {
+            self.options_changed = true;
+        }
+    }
+
+    /// Handle Back button.
+    pub fn on_back(&mut self) {
+        self.closed = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GraphicsScreen
+// ---------------------------------------------------------------------------
+
+/// Resolution presets available in the graphics settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum ResolutionPreset {
+    Low = 0,
+    #[default]
+    Medium = 1,
+    High = 2,
+}
+
+impl ResolutionPreset {
+    /// Get the pixel dimensions for this preset.
+    pub fn dimensions(self) -> (f32, f32) {
+        match self {
+            Self::Low => (640.0, 480.0),
+            Self::Medium => (800.0, 600.0),
+            Self::High => (1024.0, 768.0),
+        }
+    }
+
+    /// Determine preset from dimensions, defaulting to Medium.
+    pub fn from_dimensions(x: f32, y: f32) -> Self {
+        if (x - 640.0).abs() < 1.0 && (y - 480.0).abs() < 1.0 {
+            Self::Low
+        } else if (x - 1024.0).abs() < 1.0 && (y - 768.0).abs() < 1.0 {
+            Self::High
+        } else {
+            Self::Medium
+        }
+    }
+}
+
+/// Graphics option toggles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum GraphicsOption {
+    AlphaVisionField = 0,
+    TransparentShadows = 1,
+    EffectAnimations = 2,
+    BackgroundAnimations = 3,
+}
+
+/// Number of graphics option toggles.
+pub const GRAPHICS_OPTION_COUNT: usize = 4;
+
+/// State for the graphics settings screen.
+///
+/// Edits a working copy of `GraphicConfig` and applies on OK.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphicsScreen {
+    /// Working copy of graphics settings being edited.
+    pub config: GraphicConfig,
+    /// The original config (for cancel/revert).
+    pub original_config: GraphicConfig,
+    /// Currently selected resolution preset.
+    pub resolution: ResolutionPreset,
+    /// Toggle states for the four option buttons.
+    pub option_toggles: [bool; GRAPHICS_OPTION_COUNT],
+    /// Whether any setting was changed.
+    pub changed: bool,
+    /// Whether the screen has been closed.
+    pub closed: bool,
+    /// Whether OK was pressed (vs Cancel).
+    pub accepted: bool,
+}
+
+impl GraphicsScreen {
+    pub fn new(config: GraphicConfig) -> Self {
+        let resolution =
+            ResolutionPreset::from_dimensions(config.resolution_x, config.resolution_y);
+        let toggles = [
+            config.framed_view_cone,
+            config.display_shadow,
+            config.display_anim,
+            config.display_titbits,
+        ];
+        Self {
+            config: config.clone(),
+            original_config: config,
+            resolution,
+            option_toggles: toggles,
+            changed: false,
+            closed: false,
+            accepted: false,
+        }
+    }
+
+    /// Handle a resolution radio button selection.
+    pub fn on_resolution(&mut self, preset: ResolutionPreset) {
+        if self.resolution != preset {
+            self.resolution = preset;
+            let (x, y) = preset.dimensions();
+            self.config.set_resolution(x, y);
+            self.changed = true;
+        }
+    }
+
+    /// Handle a graphics option toggle.
+    pub fn on_toggle(&mut self, option: GraphicsOption) {
+        let idx = option as usize;
+        self.option_toggles[idx] = !self.option_toggles[idx];
+        self.changed = true;
+
+        match option {
+            GraphicsOption::AlphaVisionField => {
+                self.config.framed_view_cone = self.option_toggles[idx];
+            }
+            GraphicsOption::TransparentShadows => {
+                self.config.display_shadow = self.option_toggles[idx];
+            }
+            GraphicsOption::EffectAnimations => {
+                self.config.display_anim = self.option_toggles[idx];
+            }
+            GraphicsOption::BackgroundAnimations => {
+                self.config.display_titbits = self.option_toggles[idx];
+            }
+        }
+    }
+
+    /// Handle OK — accept changes.
+    pub fn on_ok(&mut self) {
+        self.accepted = true;
+        self.closed = true;
+    }
+
+    /// Handle Cancel — revert to original.
+    pub fn on_cancel(&mut self) {
+        self.config = self.original_config.clone();
+        self.accepted = false;
+        self.closed = true;
+    }
+
+    /// Whether the resolution changed from the original.
+    pub fn resolution_changed(&self) -> bool {
+        (self.config.resolution_x - self.original_config.resolution_x).abs() > 0.1
+            || (self.config.resolution_y - self.original_config.resolution_y).abs() > 0.1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SoundsScreen
+// ---------------------------------------------------------------------------
+
+/// State for the sound settings screen.
+///
+/// Edits a working copy of `SoundConfig` and applies on OK.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoundsScreen {
+    /// Working copy of sound settings being edited.
+    pub config: SoundConfig,
+    /// The original config (for cancel/revert).
+    pub original_config: SoundConfig,
+    /// Whether any setting was changed.
+    pub changed: bool,
+    /// Whether the screen has been closed.
+    pub closed: bool,
+    /// Whether OK was pressed (vs Cancel).
+    pub accepted: bool,
+}
+
+impl SoundsScreen {
+    pub fn new(config: SoundConfig) -> Self {
+        Self {
+            config,
+            original_config: config,
+            changed: false,
+            closed: false,
+            accepted: false,
+        }
+    }
+
+    /// Handle any slider or toggle change.
+    pub fn on_change(&mut self) {
+        self.changed = true;
+    }
+
+    /// Handle OK — accept changes.
+    pub fn on_ok(&mut self) {
+        self.accepted = true;
+        self.closed = true;
+    }
+
+    /// Handle Cancel — revert to original.
+    pub fn on_cancel(&mut self) {
+        self.config = self.original_config;
+        self.accepted = false;
+        self.closed = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LoadSaveScreen
+// ---------------------------------------------------------------------------
+
+/// Action taken on the load/save screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LoadSaveAction {
+    /// A save game was loaded.
+    Load,
+    /// The game was saved.
+    Save,
+    /// No action taken (cancelled).
+    #[default]
+    None,
+}
+
+/// Information about a save game slot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SaveGameEntry {
+    /// Display name of the save.
+    pub name: String,
+    /// Index / identifier for the save.
+    pub index: u32,
+    /// Thumbnail resource ID (0 = no thumbnail).
+    pub thumbnail_id: u32,
+}
+
+/// State for the load/save screen.
+///
+/// Manages save game list, selection, and load/save/delete actions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LoadSaveScreen {
+    /// Whether this screen is in load mode (true) or save mode (false).
+    pub load_mode: bool,
+    /// Available save game entries.
+    pub entries: Vec<SaveGameEntry>,
+    /// Currently selected entry index, or None.
+    pub selected_index: Option<usize>,
+    /// Text in the save name input field (save mode only).
+    pub input_text: String,
+    /// The action taken by the player.
+    pub action: LoadSaveAction,
+    /// Whether the screen has been closed.
+    pub closed: bool,
+}
+
+impl LoadSaveScreen {
+    pub fn new(load_mode: bool, entries: Vec<SaveGameEntry>) -> Self {
+        Self {
+            load_mode,
+            entries,
+            ..Default::default()
+        }
+    }
+
+    /// Handle Load/Save button click.
+    pub fn on_load_save(&mut self) -> bool {
+        if self.load_mode {
+            if self.selected_index.is_some() {
+                self.action = LoadSaveAction::Load;
+                self.closed = true;
+                return true;
+            }
+        } else {
+            // Save mode — need a name
+            let name = if self.input_text.is_empty() {
+                // Use selected entry name if available
+                self.selected_index
+                    .and_then(|i| self.entries.get(i))
+                    .map(|e| e.name.clone())
+            } else {
+                Some(self.input_text.clone())
+            };
+            if name.is_some() {
+                self.action = LoadSaveAction::Save;
+                self.closed = true;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Handle Delete button click (after confirmation).
+    pub fn on_delete(&mut self, confirmed: bool) {
+        if confirmed
+            && let Some(idx) = self.selected_index
+            && idx < self.entries.len()
+        {
+            self.entries.remove(idx);
+            self.selected_index = None;
+        }
+    }
+
+    /// Handle Cancel button.
+    pub fn on_cancel(&mut self) {
+        self.action = LoadSaveAction::None;
+        self.closed = true;
+    }
+
+    /// Handle list selection change.
+    pub fn on_selection_change(&mut self, index: Option<usize>) {
+        self.selected_index = index;
+    }
+
+    /// Handle double-click on list item (performs load/save directly).
+    pub fn on_double_click(&mut self) {
+        self.on_load_save();
+    }
+
+    /// Handle text input change (save mode).
+    pub fn on_text_change(&mut self, text: String) {
+        self.input_text = text;
+    }
+
+    /// Whether the load/save button should be enabled.
+    pub fn can_load_save(&self) -> bool {
+        if self.load_mode {
+            self.selected_index.is_some()
+        } else {
+            !self.input_text.is_empty() || self.selected_index.is_some()
+        }
+    }
+
+    /// Whether the delete button should be enabled.
+    pub fn can_delete(&self) -> bool {
+        self.selected_index.is_some()
+    }
+
+    /// Get the selected save game entry, if any.
+    pub fn selected_entry(&self) -> Option<&SaveGameEntry> {
+        self.selected_index.and_then(|i| self.entries.get(i))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NewPlayerScreen
+// ---------------------------------------------------------------------------
+
+/// State for the new player creation screen.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NewPlayerScreen {
+    /// Player name input text.
+    pub name: String,
+    /// Selected difficulty level index.
+    pub difficulty_index: u32,
+    /// Whether OK was pressed (vs Cancel).
+    pub confirmed: bool,
+    /// Whether the screen has been closed.
+    pub closed: bool,
+}
+
+/// Maximum player name length.
+pub const MAX_PLAYER_NAME_LENGTH: usize = 30;
+
+/// Number of difficulty levels.
+pub const DIFFICULTY_LEVEL_COUNT: u32 = 3;
+
+impl NewPlayerScreen {
+    /// Create with default difficulty (Medium = index 1).
+    pub fn new() -> Self {
+        Self {
+            difficulty_index: 1, // Medium
+            ..Default::default()
+        }
+    }
+
+    /// Handle OK button.
+    pub fn on_ok(&mut self) {
+        self.confirmed = true;
+        self.closed = true;
+    }
+
+    /// Handle Cancel button.
+    pub fn on_cancel(&mut self) {
+        self.confirmed = false;
+        self.closed = true;
+    }
+
+    /// Get the validated player name (defaults to "Anonymous" if empty).
+    ///
+    /// The raw text is only replaced when fully empty — a whitespace-only
+    /// name is preserved verbatim.
+    pub fn validated_name(&self) -> String {
+        if self.name.is_empty() {
+            "Anonymous".to_string()
+        } else {
+            self.name.clone()
+        }
+    }
+
+    /// Set the name input text (clamped to max length).
+    pub fn set_name(&mut self, name: String) {
+        if name.len() > MAX_PLAYER_NAME_LENGTH {
+            self.name = name[..MAX_PLAYER_NAME_LENGTH].to_string();
+        } else {
+            self.name = name;
+        }
+    }
+
+    /// Handle difficulty radio button selection.
+    pub fn on_difficulty(&mut self, index: u32) {
+        if index < DIFFICULTY_LEVEL_COUNT {
+            self.difficulty_index = index;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SelectPlayerScreen
+// ---------------------------------------------------------------------------
+
+/// Maximum number of player profile slots.
+pub const PLAYER_PROFILE_COUNT: usize = 10;
+
+/// State for the player selection screen.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SelectPlayerScreen {
+    /// Profile names for each slot (empty string = unused slot).
+    pub profile_names: Vec<String>,
+    /// Currently focused/selected slot index.
+    pub selected_index: Option<usize>,
+    /// Whether a resolution change occurred (triggers redisplay).
+    pub resolution_changed: bool,
+    /// Whether the screen has been closed.
+    pub closed: bool,
+}
+
+impl SelectPlayerScreen {
+    pub fn new(profile_names: Vec<String>) -> Self {
+        Self {
+            profile_names,
+            ..Default::default()
+        }
+    }
+
+    /// Handle Select button — activates the selected profile.
+    pub fn on_select(&mut self) -> Option<usize> {
+        if self.selected_index.is_some() {
+            self.closed = true;
+        }
+        self.selected_index
+    }
+
+    /// Handle New button — caller should open NewPlayerScreen, then call
+    /// `add_profile` with the result.
+    pub fn add_profile(&mut self, name: String) -> Option<usize> {
+        if self.profile_names.len() < PLAYER_PROFILE_COUNT {
+            let idx = self.profile_names.len();
+            self.profile_names.push(name);
+            self.selected_index = Some(idx);
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    /// Handle Rename — enable edit mode for the selected slot.
+    pub fn rename_selected(&mut self, new_name: String) {
+        if let Some(idx) = self.selected_index
+            && let Some(name) = self.profile_names.get_mut(idx)
+        {
+            *name = new_name;
+        }
+    }
+
+    /// Handle Delete button (after confirmation).
+    pub fn on_delete(&mut self, confirmed: bool) {
+        if confirmed
+            && let Some(idx) = self.selected_index
+            && idx < self.profile_names.len()
+        {
+            self.profile_names.remove(idx);
+            self.selected_index = None;
+        }
+    }
+
+    /// Handle double-click on a profile (selects immediately).
+    pub fn on_double_click(&mut self, index: usize) {
+        self.selected_index = Some(index);
+        self.closed = true;
+    }
+
+    /// Whether the Select button should be enabled.
+    pub fn can_select(&self) -> bool {
+        self.selected_index
+            .map(|i| i < self.profile_names.len() && !self.profile_names[i].is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Whether the Delete button should be enabled.
+    pub fn can_delete(&self) -> bool {
+        self.selected_index.is_some()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BuyBlazonsScreen
+// ---------------------------------------------------------------------------
+
+/// State for the blazon purchase screen.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BuyBlazonsScreen {
+    /// Mission index this purchase is for.
+    pub mission_index: usize,
+    /// Cost of the blazon set.
+    pub cost: u32,
+    /// Available ransom funds.
+    pub available_funds: u32,
+    /// Status/price display message.
+    pub message: String,
+    /// Whether a purchase was made.
+    pub purchased: bool,
+    /// Whether the screen has been closed.
+    pub closed: bool,
+}
+
+impl BuyBlazonsScreen {
+    pub fn new(mission_index: usize, cost: u32, available_funds: u32) -> Self {
+        let can_afford = available_funds >= cost;
+        let message = if can_afford {
+            format!("Cost: {}", cost)
+        } else {
+            format!("Not enough funds (need {}, have {})", cost, available_funds)
+        };
+        Self {
+            mission_index,
+            cost,
+            available_funds,
+            message,
+            ..Default::default()
+        }
+    }
+
+    /// Whether the Buy button should be enabled.
+    pub fn can_buy(&self) -> bool {
+        self.available_funds >= self.cost
+    }
+
+    /// Handle Buy button.
+    pub fn on_buy(&mut self) {
+        if self.can_buy() {
+            self.available_funds -= self.cost;
+            self.purchased = true;
+            self.closed = true;
+        }
+    }
+
+    /// Handle Quit button.
+    pub fn on_quit(&mut self) {
+        self.closed = true;
+    }
+
+    /// Update state after external changes (e.g., funds updated).
+    pub fn update_state(&mut self, available_funds: u32) {
+        self.available_funds = available_funds;
+        self.message = if self.can_buy() {
+            format!("Cost: {}", self.cost)
+        } else {
+            format!(
+                "Not enough funds (need {}, have {})",
+                self.cost, self.available_funds
+            )
+        };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ShortcutsScreen
+// ---------------------------------------------------------------------------
+
+/// Keyboard shortcut preset type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShortcutPreset {
+    Default1,
+    Default2,
+    UserDefined,
+}
+
+/// State for the keyboard shortcuts configuration screen.
+///
+/// The actual key bindings are stored in `keyconfig::KeyConfig`; this
+/// screen manages the editing workflow.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShortcutsScreen {
+    /// Which preset is currently active.
+    pub active_preset: Option<ShortcutPreset>,
+    /// Whether changes were made.
+    pub changed: bool,
+    /// Whether the screen has been closed.
+    pub closed: bool,
+    /// Whether OK was pressed (vs Cancel).
+    pub accepted: bool,
+}
+
+impl ShortcutsScreen {
+    /// Handle OK — accept changes.
+    pub fn on_ok(&mut self) {
+        self.accepted = true;
+        self.closed = true;
+    }
+
+    /// Handle Cancel — discard changes.
+    pub fn on_cancel(&mut self) {
+        self.accepted = false;
+        self.closed = true;
+    }
+
+    /// Handle Default1 preset button.
+    pub fn on_default1(&mut self) {
+        self.active_preset = Some(ShortcutPreset::Default1);
+        self.changed = true;
+    }
+
+    /// Handle Default2 preset button.
+    pub fn on_default2(&mut self) {
+        self.active_preset = Some(ShortcutPreset::Default2);
+        self.changed = true;
+    }
+
+    /// Handle User Defined button.
+    pub fn on_user_defined(&mut self) {
+        self.active_preset = Some(ShortcutPreset::UserDefined);
+        self.changed = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MoviesScreen
+// ---------------------------------------------------------------------------
+
+/// State for the movie viewer screen.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MoviesScreen {
+    /// Whether the outro button is available (campaign >= 100%).
+    pub outro_available: bool,
+    /// Whether the screen has been closed.
+    pub closed: bool,
+}
+
+impl MoviesScreen {
+    pub fn new(campaign_complete: bool) -> Self {
+        Self {
+            outro_available: campaign_complete,
+            ..Default::default()
+        }
+    }
+
+    /// Handle Intro button — caller should play the intro video.
+    pub fn on_intro(&self) -> &'static str {
+        "Data/Cinematics/Intro.ogg"
+    }
+
+    /// Handle Outro button — caller should play the outro video.
+    /// Returns None if outro is not available.
+    pub fn on_outro(&self) -> Option<&'static str> {
+        if self.outro_available {
+            Some("Data/Cinematics/Outro.ogg")
+        } else {
+            None
+        }
+    }
+
+    /// Handle OK button.
+    pub fn on_ok(&mut self) {
+        self.closed = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MissionWonPopup
+// ---------------------------------------------------------------------------
+
+/// Speed of the open/close transition animation.
+const TRANSITION_SPEED: f32 = 1.5;
+/// Inverse of the transition speed (for exponential decay).
+const INV_TRANSITION_SPEED: f32 = 1.0 / TRANSITION_SPEED;
+
+/// Transition phase for the mission-won popup animation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TransitionPhase {
+    /// No transition in progress.
+    #[default]
+    Idle,
+    /// Popup is expanding from the source button.
+    Opening,
+    /// Popup is collapsing back to the source button.
+    Closing,
+}
+
+/// State for the mission-won/quit transient popup with transition animation.
+///
+/// Manages the open/close transition and confirmation dialog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionWonPopup {
+    /// Text message to display.
+    pub text: String,
+    /// Current transition phase.
+    pub phase: TransitionPhase,
+    /// Animation progress counter.
+    pub transition_counter: f32,
+    /// Whether the user confirmed the action.
+    pub confirmed: bool,
+    /// Whether this popup is for the Start button (true) or Quit button (false).
+    pub is_start: bool,
+    /// Whether the popup is visible.
+    pub visible: bool,
+}
+
+impl Default for MissionWonPopup {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            phase: TransitionPhase::Idle,
+            transition_counter: 0.0,
+            confirmed: false,
+            is_start: true,
+            visible: false,
+        }
+    }
+}
+
+impl MissionWonPopup {
+    pub fn new(text: String, is_start: bool) -> Self {
+        Self {
+            text,
+            is_start,
+            ..Default::default()
+        }
+    }
+
+    /// Start the opening transition.
+    pub fn open(&mut self) {
+        self.phase = TransitionPhase::Opening;
+        self.transition_counter = TRANSITION_SPEED;
+        self.visible = true;
+    }
+
+    /// Start the closing transition.
+    pub fn close(&mut self) {
+        self.phase = TransitionPhase::Closing;
+        self.transition_counter = 0.05;
+    }
+
+    /// Advance the transition animation by one frame.
+    /// Returns `true` while the transition is still in progress.
+    pub fn tick(&mut self) -> bool {
+        match self.phase {
+            TransitionPhase::Opening => {
+                self.transition_counter *= INV_TRANSITION_SPEED;
+                if self.transition_counter < 0.03 {
+                    self.phase = TransitionPhase::Idle;
+                    return false;
+                }
+                true
+            }
+            TransitionPhase::Closing => {
+                self.transition_counter *= TRANSITION_SPEED;
+                if self.transition_counter >= 0.8 {
+                    self.phase = TransitionPhase::Idle;
+                    self.visible = false;
+                    return false;
+                }
+                true
+            }
+            TransitionPhase::Idle => false,
+        }
+    }
+
+    /// Handle the confirmation dialog result.
+    pub fn on_confirm(&mut self, yes: bool) {
+        if yes {
+            self.confirmed = true;
+            self.visible = false;
+            self.phase = TransitionPhase::Idle;
+        } else {
+            self.close();
+        }
+    }
+
+    /// Whether the opening transition has completed (popup fully visible).
+    pub fn is_fully_open(&self) -> bool {
+        self.visible && self.phase == TransitionPhase::Idle
+    }
+
+    /// Interpolation factor for rendering (0.0 = source button, 1.0 = full size).
+    pub fn interpolation(&self) -> f32 {
+        match self.phase {
+            TransitionPhase::Opening => 1.0 - self.transition_counter.min(1.0),
+            TransitionPhase::Closing => 1.0 - self.transition_counter.min(1.0),
+            TransitionPhase::Idle => {
+                if self.visible {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- InfoPopup ----------------------------------------------------------
+
+    #[test]
+    fn info_popup_default_is_hidden() {
+        let popup = InfoPopup::default();
+        assert!(!popup.visible);
+        assert_eq!(popup.text_id, 0);
+    }
+
+    #[test]
+    fn info_popup_show_and_tick() {
+        let mut popup = InfoPopup::default();
+        popup.show(42, 3);
+
+        assert!(popup.visible);
+        assert_eq!(popup.text_id, 42);
+
+        assert!(popup.tick()); // frame 1
+        assert!(popup.tick()); // frame 2
+        assert!(!popup.tick()); // frame 3 — expires
+        assert!(!popup.visible);
+    }
+
+    #[test]
+    fn info_popup_tick_when_hidden_returns_false() {
+        let mut popup = InfoPopup::default();
+        assert!(!popup.tick());
+    }
+
+    #[test]
+    fn info_popup_hide_mid_timeout() {
+        let mut popup = InfoPopup::default();
+        popup.show(1, 100);
+        assert!(popup.tick());
+        popup.hide();
+        assert!(!popup.visible);
+        assert!(!popup.tick());
+    }
+
+    #[test]
+    fn info_popup_reshow_resets_frame() {
+        let mut popup = InfoPopup::default();
+        popup.show(1, 2);
+        assert!(popup.tick());
+        // Re-show before expiry resets the timer.
+        popup.show(2, 5);
+        assert_eq!(popup.current_frame, 0);
+        assert_eq!(popup.text_id, 2);
+        assert_eq!(popup.timeout_frames, 5);
+    }
+
+    #[test]
+    fn info_popup_zero_timeout_expires_immediately() {
+        let mut popup = InfoPopup::default();
+        popup.show(1, 0);
+        assert!(!popup.tick());
+        assert!(!popup.visible);
+    }
+
+    // -- LoadingScreen ------------------------------------------------------
+
+    #[test]
+    fn loading_screen_default_is_inactive() {
+        let screen = LoadingScreen::default();
+        assert!(!screen.is_active());
+        assert_eq!(screen.progress, 0.0);
+        assert!(screen.message.is_empty());
+    }
+
+    #[test]
+    fn loading_screen_lifecycle() {
+        let mut screen = LoadingScreen::default();
+        screen.start("Loading mission…");
+        assert!(screen.is_active());
+        assert_eq!(screen.progress, 0.0);
+        assert_eq!(screen.message, "Loading mission…");
+
+        screen.set_progress(0.5);
+        assert_eq!(screen.progress, 0.5);
+
+        screen.finish();
+        assert!(!screen.is_active());
+        assert_eq!(screen.progress, 1.0);
+    }
+
+    #[test]
+    fn loading_screen_progress_clamped() {
+        let mut screen = LoadingScreen::default();
+        screen.start("test");
+
+        screen.set_progress(-0.5);
+        assert_eq!(screen.progress, 0.0);
+
+        screen.set_progress(2.0);
+        assert_eq!(screen.progress, 1.0);
+    }
+
+    #[test]
+    fn loading_screen_restart() {
+        let mut screen = LoadingScreen::default();
+        screen.start("first");
+        screen.set_progress(0.8);
+        screen.finish();
+
+        screen.start("second");
+        assert!(screen.is_active());
+        assert_eq!(screen.progress, 0.0);
+        assert_eq!(screen.message, "second");
+    }
+
+    // -- YesNoDialog --------------------------------------------------------
+
+    #[test]
+    fn yes_no_default_is_unknown() {
+        let dialog = YesNoDialog::default();
+        assert_eq!(dialog.choice, YesNoChoice::Unknown);
+        assert!(!dialog.closed);
+        assert!(!dialog.confirmed());
+    }
+
+    #[test]
+    fn yes_no_confirm() {
+        let mut dialog = YesNoDialog::new("Delete file?");
+        dialog.on_yes();
+        assert!(dialog.confirmed());
+        assert!(dialog.closed);
+        assert_eq!(dialog.choice, YesNoChoice::Yes);
+    }
+
+    #[test]
+    fn yes_no_reject() {
+        let mut dialog = YesNoDialog::new("Delete file?");
+        dialog.on_no();
+        assert!(!dialog.confirmed());
+        assert!(dialog.closed);
+        assert_eq!(dialog.choice, YesNoChoice::No);
+    }
+
+    // -- PopupScroll --------------------------------------------------------
+
+    #[test]
+    fn popup_scroll_single_page() {
+        let mut popup = PopupScroll::new("Short text");
+        assert!(!popup.has_more_pages());
+        popup.on_ok();
+        assert!(popup.closed);
+        assert!(!popup.advance_page());
+    }
+
+    #[test]
+    fn popup_scroll_multi_page() {
+        let mut popup = PopupScroll::new("First page");
+        popup.text_remaining = "Second page".to_string();
+        popup.on_ok();
+        assert!(popup.closed);
+        assert!(popup.has_more_pages());
+        assert!(popup.advance_page());
+        assert_eq!(popup.text, "Second page");
+        assert!(!popup.closed);
+        assert!(!popup.has_more_pages());
+    }
+
+    #[test]
+    fn popup_scroll_with_picture() {
+        let popup = PopupScroll::new("text").with_picture(42).with_alignment(1);
+        assert_eq!(popup.picture_id, 42);
+        assert_eq!(popup.text_alignment, 1);
+    }
+
+    // -- DialogueScreen -----------------------------------------------------
+
+    #[test]
+    fn dialogue_sentence_progression() {
+        let sentences = vec![
+            DialogueSentence {
+                text: "Hello".into(),
+                sound_id: "snd1".into(),
+                portrait_index: 0,
+            },
+            DialogueSentence {
+                text: "Goodbye".into(),
+                sound_id: "snd2".into(),
+                portrait_index: 1,
+            },
+        ];
+        let mut screen = DialogueScreen::new(1, sentences);
+        assert_eq!(screen.current_sentence, -1);
+
+        let s1 = screen.next_sentence().unwrap();
+        assert_eq!(s1.text, "Hello");
+        assert_eq!(screen.current_sentence, 0);
+
+        let s2 = screen.next_sentence().unwrap();
+        assert_eq!(s2.text, "Goodbye");
+
+        assert!(screen.next_sentence().is_none());
+        assert!(screen.finished);
+    }
+
+    #[test]
+    fn dialogue_stop() {
+        let mut screen = DialogueScreen::new(1, vec![DialogueSentence::default()]);
+        screen.on_stop();
+        assert!(screen.finished);
+        assert!(screen.abandoned);
+    }
+
+    #[test]
+    fn dialogue_portrait_animation() {
+        let mut screen = DialogueScreen::default();
+        screen.update_portrait(0.0);
+        assert_eq!(screen.mouth_frame, 0);
+
+        screen.update_portrait(0.25);
+        assert_eq!(screen.mouth_frame, 3);
+
+        screen.update_portrait(0.5);
+        assert_eq!(screen.mouth_frame, 4);
+    }
+
+    #[test]
+    fn dialogue_portrait_blink_after_repeated() {
+        let mut screen = DialogueScreen::default();
+        // Same low volume 3 times triggers blink
+        screen.update_portrait(0.005);
+        assert_eq!(screen.mouth_frame, 0);
+        screen.update_portrait(0.005);
+        assert_eq!(screen.mouth_frame, 0);
+        screen.update_portrait(0.005);
+        // After MAX_FACE_COUNT (3), should alternate
+        assert_eq!(screen.mouth_frame, 1);
+    }
+
+    // -- DebriefingScreen ---------------------------------------------------
+
+    #[test]
+    fn debriefing_win_ok() {
+        let mut screen = DebriefingScreen::new(true, false, "Victory".into(), "You won!".into());
+        assert!(screen.win);
+        screen.on_ok();
+        assert!(screen.closed);
+        assert_eq!(screen.action, DebriefingAction::Continue);
+    }
+
+    #[test]
+    fn debriefing_restart() {
+        let mut screen = DebriefingScreen::new(false, true, "Defeat".into(), "Try again".into());
+        screen.on_restart();
+        assert_eq!(screen.action, DebriefingAction::Restart);
+        assert_eq!(screen.game_code, GameCode::LevelLoad);
+        assert!(screen.load_requested);
+    }
+
+    #[test]
+    fn debriefing_pagination() {
+        let mut screen = DebriefingScreen::new(true, false, "T".into(), "Page 1".into());
+        screen.text_remaining = "Page 2".into();
+        screen.on_ok();
+        assert!(screen.has_more_pages());
+        assert!(screen.advance_page());
+        assert_eq!(screen.text, "Page 2");
+        assert!(!screen.closed);
+    }
+
+    // -- MissionDescriptionScreen -------------------------------------------
+
+    #[test]
+    fn mission_description_start() {
+        let mut screen = MissionDescriptionScreen::default();
+        screen.on_start_mission();
+        assert_eq!(screen.user_choice, MissionChoice::StartMission);
+        assert!(!screen.men_to_blazon_mode);
+        assert!(screen.closed);
+    }
+
+    #[test]
+    fn mission_description_convert_peasants() {
+        let mut screen = MissionDescriptionScreen::default();
+        screen.on_convert_peasants();
+        assert_eq!(screen.user_choice, MissionChoice::StartMission);
+        assert!(screen.men_to_blazon_mode);
+    }
+
+    #[test]
+    fn mission_description_convert_mission() {
+        let mut screen = MissionDescriptionScreen::default();
+        screen.on_convert_mission();
+        assert_eq!(screen.user_choice, MissionChoice::ShowPendingMissions);
+    }
+
+    #[test]
+    fn mission_description_picture_default_when_no_descriptor() {
+        // `get_mission_picture` falls through to the default popup
+        // scroll picture when the mission's `.red` descriptor is missing.
+        let picture = MissionDescriptionScreen::get_mission_picture(None);
+        assert_eq!(
+            picture,
+            crate::resource_ids::RHID_DEFAULT_POPUP_SCROLL_PICTURE
+        );
+    }
+
+    #[test]
+    fn mission_description_text_message_when_no_descriptor() {
+        // `get_mission_text` returns the "Unable to find..." sentinel
+        // when the level descriptor is missing, without touching the
+        // resource manager.
+        let mut text_res = crate::resource_manager::ResourceManager::new();
+        let text = MissionDescriptionScreen::get_mission_text(None, &mut text_res, 0);
+        assert!(text.contains("Unable to find"));
+    }
+
+    #[test]
+    fn mission_description_buttons_non_blazon() {
+        // Non-blazon missions show just start + cancel.
+        let screen = MissionDescriptionScreen {
+            requires_blazons: false,
+            show_start_mission: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            screen.buttons(),
+            vec![
+                MissionDescriptionButton::StartMission,
+                MissionDescriptionButton::Cancel
+            ]
+        );
+    }
+
+    #[test]
+    fn mission_description_buttons_blazon_non_pseudo() {
+        // Blazon + non-pseudo = three converts + start + cancel.
+        let screen = MissionDescriptionScreen {
+            requires_blazons: true,
+            show_start_mission: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            screen.buttons(),
+            vec![
+                MissionDescriptionButton::ConvertPeasants,
+                MissionDescriptionButton::ConvertMoney,
+                MissionDescriptionButton::ConvertMission,
+                MissionDescriptionButton::StartMission,
+                MissionDescriptionButton::Cancel,
+            ]
+        );
+    }
+
+    #[test]
+    fn mission_description_buttons_blazon_pseudo() {
+        // Blazon + pseudo (last-mission style) = three converts +
+        // cancel, no start button (start-mission is gated on
+        // `type != PSEUDO`).
+        let screen = MissionDescriptionScreen {
+            requires_blazons: true,
+            show_start_mission: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            screen.buttons(),
+            vec![
+                MissionDescriptionButton::ConvertPeasants,
+                MissionDescriptionButton::ConvertMoney,
+                MissionDescriptionButton::ConvertMission,
+                MissionDescriptionButton::Cancel,
+            ]
+        );
+    }
+
+    #[test]
+    fn mission_description_is_enabled_reflects_convert_flags() {
+        let screen = MissionDescriptionScreen {
+            can_convert_peasants: true,
+            can_convert_money: false,
+            can_convert_mission: true,
+            ..Default::default()
+        };
+        assert!(screen.is_enabled(MissionDescriptionButton::Cancel));
+        assert!(screen.is_enabled(MissionDescriptionButton::StartMission));
+        assert!(screen.is_enabled(MissionDescriptionButton::ConvertPeasants));
+        assert!(!screen.is_enabled(MissionDescriptionButton::ConvertMoney));
+        assert!(screen.is_enabled(MissionDescriptionButton::ConvertMission));
+    }
+
+    #[test]
+    fn mission_description_activate_disabled_is_noop() {
+        let mut screen = MissionDescriptionScreen {
+            can_convert_peasants: false,
+            ..Default::default()
+        };
+        screen.activate(MissionDescriptionButton::ConvertPeasants);
+        assert_eq!(screen.user_choice, MissionChoice::None);
+        assert!(!screen.closed);
+        assert!(!screen.men_to_blazon_mode);
+    }
+
+    #[test]
+    fn mission_description_drop_cap_non_blazon() {
+        // Description top is 125; picture starts at y=40 with h=200 →
+        // carveout height = 200 + 40 - 125 + 5 = 120, width = 300 + 10.
+        let screen = MissionDescriptionScreen {
+            requires_blazons: false,
+            ..Default::default()
+        };
+        assert_eq!(screen.description_drop_cap(300, 200), Some((310, 120)));
+    }
+
+    #[test]
+    fn mission_description_drop_cap_blazon_is_none() {
+        // Blazon layout places the description below the picture, so
+        // no drop-cap carveout.
+        let screen = MissionDescriptionScreen {
+            requires_blazons: true,
+            ..Default::default()
+        };
+        assert!(screen.description_drop_cap(300, 200).is_none());
+    }
+
+    #[test]
+    fn center_horizontally_three_buttons() {
+        // Three 60-wide buttons with gap 8 in a 496-wide window:
+        // total = 60*3 + 8*2 = 196, offset = (496 - 196) / 2 = 150.
+        let xs = center_horizontally_x(&[60, 60, 60], 496, 8);
+        assert_eq!(xs, vec![150, 218, 286]);
+    }
+
+    #[test]
+    fn center_horizontally_empty_is_empty() {
+        assert!(center_horizontally_x(&[], 496, 8).is_empty());
+    }
+
+    #[test]
+    fn mission_description_tooltip_lookup() {
+        struct StubMenuText;
+        impl robin_engine::sherwood_stat::MenuTextLookup for StubMenuText {
+            fn get(&self, id: usize) -> String {
+                format!("tip:{id}")
+            }
+        }
+        let lookup = StubMenuText;
+        assert_eq!(
+            MissionDescriptionScreen::tooltip(MissionDescriptionButton::Cancel, &lookup),
+            format!(
+                "tip:{}",
+                crate::ingame_menu::resources::MT_INFOBULLE_BUTTON_CANCEL
+            )
+        );
+        assert_eq!(
+            MissionDescriptionScreen::tooltip(MissionDescriptionButton::StartMission, &lookup),
+            format!(
+                "tip:{}",
+                crate::ingame_menu::resources::MT_INFOBULLE_BUTTON_PLAY_MISSION
+            )
+        );
+        assert_eq!(
+            MissionDescriptionScreen::tooltip(MissionDescriptionButton::ConvertMoney, &lookup),
+            format!(
+                "tip:{}",
+                crate::ingame_menu::resources::MT_INFOBULLE_BUTTON_MONEY_TO_BLAZON
+            )
+        );
+    }
+
+    // -- ShortMissionDescription -------------------------------------------
+
+    #[test]
+    fn short_mission_description_tracking() {
+        let mut desc = ShortMissionDescription::default();
+        assert!(!desc.visible);
+
+        desc.set_mission(0, "Test mission".into(), Some(2), false);
+        assert!(desc.visible);
+        assert_eq!(desc.lifetime_indicator(), 2);
+
+        desc.track_mouse(700.0, 500.0, 800.0, 600.0, 220.0, 100.0);
+        // Should clamp: 700+25=725, but 725+220=945 > 800, so x = 580
+        assert!((desc.position_x - 580.0).abs() < 0.1);
+
+        desc.clear();
+        assert!(!desc.visible);
+    }
+
+    #[test]
+    fn short_mission_lifetime_indicator() {
+        let mut desc = ShortMissionDescription {
+            remaining_lifetime: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(desc.lifetime_indicator(), 0);
+        desc.remaining_lifetime = Some(3);
+        assert_eq!(desc.lifetime_indicator(), 3);
+        desc.remaining_lifetime = Some(10);
+        assert_eq!(desc.lifetime_indicator(), 4);
+        desc.remaining_lifetime = None;
+        assert_eq!(desc.lifetime_indicator(), 4);
+    }
+
+    // -- IntroScreen -------------------------------------------------------
+
+    #[test]
+    fn intro_start_game() {
+        let mut screen = IntroScreen::new("Robin".into(), "Level 5".into());
+        screen.on_start_game();
+        assert_eq!(screen.operation, IntroOperation::Start);
+        assert!(screen.closed);
+    }
+
+    #[test]
+    fn intro_exit_confirmed() {
+        let mut screen = IntroScreen::default();
+        screen.on_exit(true);
+        assert_eq!(screen.operation, IntroOperation::Exit);
+        assert!(screen.closed);
+    }
+
+    #[test]
+    fn intro_exit_cancelled() {
+        let mut screen = IntroScreen::default();
+        screen.on_exit(false);
+        assert_eq!(screen.operation, IntroOperation::Unknown);
+        assert!(!screen.closed);
+    }
+
+    #[test]
+    fn intro_load_result() {
+        let mut screen = IntroScreen::default();
+        screen.set_load_result(true, GameCode::LevelLoad);
+        assert_eq!(screen.operation, IntroOperation::Load);
+        assert!(screen.closed);
+    }
+
+    // -- IngameScreen ------------------------------------------------------
+
+    #[test]
+    fn ingame_continue() {
+        let mut screen = IngameScreen::default();
+        screen.on_continue();
+        assert_eq!(screen.game_code, GameCode::LevelInProgress);
+        assert!(screen.closed);
+    }
+
+    #[test]
+    fn ingame_restart_confirmed() {
+        let mut screen = IngameScreen::default();
+        screen.on_restart(true);
+        assert_eq!(screen.game_code, GameCode::LevelRestart);
+        assert!(screen.closed);
+    }
+
+    #[test]
+    fn ingame_restart_cancelled() {
+        let mut screen = IngameScreen::default();
+        screen.on_restart(false);
+        assert!(!screen.closed);
+    }
+
+    #[test]
+    fn ingame_quit() {
+        let mut screen = IngameScreen::default();
+        screen.on_quit(true);
+        assert_eq!(screen.game_code, GameCode::Quit);
+        assert!(screen.closed);
+    }
+
+    // -- OptionsScreen -----------------------------------------------------
+
+    #[test]
+    fn options_tracks_changes() {
+        let mut screen = OptionsScreen::default();
+        screen.set_graphics_result(true, false);
+        assert!(screen.options_changed);
+        assert!(!screen.redisplay);
+
+        screen.set_graphics_result(false, true);
+        assert!(screen.redisplay);
+    }
+
+    // -- GraphicsScreen ----------------------------------------------------
+
+    #[test]
+    fn graphics_resolution_presets() {
+        assert_eq!(ResolutionPreset::Low.dimensions(), (640.0, 480.0));
+        assert_eq!(ResolutionPreset::Medium.dimensions(), (800.0, 600.0));
+        assert_eq!(ResolutionPreset::High.dimensions(), (1024.0, 768.0));
+    }
+
+    #[test]
+    fn graphics_resolution_from_dimensions() {
+        assert_eq!(
+            ResolutionPreset::from_dimensions(640.0, 480.0),
+            ResolutionPreset::Low
+        );
+        assert_eq!(
+            ResolutionPreset::from_dimensions(1024.0, 768.0),
+            ResolutionPreset::High
+        );
+        assert_eq!(
+            ResolutionPreset::from_dimensions(999.0, 999.0),
+            ResolutionPreset::Medium
+        );
+    }
+
+    #[test]
+    fn graphics_screen_ok_cancel() {
+        let config = GraphicConfig::default();
+        let mut screen = GraphicsScreen::new(config);
+
+        screen.on_resolution(ResolutionPreset::High);
+        assert!(screen.changed);
+        assert!(screen.resolution_changed());
+
+        screen.on_cancel();
+        assert!(screen.closed);
+        assert!(!screen.accepted);
+        assert_eq!(screen.config.resolution_x, 800.0); // reverted
+    }
+
+    #[test]
+    fn graphics_screen_toggle() {
+        let config = GraphicConfig::default();
+        let mut screen = GraphicsScreen::new(config);
+        let original_shadow = screen.config.display_shadow;
+
+        screen.on_toggle(GraphicsOption::TransparentShadows);
+        assert_ne!(screen.config.display_shadow, original_shadow);
+        assert!(screen.changed);
+    }
+
+    // -- SoundsScreen -------------------------------------------------------
+
+    #[test]
+    fn sounds_screen_ok_cancel() {
+        let config = SoundConfig::default();
+        let mut screen = SoundsScreen::new(config);
+
+        screen.config.set_music_volume(3);
+        screen.on_change();
+        assert!(screen.changed);
+
+        screen.on_cancel();
+        assert_eq!(screen.config.music_volume, 9); // reverted
+    }
+
+    // -- LoadSaveScreen ----------------------------------------------------
+
+    #[test]
+    fn load_save_load_mode() {
+        let entries = vec![
+            SaveGameEntry {
+                name: "Save 1".into(),
+                index: 0,
+                thumbnail_id: 0,
+            },
+            SaveGameEntry {
+                name: "Save 2".into(),
+                index: 1,
+                thumbnail_id: 0,
+            },
+        ];
+        let mut screen = LoadSaveScreen::new(true, entries);
+        assert!(!screen.can_load_save());
+
+        screen.on_selection_change(Some(0));
+        assert!(screen.can_load_save());
+
+        screen.on_load_save();
+        assert_eq!(screen.action, LoadSaveAction::Load);
+        assert!(screen.closed);
+    }
+
+    #[test]
+    fn load_save_save_mode() {
+        let mut screen = LoadSaveScreen::new(false, vec![]);
+        assert!(!screen.can_load_save());
+
+        screen.on_text_change("My Save".into());
+        assert!(screen.can_load_save());
+
+        screen.on_load_save();
+        assert_eq!(screen.action, LoadSaveAction::Save);
+    }
+
+    #[test]
+    fn load_save_delete() {
+        let entries = vec![SaveGameEntry {
+            name: "test".into(),
+            index: 0,
+            thumbnail_id: 0,
+        }];
+        let mut screen = LoadSaveScreen::new(true, entries);
+        screen.on_selection_change(Some(0));
+        assert!(screen.can_delete());
+
+        screen.on_delete(true);
+        assert!(screen.entries.is_empty());
+        assert!(screen.selected_index.is_none());
+    }
+
+    // -- NewPlayerScreen ---------------------------------------------------
+
+    #[test]
+    fn new_player_defaults() {
+        let screen = NewPlayerScreen::new();
+        assert_eq!(screen.difficulty_index, 1);
+        assert_eq!(screen.validated_name(), "Anonymous");
+    }
+
+    #[test]
+    fn new_player_name_validation() {
+        let mut screen = NewPlayerScreen::new();
+        screen.set_name("Robin Hood".into());
+        assert_eq!(screen.validated_name(), "Robin Hood");
+
+        // `validated_name` only substitutes "Anonymous" on fully empty
+        // raw text; a whitespace-only name is preserved verbatim.
+        screen.set_name("  ".into());
+        assert_eq!(screen.validated_name(), "  ");
+
+        screen.set_name(String::new());
+        assert_eq!(screen.validated_name(), "Anonymous");
+    }
+
+    #[test]
+    fn new_player_name_length_limit() {
+        let mut screen = NewPlayerScreen::new();
+        let long_name = "A".repeat(100);
+        screen.set_name(long_name);
+        assert_eq!(screen.name.len(), MAX_PLAYER_NAME_LENGTH);
+        assert_eq!(MAX_PLAYER_NAME_LENGTH, 30);
+    }
+
+    // -- SelectPlayerScreen ------------------------------------------------
+
+    #[test]
+    fn select_player_flow() {
+        let names = vec!["Alice".into(), "Bob".into()];
+        let mut screen = SelectPlayerScreen::new(names);
+        assert!(!screen.can_select());
+
+        screen.selected_index = Some(0);
+        assert!(screen.can_select());
+
+        let idx = screen.on_select();
+        assert_eq!(idx, Some(0));
+        assert!(screen.closed);
+    }
+
+    #[test]
+    fn select_player_add_delete() {
+        let mut screen = SelectPlayerScreen::new(vec!["Alice".into()]);
+        assert_eq!(screen.profile_names.len(), 1);
+
+        screen.add_profile("Bob".into());
+        assert_eq!(screen.profile_names.len(), 2);
+        assert_eq!(screen.selected_index, Some(1));
+
+        screen.on_delete(true);
+        assert_eq!(screen.profile_names.len(), 1);
+    }
+
+    // -- BuyBlazonsScreen --------------------------------------------------
+
+    #[test]
+    fn buy_blazons_can_afford() {
+        let mut screen = BuyBlazonsScreen::new(0, 100, 200);
+        assert!(screen.can_buy());
+        screen.on_buy();
+        assert!(screen.purchased);
+        assert_eq!(screen.available_funds, 100);
+    }
+
+    #[test]
+    fn buy_blazons_cannot_afford() {
+        let screen = BuyBlazonsScreen::new(0, 300, 100);
+        assert!(!screen.can_buy());
+    }
+
+    // -- MoviesScreen ------------------------------------------------------
+
+    #[test]
+    fn movies_outro_availability() {
+        let screen = MoviesScreen::new(false);
+        assert!(screen.on_outro().is_none());
+
+        let screen = MoviesScreen::new(true);
+        assert!(screen.on_outro().is_some());
+    }
+
+    // -- MissionWonPopup ---------------------------------------------------
+
+    #[test]
+    fn mission_won_opening_transition() {
+        let mut popup = MissionWonPopup::new("Mission Started".into(), true);
+        popup.open();
+        assert!(popup.visible);
+        assert_eq!(popup.phase, TransitionPhase::Opening);
+
+        // Tick until transition completes
+        let mut ticks = 0;
+        while popup.tick() {
+            ticks += 1;
+            if ticks > 100 {
+                panic!("Opening transition did not complete");
+            }
+        }
+        assert!(popup.is_fully_open());
+    }
+
+    #[test]
+    fn mission_won_closing_transition() {
+        let mut popup = MissionWonPopup {
+            visible: true,
+            ..Default::default()
+        };
+        popup.close();
+        assert_eq!(popup.phase, TransitionPhase::Closing);
+
+        let mut ticks = 0;
+        while popup.tick() {
+            ticks += 1;
+            if ticks > 100 {
+                panic!("Closing transition did not complete");
+            }
+        }
+        assert!(!popup.visible);
+    }
+
+    #[test]
+    fn mission_won_confirm_yes() {
+        let mut popup = MissionWonPopup {
+            visible: true,
+            ..Default::default()
+        };
+        popup.on_confirm(true);
+        assert!(popup.confirmed);
+        assert!(!popup.visible);
+    }
+
+    #[test]
+    fn mission_won_confirm_no_starts_close() {
+        let mut popup = MissionWonPopup {
+            visible: true,
+            ..Default::default()
+        };
+        popup.on_confirm(false);
+        assert!(!popup.confirmed);
+        assert_eq!(popup.phase, TransitionPhase::Closing);
+    }
+
+    // -- Serde round-trip ---------------------------------------------------
+
+    #[test]
+    fn info_popup_serde_roundtrip() {
+        let mut popup = InfoPopup::default();
+        popup.show(99, 60);
+        popup.tick();
+
+        let json = serde_json::to_string(&popup).unwrap();
+        let restored: InfoPopup = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.text_id, popup.text_id);
+        assert_eq!(restored.visible, popup.visible);
+        assert_eq!(restored.timeout_frames, popup.timeout_frames);
+        assert_eq!(restored.current_frame, popup.current_frame);
+    }
+
+    #[test]
+    fn loading_screen_serde_roundtrip() {
+        let mut screen = LoadingScreen::default();
+        screen.start("Loading…");
+        screen.set_progress(0.75);
+
+        let json = serde_json::to_string(&screen).unwrap();
+        let restored: LoadingScreen = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.progress, screen.progress);
+        assert_eq!(restored.message, screen.message);
+        assert_eq!(restored.active, screen.active);
+    }
+
+    #[test]
+    fn yes_no_serde_roundtrip() {
+        let mut dialog = YesNoDialog::new("Test?");
+        dialog.on_yes();
+        let json = serde_json::to_string(&dialog).unwrap();
+        let restored: YesNoDialog = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.choice, YesNoChoice::Yes);
+        assert!(restored.closed);
+    }
+
+    #[test]
+    fn dialogue_screen_serde_roundtrip() {
+        let sentences = vec![DialogueSentence {
+            text: "Hello".into(),
+            sound_id: "snd".into(),
+            portrait_index: 3,
+        }];
+        let screen = DialogueScreen::new(42, sentences);
+        let json = serde_json::to_string(&screen).unwrap();
+        let restored: DialogueScreen = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.dialogue_id, 42);
+        assert_eq!(restored.sentences.len(), 1);
+        assert_eq!(restored.sentences[0].portrait_index, 3);
+    }
+
+    #[test]
+    fn mission_won_popup_serde_roundtrip() {
+        let mut popup = MissionWonPopup::new("test".into(), true);
+        popup.open();
+        let json = serde_json::to_string(&popup).unwrap();
+        let restored: MissionWonPopup = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.phase, TransitionPhase::Opening);
+        assert!(restored.visible);
+    }
+}

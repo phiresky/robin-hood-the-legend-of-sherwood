@@ -1,0 +1,707 @@
+//! Full game save payload — captures a snapshot of Engine + Campaign state.
+//!
+//! Logical fields are serialized through serde.  The format is JSON today
+//! for debuggability; switching to a compact binary format (e.g. bincode)
+//! is a future option once the set of serialized fields stabilizes.  A
+//! 4-byte "RHSG" magic plus a format version are stored in the header;
+//! field evolution relies on serde's structural compat.
+//!
+//! ## What gets serialized
+//!
+//! - Camera, mission win/loss, frame counter, engine locks, speed
+//! - Shield protection, cheat flags, script globals
+//! - Entities (PCs, NPCs, animals, mobile elements, animations, FX)
+//! - Quick-select groups, selected PCs, fighter/soldier indices
+//! - AI global state, messenger queue, short briefings
+//! - FastFindGrid, pathfinder state, minimap, ground marks, titbits
+//! - Sequence manager, shadow polygon, sound state
+//! - Mission stats
+//! - Campaign state (missions, gang, values, ARES, reservists, etc.)
+//!
+//! Not serialized (transient or re-derivable):
+//! - DebugFlags, InputState, WeatherState
+//! - Rendering surface handles, DrawManager, FrameHolder, SpriteScriptor
+//! - Console, MissionScript (reloaded from level after load)
+//! - FailedPathRequest list (just a 100-frame grace timer)
+//! - script_*_count / script_location_positions (recomputed from level data)
+//! - hiking_paths, profile_manager (Arc'd immutable data reloaded at level init)
+
+use crate::Host;
+use std::fs;
+use std::path::{Path, PathBuf};
+use web_time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+
+use crate::game::GamePersistentState;
+use crate::sound::SoundManager;
+use robin_engine::engine::Engine;
+
+// ─── Thumbnail ───────────────────────────────────────────────────────
+
+/// Four-byte magic for the sibling thumbnail file (`<slot>_t` on disk).
+/// Chosen to parallel the `"RHSG"` save magic.
+const THUMB_MAGIC: &[u8; 4] = b"RHTB";
+
+/// Thumbnail format revision (bumped whenever the on-disk layout changes).
+const THUMB_VERSION: u16 = 1;
+
+/// Default thumbnail dimensions.  Downsampled to a small fixed size to
+/// keep the sibling file tiny.
+pub const THUMB_WIDTH: u16 = 160;
+pub const THUMB_HEIGHT: u16 = 120;
+
+/// A small RGB565 thumbnail of the last rendered frame.
+///
+/// Written to a sibling file (`<name>_t`) next to the save payload by
+/// [`SaveGameManager::thumb_path`] / [`Thumbnail::write_to`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Thumbnail {
+    pub width: u16,
+    pub height: u16,
+    /// Row-major RGB565 pixels, length = `width × height`.
+    pub pixels: Vec<u16>,
+}
+
+impl Thumbnail {
+    /// Build a thumbnail from a raw RGB565 pixel buffer.
+    pub fn from_pixels(width: u16, height: u16, pixels: Vec<u16>) -> Option<Self> {
+        if pixels.len() != width as usize * height as usize {
+            return None;
+        }
+        Some(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+
+    /// Write the thumbnail to `path` as a standalone binary file.
+    ///
+    /// Layout (little-endian):
+    ///
+    /// ```text
+    /// [0..4]   "RHTB" magic
+    /// [4..6]   version (u16)
+    /// [6..8]   width (u16)
+    /// [8..10]  height (u16)
+    /// [10..12] reserved (u16)
+    /// [12..]   width*height RGB565 pixels (u16 LE)
+    /// ```
+    pub fn write_to(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating thumbnail directory {}", parent.display()))?;
+        }
+        let mut buf = Vec::with_capacity(12 + self.pixels.len() * 2);
+        buf.extend_from_slice(THUMB_MAGIC);
+        buf.extend_from_slice(&THUMB_VERSION.to_le_bytes());
+        buf.extend_from_slice(&self.width.to_le_bytes());
+        buf.extend_from_slice(&self.height.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // reserved
+        for px in &self.pixels {
+            buf.extend_from_slice(&px.to_le_bytes());
+        }
+        fs::write(path, &buf).with_context(|| format!("writing thumbnail {}", path.display()))
+    }
+
+    /// Read a thumbnail written by [`write_to`](Self::write_to).
+    pub fn read_from(path: &Path) -> Result<Self> {
+        let bytes =
+            fs::read(path).with_context(|| format!("reading thumbnail {}", path.display()))?;
+        if bytes.len() < 12 {
+            bail!("thumbnail file too short: {} bytes", bytes.len());
+        }
+        if &bytes[0..4] != THUMB_MAGIC {
+            bail!(
+                "invalid thumbnail magic: expected {:?}, got {:?}",
+                THUMB_MAGIC,
+                &bytes[0..4]
+            );
+        }
+        let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+        if version != THUMB_VERSION {
+            bail!(
+                "unsupported thumbnail version: expected {}, got {}",
+                THUMB_VERSION,
+                version
+            );
+        }
+        let width = u16::from_le_bytes([bytes[6], bytes[7]]);
+        let height = u16::from_le_bytes([bytes[8], bytes[9]]);
+        let expected_pixels = width as usize * height as usize;
+        let pixel_bytes = &bytes[12..];
+        if pixel_bytes.len() < expected_pixels * 2 {
+            bail!(
+                "thumbnail pixel buffer too small: need {} bytes, got {}",
+                expected_pixels * 2,
+                pixel_bytes.len()
+            );
+        }
+        let mut pixels = Vec::with_capacity(expected_pixels);
+        for chunk in pixel_bytes.chunks_exact(2).take(expected_pixels) {
+            pixels.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+}
+
+// ─── Header ──────────────────────────────────────────────────────────
+
+/// Magic bytes at the start of every save file.
+pub const SAVE_MAGIC: &str = "RHSG";
+
+/// Current save format version.
+///
+/// Bumped on every incompatible change to the serialized fields.  The
+/// counter starts from 1; legacy format readers live in `legacy_save.rs`.
+///
+/// ## History
+/// - **v1**: initial Rust format. `ElementData.sprite` was skipped; the
+///   embedded `PositionInterface` + sprite animation state did not persist.
+/// - **v2** (2026-04-20, PI-into-Sprite refactor): `ElementData.sprite` is
+///   now fully serialized. The saved `Sprite` carries its `PositionInterface`
+///   (position / direction / layer / sector / material) plus the animation
+///   state (`current_row`, `current_frame`, `frame_count`, `last_action`,
+///   …). Arc-shared script caches re-hydrate from the sprite cache on load.
+/// - **v3** (2026-04-29, engine-state cleanup): small sprite/titbit runtime
+///   values that still live inside engine-owned structs now serialize instead
+///   of resetting through `#[serde(skip)]`: sprite water-titbit cadence,
+///   sprite bbox/center, and titbit blink/dotted-line counters.
+/// - **v4** (2026-04-29, engine-state cleanup): door after-patch lock bits
+///   serialize with the active lock bits so patch swap/revert behavior
+///   survives save/load.
+/// - **v5** (2026-04-29, engine-state cleanup): AI door/building caches
+///   serialize, including live building occupant lists and soldier-register
+///   mappings.
+/// - **v6** (2026-04-29, engine-state cleanup): NPC patrol route IDs
+///   serialize with AI controller state so alert-route switches survive
+///   save/load.
+/// - **v7** (2026-04-29, engine-state cleanup): NPC actor-script
+///   FilterAIEvent override metadata serializes with the bound AI
+///   controller.
+/// - **v8** (2026-04-29, engine-state cleanup): NPC initial guard-post
+///   position and facing direction serialize with AI controller state.
+/// - **v9** (2026-04-29, engine-state cleanup): NPC focus-sync gate
+///   state serializes so explicit focus clears are not undone after load.
+/// - **v10** (2026-04-29, engine-state cleanup): AI think recursion
+///   depth serializes with controller state instead of hiding behind
+///   `#[serde(skip)]`.
+/// - **v11** (2026-04-29, engine-state cleanup): pending NPC MYTALK
+///   callback flags and instant music-change latches serialize with AI
+///   controller state.
+/// - **v12** (2026-04-29, engine-state cleanup): NPC AI frame/building
+///   context caches and current max-visibility cache serialize with the
+///   controller instead of resetting through skipped fields.
+/// - **v13** (2026-04-29, engine-state cleanup): first batch of AI
+///   pending work queues serializes with controller state: patrol
+///   direction broadcasts, order intents, queued stimuli, cross-NPC
+///   actions, and self-stimuli.
+/// - **v14** (2026-04-29, engine-state cleanup): AI pending engine
+///   mutation requests for halt/deactivate/swordfight/detectable updates
+///   serialize with controller state.
+/// - **v15** (2026-04-29, engine-state cleanup): AI pending target/focus
+///   requests serialize with controller state.
+/// - **v16** (2026-04-29, engine-state cleanup): AI pending state-change,
+///   view recovery, detectable-object recovery, and guarded-PC requests
+///   serialize with controller state.
+/// - **v17** (2026-04-30, engine-state cleanup): AI pending sequence,
+///   posture, waypoint-script, panic, and script-seek requests serialize
+///   with controller state.
+/// - **v18** (2026-04-30, engine-state cleanup): VM/native pending nested
+///   script calls serialize instead of being silently dropped.
+/// - **v19** (2026-04-30, engine-state cleanup): Tick side-effect queues
+///   serialize/hash if they ever leak into an engine snapshot.
+/// - **v20** (2026-04-30, engine-state cleanup): AI entity-view and
+///   sight-obstacle dispatch caches serialize/hash with global AI state.
+/// - **v21** (2026-04-30, engine-state cleanup): Script managers serialize
+///   their immutable decoded program instead of relying on skipped reattach.
+/// - **v22** (2026-04-30, engine-state cleanup): Script native hosts
+///   serialize their profile-manager attachment with host state.
+/// - **v23** (2026-04-30, engine-state cleanup): AI controllers no longer
+///   cache per-NPC hiking-path Arcs; path data is threaded through AI context
+///   and script host static data.
+/// - **v24** (2026-04-30, engine-state cleanup): enemy AI pending archery
+///   release requests and sword-strike cooldowns are now serialized as
+///   simulation state.
+/// - **v25** (2026-04-30, engine-state cleanup): enemy AI level-load profile
+///   and combat caches serialize with the owning AI state.
+/// - **v26** (2026-04-30, engine-state cleanup): in-flight actor sweep,
+///   jump, rider-charge, push-followup, and roll side-effect state serializes
+///   with actors.
+/// - **v27** (2026-04-30, engine-state cleanup): PC quick-action sequences
+///   and hero speech suppression state serialize with PC state.
+/// - **v28** (2026-04-30, engine-state cleanup): remaining element-owned
+///   spatial, combat-display, shield, alert, and patch attachment caches
+///   serialize with their owner structs.
+/// - **v29** (2026-04-30, engine-state cleanup): campaign pre-mission
+///   snapshots serialize with campaign state so mission restart survives
+///   save/load.
+/// - **v30** (2026-04-30, engine-state cleanup): patch level-static
+///   references serialize with patch state instead of being skipped.
+/// - **v31** (2026-04-30, engine-state cleanup): sequence-manager pending
+///   immediate actions, condolations, halt latch, and actor progress index
+///   serialize with sequence state.
+/// - **v32** (2026-04-30, engine-state cleanup): position-interface sprite
+///   center offset serializes with position state.
+/// - **v33** (2026-04-30, engine-state cleanup): sprite script and
+///   conversion tables serialize with sprite state instead of relying on
+///   skipped runtime reattachment.
+/// - **v34** (2026-04-30, engine-state cleanup): door geometry, links,
+///   jump metadata, patch binding, and action hints serialize with door
+///   state.
+/// - **v35** (2026-04-30, engine-state cleanup): sector geometry, level
+///   references, material data, script metadata, archery points, and shadow
+///   metrics serialize with sector state.
+/// - **v36** (2026-04-30, engine-state cleanup): path graph static data
+///   serializes through its Arc instead of being reattached after load.
+/// - **v37** (2026-04-30, engine-state cleanup): fast-find level grid and
+///   shadow data serialize with grid state; per-query visited and detection
+///   scratch no longer lives on the grid.
+/// - **v38** (2026-04-30, engine-state cleanup): pathfinder A* state no
+///   longer has hidden skipped fields.
+/// - **v39** (2026-04-30, engine-state cleanup): script VM native host is
+///   passed as execution context instead of living on serialized VM state.
+/// - **v40** (2026-04-30, engine-state cleanup): patch, sprite, and
+///   position-interface state no longer accepts missing fields by default.
+/// - **v41** (2026-04-30, engine-state cleanup): mission, campaign, order,
+///   marker, titbit, and PC metadata no longer accepts missing snapshot
+///   fields by default.
+/// - **v42** (2026-04-30, engine-state cleanup): engine-inner pending
+///   queues, macro state, freeze state, and script post-init flags no
+///   longer accept missing snapshot fields by default.
+/// - **v43** (2026-04-30, engine-state cleanup): sequence manager lookup,
+///   pending immediate action, condolation, and halt state no longer
+///   accept missing snapshot fields by default.
+/// - **v44** (2026-04-30, engine-state cleanup): element-owned runtime
+///   state no longer accepts missing snapshot fields by default.
+/// - **v45** (2026-04-30, engine-state cleanup): AI profile caches,
+///   tactical state, and pending AI side-effect flags no longer accept
+///   missing snapshot fields by default.
+pub const SAVE_FORMAT_VERSION: u32 = 45;
+
+/// Save file header.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveHeader {
+    /// Magic identifier — always `"RHSG"`.
+    pub magic: String,
+    /// Save format version.
+    pub version: u32,
+    /// Mission ID this save belongs to.  Used to refuse loading a save
+    /// for a different level.
+    pub mission_id: u32,
+    /// Unix epoch seconds at save time.
+    pub timestamp_unix: u64,
+    /// Human-readable label chosen by the player (empty for auto saves).
+    pub display_text: String,
+}
+
+impl SaveHeader {
+    pub fn new(mission_id: u32, display_text: String) -> Self {
+        let timestamp_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Self {
+            magic: SAVE_MAGIC.to_string(),
+            version: SAVE_FORMAT_VERSION,
+            mission_id,
+            timestamp_unix,
+            display_text,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.magic != SAVE_MAGIC {
+            bail!(
+                "invalid save file magic: expected {SAVE_MAGIC:?}, got {:?}",
+                self.magic
+            );
+        }
+        if self.version != SAVE_FORMAT_VERSION {
+            bail!(
+                "unsupported save file version: expected {SAVE_FORMAT_VERSION}, got {}",
+                self.version
+            );
+        }
+        Ok(())
+    }
+}
+
+// ─── Full save file ──────────────────────────────────────────────────
+
+/// A complete game save file.
+///
+/// Logical layout: header, then engine state (which owns the campaign),
+/// plus the host-owned `SoundManager` (volumes, muted state) that also
+/// round-trips across saves.  The thumbnail image is handled separately
+/// by `SaveGameManager`.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct GameSaveFile {
+    pub header: SaveHeader,
+    /// Full engine snapshot (via the serde-transparent `Engine` wrapper).
+    /// Includes campaign, entities, RNG, script heaps, and every other
+    /// non-`#[serde(skip)]` field on `EngineInner`.  Static level data
+    /// (level grid, sight obstacles, script bytecode) is skipped and
+    /// carried across from the live engine by [`Engine::restore`].
+    pub engine: Engine,
+    /// Host-side sound manager state. Split from the engine because
+    /// `SoundManager` lives in robin_rs (wraps the SDL mixer), while
+    /// the sim-state portion of sound is inside `EngineInner::sound_sim`.
+    pub sound: SoundManager,
+    /// Host-side persistent Game flags (campaign-map display state,
+    /// widget-enable booleans, men-to-blazon mode).  `Option` so saves
+    /// written before this field existed still round-trip; missing
+    /// values default to the current live `Game` state on load.
+    #[serde(default)]
+    pub game_persistent: Option<GamePersistentState>,
+}
+
+impl GameSaveFile {
+    /// Build a save file from a live engine.  Panics if the engine has
+    /// no active campaign.
+    ///
+    /// `game_persistent` is `None` for callers without a live `Game`
+    /// handle (test-only); the real save/load pipeline threads the
+    /// game state through via [`capture_with_game`](Self::capture_with_game).
+    pub fn capture(engine: &Engine, host: &Host, mission_id: u32, display_text: String) -> Self {
+        assert!(
+            engine.campaign().is_some(),
+            "GameSaveFile::capture: engine has no active campaign"
+        );
+        Self {
+            header: SaveHeader::new(mission_id, display_text),
+            engine: engine.clone(),
+            sound: host.sound.clone(),
+            game_persistent: None,
+        }
+    }
+
+    /// Variant of [`capture`](Self::capture) that also snapshots the
+    /// host-side `GamePersistentState`.  Used by the real save pipeline
+    /// so campaign-map and widget-enable flags round-trip; test-only
+    /// call sites without a `Game` stay on [`capture`](Self::capture).
+    pub fn capture_with_game(
+        engine: &Engine,
+        host: &Host,
+        game: &crate::game::Game,
+        mission_id: u32,
+        display_text: String,
+    ) -> Self {
+        let mut save = Self::capture(engine, host, mission_id, display_text);
+        let mut persistent = game.persistent.clone();
+        // The live `draw_hidden` flag lives on `InputState` so renderers
+        // read it cheaply; snapshot it here so the debug toggle
+        // round-trips through save/load.
+        persistent.draw_hidden = host.input.draw_hidden;
+        save.game_persistent = Some(persistent);
+        save
+    }
+
+    /// Apply a save file to the engine, replacing it wholesale.
+    ///
+    /// The caller is responsible for checking that the engine has
+    /// already been initialized for the matching mission ID (level
+    /// geometry loaded).  The engine-side half of post-load resync
+    /// lives in [`Engine::restore`](robin_engine::engine::Engine::restore)
+    /// (Arc transfer + transient reset); the host-side half lives in
+    /// [`Host::post_load_reset`].
+    ///
+    /// Does **not** touch a live `Game` — use
+    /// [`apply_to_with_game`](Self::apply_to_with_game) when a mutable
+    /// `Game` is in scope so the persistent flags (`campaign_map_*`,
+    /// widget enables, men-to-blazon mode) can be restored.
+    pub fn apply_to(self, engine: &mut Engine, host: &mut Host) {
+        engine.restore(&mut host.engine_display, self.engine);
+        host.sound = self.sound;
+        // Re-arm the sound engine and prime the next hourglass to
+        // (re)load music + resolve pendings.
+        host.sound.after_load(&engine.sound_sim().sources);
+        host.post_load_reset();
+    }
+
+    /// Apply a save file to the engine *and* restore the host-side
+    /// `GamePersistentState` (men-to-blazon conversion, campaign-map
+    /// display state, and widget-enable bools).
+    pub fn apply_to_with_game(
+        self,
+        engine: &mut Engine,
+        host: &mut Host,
+        game: &mut crate::game::Game,
+    ) {
+        let draw_hidden = self.game_persistent.as_ref().map(|p| p.draw_hidden);
+        if let Some(persistent) = self.game_persistent.clone() {
+            game.persistent = persistent;
+        }
+        self.apply_to(engine, host);
+        // Restore the debug `draw_hidden` toggle.  Must run after
+        // `apply_to` because `Host::post_load_reset` may reset
+        // transient input state.
+        if let Some(show) = draw_hidden {
+            host.input.draw_hidden = show;
+        }
+    }
+
+    /// Write the save file to disk as JSON.
+    pub fn write_to(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating save directory {}", parent.display()))?;
+        }
+        let json = serde_json::to_string_pretty(self).context("serializing save file")?;
+        fs::write(path, json).with_context(|| format!("writing save file {}", path.display()))
+    }
+
+    /// Read a save file from disk.
+    pub fn read_from(path: &Path) -> Result<Self> {
+        let json = fs::read_to_string(path)
+            .with_context(|| format!("reading save file {}", path.display()))?;
+        let save: GameSaveFile = serde_json::from_str(&json)
+            .with_context(|| format!("parsing save file {}", path.display()))?;
+        save.header.validate()?;
+        Ok(save)
+    }
+
+    /// Read only the header (for UI listings, mission-ID checks) without
+    /// decoding the full payload. Falls back to reading the full file
+    /// and returning its header.  A future optimization could stream-parse
+    /// just the header field.
+    pub fn read_header_only(path: &Path) -> Result<SaveHeader> {
+        Ok(Self::read_from(path)?.header)
+    }
+}
+
+// ─── Save directory resolution ───────────────────────────────────────
+
+/// Well-known filenames for special save slots:
+///
+/// - `CONTINUE`   — auto-save after success
+/// - `QUICK`      — F5 quick save
+/// - `EX_QUICK`   — previous quick save
+/// - `RESTART`    — pre-restart snapshot
+/// - `SHERWOOD`   — Sherwood map checkpoint
+pub mod special_slots {
+    pub const CONTINUE: &str = "Continue";
+    pub const QUICK: &str = "QuickSave";
+    pub const EX_QUICK: &str = "ExQuickSave";
+    pub const RESTART: &str = "Restart";
+    pub const SHERWOOD: &str = "Sherwood";
+}
+
+/// Resolve the per-OS save-game *root* directory. This is the folder that
+/// holds `profiles.json`, `keyconfigs.json`, and one `Profile_NNN/`
+/// subdirectory per player profile.
+///
+/// Priority (first hit wins):
+///   1. `ROBINHOOD_SAVE_DIR` environment variable (for tests / portable installs)
+///   2. OS data dir via `dirs::data_dir()` — e.g. `~/.local/share/robin_hood/saves`
+///      on Linux, `%APPDATA%\robin_hood\saves` on Windows,
+///      `~/Library/Application Support/robin_hood/saves` on macOS
+///   3. Fallback: `./Data/Savegame/default` (for installations without
+///      a per-user profile)
+///
+/// The returned directory is *not* created automatically; the caller
+/// creates it on first write via `fs::create_dir_all`.
+pub fn default_save_directory() -> PathBuf {
+    if let Ok(override_dir) = std::env::var("ROBINHOOD_SAVE_DIR") {
+        return PathBuf::from(override_dir);
+    }
+    #[cfg(feature = "native-fs")]
+    if let Some(data_dir) = dirs::data_dir() {
+        return data_dir.join("robin_hood").join("saves");
+    }
+    PathBuf::from("Data/Savegame/default")
+}
+
+/// Name of the per-profile save subdirectory: `Profile_%03lu` against
+/// the profile's stable id.
+pub fn profile_save_subdirectory(profile_id: u32) -> String {
+    format!("Profile_{profile_id:03}")
+}
+
+/// Full save directory for a specific profile — `<root>/Profile_NNN`.
+pub fn save_directory_for_profile(profile_id: u32) -> PathBuf {
+    default_save_directory().join(profile_save_subdirectory(profile_id))
+}
+
+/// Save directory for the currently active profile in the global
+/// [`crate::player_profile::PlayerProfileManager`]. Panics if no active
+/// profile is set — matching the project rule of not silently falling
+/// back to placeholder data (see CLAUDE.md).
+pub fn save_directory_for_active_profile() -> PathBuf {
+    let guard = crate::player_profile::PlayerProfileManager::global();
+    let mgr = guard.as_ref().expect(
+        "save_directory_for_active_profile: global PlayerProfileManager not initialised — \
+             call init_global_player_profile_manager() before requesting a save directory",
+    );
+    let profile = mgr.get_active().expect(
+        "save_directory_for_active_profile: no active profile in the global \
+             PlayerProfileManager — main-menu select-player flow should have set one",
+    );
+    save_directory_for_profile(profile.id)
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn fresh_engine() -> (Engine, robin_engine::engine::LevelAssets) {
+        use crate::campaign::Campaign;
+        let mut assets = robin_engine::engine::LevelAssets::new();
+        let engine = Engine::new_for_test(800.0, 600.0, Campaign::default(), &mut assets)
+            .expect("new_for_test");
+        (engine, assets)
+    }
+
+    #[test]
+    fn header_validate_ok() {
+        let header = SaveHeader::new(42, "My Save".into());
+        assert_eq!(header.magic, SAVE_MAGIC);
+        assert_eq!(header.version, SAVE_FORMAT_VERSION);
+        assert_eq!(header.mission_id, 42);
+        assert_eq!(header.display_text, "My Save");
+        header.validate().unwrap();
+    }
+
+    #[test]
+    fn header_rejects_bad_magic() {
+        let mut header = SaveHeader::new(0, String::new());
+        header.magic = "XXXX".into();
+        assert!(header.validate().is_err());
+    }
+
+    #[test]
+    fn header_rejects_bad_version() {
+        let mut header = SaveHeader::new(0, String::new());
+        header.version = SAVE_FORMAT_VERSION + 999;
+        assert!(header.validate().is_err());
+    }
+
+    #[test]
+    fn save_round_trip_via_json() {
+        // Seed scalar engine fields via `test_set_*` helpers (the only
+        // back door into `EngineInner` from outside robin_engine), then
+        // capture → JSON → decode → apply, and check the fields survived.
+        let (mut engine, _assets) = fresh_engine();
+        engine.test_set_frame_counter(12345);
+        engine.test_set_mission_flags(false, false, true);
+        let host = Host::new(800.0, 600.0);
+
+        let save = GameSaveFile::capture(&engine, &host, 7, "Test Save".into());
+
+        let json = serde_json::to_string(&save).expect("serialize");
+        let decoded: GameSaveFile = serde_json::from_str(&json).expect("deserialize");
+        decoded.header.validate().unwrap();
+        assert_eq!(decoded.header.mission_id, 7);
+        assert_eq!(decoded.header.display_text, "Test Save");
+
+        let (mut engine2, _assets2) = fresh_engine();
+        let mut host2 = Host::new(800.0, 600.0);
+        decoded.apply_to(&mut engine2, &mut host2);
+        assert_eq!(engine2.frame_counter(), 12345);
+        assert!(engine2.mission().mission_won);
+        assert!(engine2.campaign().is_some());
+    }
+
+    #[test]
+    fn write_and_read_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_save.json");
+
+        let (mut engine, _assets) = fresh_engine();
+        let host = Host::new(800.0, 600.0);
+        engine.test_set_frame_counter(999);
+        let save = GameSaveFile::capture(&engine, &host, 1, "Disk Save".into());
+        save.write_to(&path).unwrap();
+
+        let loaded = GameSaveFile::read_from(&path).unwrap();
+        assert_eq!(loaded.header.mission_id, 1);
+        assert_eq!(loaded.engine.frame_counter(), 999);
+
+        let header = GameSaveFile::read_header_only(&path).unwrap();
+        assert_eq!(header.mission_id, 1);
+    }
+
+    #[test]
+    fn profile_save_subdirectory_formats_with_zero_padding() {
+        assert_eq!(profile_save_subdirectory(0), "Profile_000");
+        assert_eq!(profile_save_subdirectory(7), "Profile_007");
+        assert_eq!(profile_save_subdirectory(99), "Profile_099");
+        assert_eq!(profile_save_subdirectory(1000), "Profile_1000");
+    }
+
+    #[test]
+    fn default_save_directory_respects_env_override() {
+        // Use a unique env var to avoid clashes with other parallel tests.
+        let dir = tempdir().unwrap();
+        // Safety: `ROBINHOOD_SAVE_DIR` is only read/written by this test, and no
+        // other test in the crate touches std::env. That keeps the set_var call
+        // free of concurrent getenv readers from sibling tests.
+        unsafe { std::env::set_var("ROBINHOOD_SAVE_DIR", dir.path()) };
+        let resolved = default_save_directory();
+        assert_eq!(resolved, dir.path());
+        unsafe { std::env::remove_var("ROBINHOOD_SAVE_DIR") };
+    }
+
+    #[test]
+    fn thumbnail_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("thumb_t");
+        let pixels: Vec<u16> = (0..(THUMB_WIDTH as u32 * THUMB_HEIGHT as u32))
+            .map(|i| (i & 0xFFFF) as u16)
+            .collect();
+        let thumb = Thumbnail::from_pixels(THUMB_WIDTH, THUMB_HEIGHT, pixels.clone()).unwrap();
+        thumb.write_to(&path).unwrap();
+        let loaded = Thumbnail::read_from(&path).unwrap();
+        assert_eq!(loaded.width, THUMB_WIDTH);
+        assert_eq!(loaded.height, THUMB_HEIGHT);
+        assert_eq!(loaded.pixels, pixels);
+    }
+
+    #[test]
+    fn thumbnail_rejects_wrong_magic() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bad_thumb");
+        fs::write(&path, b"XXXX\x01\x00\x10\x00\x10\x00\x00\x00").unwrap();
+        assert!(Thumbnail::read_from(&path).is_err());
+    }
+
+    #[test]
+    fn thumbnail_from_pixels_length_check() {
+        assert!(Thumbnail::from_pixels(4, 4, vec![0; 15]).is_none());
+        assert!(Thumbnail::from_pixels(4, 4, vec![0; 16]).is_some());
+        assert!(Thumbnail::from_pixels(4, 4, vec![0; 17]).is_none());
+    }
+
+    #[test]
+    fn apply_clears_host_transient_state() {
+        // Host-side post-load resync: clear input, invalidate cached
+        // surfaces, reset per-frame host scratch.  Engine-side transient
+        // clearing is covered by tests in the engine crate.
+        let (engine, _assets) = fresh_engine();
+        let host = Host::new(800.0, 600.0);
+
+        let save = GameSaveFile::capture(&engine, &host, 0, String::new());
+
+        let (mut engine3, _assets3) = fresh_engine();
+        let mut host2 = Host::new(800.0, 600.0);
+        host2.input.multi_selection_active = true;
+        host2.input.left_mouse_down = true;
+        host2.valid_trajectory = true;
+
+        save.apply_to(&mut engine3, &mut host2);
+
+        assert!(!host2.input.multi_selection_active);
+        assert!(!host2.input.left_mouse_down);
+        assert!(host2.input.focused_entity_id.is_none());
+        assert!(!host2.valid_trajectory);
+    }
+}

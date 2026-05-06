@@ -1,0 +1,114 @@
+name: Publish WASM binaries
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wasm-binaries
+  cancel-in-progress: false
+
+env:
+  BINARIES_REPO: phiresky/robin-hood-the-legend-of-sherwood-remake-binaries
+  BINARIES_BRANCH: gh-pages
+  RUSTC_WRAPPER: ""
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust wasm target
+        run: |
+          rustup target add wasm32-unknown-unknown
+          rustup component add rust-src
+
+      - name: Install wasm tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binaryen clang mold wabt
+          WASM_BINDGEN_VERSION="$(
+            awk '
+              $0 == "name = \"wasm-bindgen\"" { found = 1; next }
+              found && $1 == "version" {
+                gsub(/"/, "", $3)
+                print $3
+                exit
+              }
+            ' Cargo.lock
+          )"
+          cargo install wasm-bindgen-cli --locked --version "${WASM_BINDGEN_VERSION}"
+
+      - name: Build release wasm
+        run: |
+          cargo build -Zbuild-std=std,panic_abort \
+            --target wasm32-unknown-unknown \
+            --profile wasm-release \
+            --no-default-features \
+            -p robin_rs --bin robin
+
+      - name: Stage versioned artifact
+        id: stage
+        run: |
+          short="$(git rev-parse --short=12 HEAD)"
+          commit="$(git rev-parse HEAD)"
+          publish_root="target/wasm-binary-pages/wasm"
+          artifact="${publish_root}/${short}"
+          mkdir -p "${artifact}"
+
+          wasm-bindgen \
+            --target web \
+            --out-dir "${artifact}" \
+            --out-name robin \
+            target/wasm32-unknown-unknown/wasm-release/robin.wasm
+          node wasm-www/scripts/optimize-wasm.mjs "${artifact}"
+
+          wasm_sha="$(sha256sum "${artifact}/robin_bg.wasm" | cut -d ' ' -f 1)"
+          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          cat > "${artifact}/manifest.json" <<EOF
+          {
+            "commit": "${commit}",
+            "short": "${short}",
+            "builtAt": "${built_at}",
+            "files": {
+              "js": "robin.js",
+              "wasm": "robin_bg.wasm"
+            },
+            "sha256": {
+              "wasm": "${wasm_sha}"
+            }
+          }
+          EOF
+          cp "${artifact}/manifest.json" "${publish_root}/latest.json"
+          echo "short=${short}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout binaries Pages branch
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.BINARIES_REPO }}
+          ref: ${{ env.BINARIES_BRANCH }}
+          token: ${{ secrets.BINARIES_REPO_TOKEN }}
+          path: binary-pages
+
+      - name: Publish to binaries repo
+        working-directory: binary-pages
+        run: |
+          short="${{ steps.stage.outputs.short }}"
+          mkdir -p wasm
+          rm -rf "wasm/${short}"
+          cp -R "../target/wasm-binary-pages/wasm/${short}" "wasm/${short}"
+          cp ../target/wasm-binary-pages/wasm/latest.json wasm/latest.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add wasm
+          if git diff --cached --quiet; then
+            echo "No binary changes to publish."
+            exit 0
+          fi
+          git commit -m "Publish wasm ${short}"
+          git push origin "HEAD:${BINARIES_BRANCH}"

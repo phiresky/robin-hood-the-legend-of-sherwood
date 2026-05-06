@@ -1,0 +1,558 @@
+//! Per-tick RefreshSeek scan.
+//!
+//! ## Semantics
+//!
+//! A seek arms its `seek_refresh_wait` countdown to `TIME_SEEK_REFRESH`
+//! (=25) at launch and again at the tail of each refresh.  While a seek
+//! is translating, the per-tick driver decrements the counter and, once
+//! it hits zero AND the target has moved more than 10 units (MaxNorm)
+//! since the last launch, rebuilds a fresh single-element seek sequence
+//! bound to the target's *current* position, sets the previous movement
+//! element to interrupted, and launches the new sequence at info
+//! priority.
+//!
+//! Runs once per tick for every actor holding an `InProgress`
+//! `Command::Seek` movement element with a populated `element` (target)
+//! field and the `MoveFlags::SEEK` bit set.  The entity-target seeks
+//! share a single destination resolver: `USE_POINT` seeks go to the
+//! target's current point, moving actor targets adjust tolerance/speed
+//! by chase speed, `SEEK_SHIELD` aims at the protected side point, and
+//! `SEEK_STOP_NPC` keeps the distance gate.
+//!
+//! The point-target overload ([`refresh_seek_point`]) uses the same
+//! interrupt-and-relaunch primitive for classical point seeks and now
+//! preserves door-sector and line-goal metadata when rebuilding those
+//! seek variants.
+
+use crate::element::{ActionState, EntityId, Point2D};
+use crate::order::OrderType;
+use crate::sequence::{
+    CascadeFlags, MoveFlags, Sequence, SequenceElement, SequenceElementData, SequenceId,
+};
+
+pub(crate) struct ResolvedEntitySeek {
+    pub(crate) destination: crate::geo2d::Point2D,
+    pub(crate) tolerance: f32,
+    pub(crate) speed_factor: f32,
+    pub(crate) stop_npc: bool,
+}
+
+impl crate::engine::EngineInner {
+    /// Resolve the destination/tolerance/speed tuple for an entity-target
+    /// seek.  Handles USE_POINT, moving-target chase speed, shield-danger
+    /// offset, and authorized-position snapping.
+    pub(crate) fn resolve_entity_seek(
+        &self,
+        owner: EntityId,
+        target: EntityId,
+        flags: MoveFlags,
+        seek_distance: f32,
+    ) -> Option<ResolvedEntitySeek> {
+        let owner_entity = self.get_entity(owner)?;
+        let target_entity = self.get_entity(target)?;
+        let target_elem = target_entity.element_data();
+        let target_pos = target_elem.position_map();
+        let target_geo = crate::geo2d::pt(target_pos.x, target_pos.y);
+        let target_layer = target_elem.layer();
+
+        let owner_move_box = *owner_entity.position_iface().get_move_box();
+
+        if flags.contains(MoveFlags::USE_POINT) {
+            let current_point = target_elem
+                .sprite
+                .current_hotspot()
+                .filter(|p| p.x != 0.0 || p.y != 0.0)
+                .map(|p| crate::geo2d::pt(target_pos.x + p.x, target_pos.y + p.y))
+                .unwrap_or(target_geo);
+            let mut target_box = owner_move_box.translated(current_point);
+            if self.fast_grid.find_authorized_position_toward(
+                &mut target_box,
+                target_geo,
+                target_layer,
+            ) {
+                return Some(ResolvedEntitySeek {
+                    destination: target_box.center(),
+                    tolerance: seek_distance,
+                    speed_factor: 1.0,
+                    stop_npc: false,
+                });
+            }
+            tracing::warn!(
+                ?owner,
+                ?target,
+                "resolve_entity_seek: USE_POINT target has no authorized position"
+            );
+            return None;
+        }
+
+        let (mut tolerance, speed_factor, send_stop_sqr) = if let Some(target_actor) =
+            target_entity.actor_data()
+        {
+            let owner_state = owner_entity
+                .actor_data()
+                .map(|a| a.action_state)
+                .unwrap_or(ActionState::Waiting);
+            let (chase_speed, walking_behind_running_enemy) = match target_actor.action_state {
+                ActionState::MovingFast => match owner_state {
+                    ActionState::MovingFast => (ActionState::MovingFast, false),
+                    ActionState::Moving => (ActionState::Moving, true),
+                    _ => (ActionState::Waiting, false),
+                },
+                ActionState::Moving => match owner_state {
+                    ActionState::MovingFast | ActionState::Moving => (ActionState::Moving, false),
+                    _ => (ActionState::Waiting, false),
+                },
+                _ => (ActionState::Waiting, false),
+            };
+            match chase_speed {
+                ActionState::MovingFast => (1.0, 1.2, seek_distance * seek_distance * 9.0),
+                ActionState::Moving => (
+                    seek_distance / 2.0,
+                    if walking_behind_running_enemy {
+                        1.0
+                    } else {
+                        1.2
+                    },
+                    seek_distance * seek_distance * 4.0,
+                ),
+                _ => (seek_distance, 1.0, -1.0),
+            }
+        } else {
+            (seek_distance, 1.0, -1.0)
+        };
+
+        let stop_npc = if flags.contains(MoveFlags::SEEK_STOP_NPC)
+            && send_stop_sqr > 0.0
+            && target_entity.npc_data().is_some()
+        {
+            let owner_pos = owner_entity.element_data().position_map();
+            let dx = target_pos.x - owner_pos.x;
+            let dy = target_pos.y - owner_pos.y;
+            dx * dx + dy * dy < send_stop_sqr
+        } else {
+            false
+        };
+
+        let mut destination = target_geo;
+        if owner_entity.is_pc() && flags.contains(MoveFlags::SEEK_SHIELD) {
+            let danger = owner_entity
+                .pc_data()
+                .map(|pc| pc.shield_danger_point)
+                .unwrap_or_default();
+            let protected_elevation = target_entity.position_iface().get_elevation();
+            let vx = danger.x - target_pos.x;
+            let vy = (danger.y - protected_elevation) - target_pos.y;
+            let len = (vx * vx + vy * vy).sqrt();
+            if len > f32::EPSILON {
+                destination = crate::geo2d::pt(
+                    target_pos.x + vx / len * 50.0,
+                    target_pos.y + vy / len * 50.0,
+                );
+            } else {
+                tolerance = seek_distance;
+            }
+        }
+
+        let mut target_box = owner_move_box.translated(destination);
+        if self
+            .fast_grid
+            .find_authorized_position_toward(&mut target_box, target_geo, target_layer)
+        {
+            Some(ResolvedEntitySeek {
+                destination: target_box.center(),
+                tolerance,
+                speed_factor,
+                stop_npc,
+            })
+        } else {
+            tracing::warn!(
+                ?owner,
+                ?target,
+                "resolve_entity_seek: target has no authorized seek position"
+            );
+            None
+        }
+    }
+
+    /// Scan every actor with an in-flight seek movement and re-launch
+    /// it when the target has moved more than 10 units (MaxNorm) since
+    /// the seek was last (re-)issued.
+    ///
+    /// Runs once per tick before the sequence manager hourglass so the
+    /// freshly-launched seek sequence gets picked up in the same tick.
+    pub(super) fn tick_refresh_seeks(&mut self) {
+        if self.freeze_all {
+            return;
+        }
+
+        struct Refresh {
+            owner: EntityId,
+            seq_id: crate::sequence::SequenceId,
+            elem_idx: usize,
+            target: EntityId,
+            action: crate::order::OrderType,
+            flags: MoveFlags,
+            tolerance: f32,
+            new_target_pos: crate::element::Point2D,
+        }
+
+        let mut refreshes: Vec<Refresh> = Vec::new();
+
+        for (idx, slot) in self.entities.iter().enumerate() {
+            let Some(entity) = slot else {
+                continue;
+            };
+            let Some(actor) = entity.actor_data() else {
+                continue;
+            };
+            let Some(seq_id) = actor.active_movement.sequence_id else {
+                continue;
+            };
+            let elem_idx = actor.active_movement.element_index;
+            let Some(elem) = self.sequence_manager.get_element(seq_id, elem_idx) else {
+                continue;
+            };
+            if elem.command != crate::element::Command::Seek {
+                continue;
+            }
+            let SequenceElementData::Movement {
+                flags,
+                element: target,
+                tolerance,
+                action,
+                ..
+            } = &elem.data
+            else {
+                continue;
+            };
+            if !flags.contains(MoveFlags::SEEK) {
+                continue;
+            }
+            let Some(target_id) = *target else {
+                continue;
+            };
+            let Some(target_entity) = self.get_entity(target_id) else {
+                continue;
+            };
+            let target_pos = target_entity.element_data().position_map();
+
+            let owner_id = EntityId(idx as u32);
+
+            // Countdown gate — when still >0, just decrement and skip
+            // (collected below via `decrement_only`).
+            if actor.seek_refresh_wait > 0 {
+                continue;
+            }
+            let last = actor.last_seek_target_position;
+            let dx = (target_pos.x - last.x).abs();
+            let dy = (target_pos.y - last.y).abs();
+            if dx.max(dy) <= 10.0 {
+                continue;
+            }
+
+            refreshes.push(Refresh {
+                owner: owner_id,
+                seq_id,
+                elem_idx,
+                target: target_id,
+                action: *action,
+                flags: *flags,
+                tolerance: *tolerance,
+                new_target_pos: target_pos,
+            });
+        }
+
+        // Decrement `seek_refresh_wait` for every actor with an active
+        // seek, regardless of whether it triggered.
+        for slot in self.entities.iter_mut() {
+            let Some(entity) = slot else {
+                continue;
+            };
+            let Some(actor) = entity.actor_data_mut() else {
+                continue;
+            };
+            if actor.active_movement.sequence_id.is_none() {
+                continue;
+            }
+            if actor.seek_refresh_wait > 0 {
+                actor.seek_refresh_wait -= 1;
+            }
+        }
+
+        for r in refreshes {
+            tracing::trace!(
+                owner = ?r.owner,
+                target = ?r.target,
+                new_x = r.new_target_pos.x,
+                new_y = r.new_target_pos.y,
+                "tick_refresh_seeks: target moved >10u, re-launching seek",
+            );
+            self.apply_seek_refresh(
+                r.owner,
+                r.seq_id,
+                r.elem_idx,
+                r.target,
+                r.action,
+                r.flags,
+                r.tolerance,
+                r.new_target_pos,
+            );
+        }
+    }
+
+    /// Per-entity body of `tick_refresh_seeks`: re-resolve the seek
+    /// destination, build a fresh single-element seek sequence,
+    /// stamp `last_seek_target_position`, and re-launch via
+    /// [`Self::relaunch_seek_replacement`].  Honours the
+    /// `SEEK_IN_BUILDINGS` short-circuit (teleport + post-seek).
+    /// Extracted from the per-r loop above so the same dispatch is
+    /// reusable from same-tick refresh callers (the
+    /// transition-animation refresh check in
+    /// [`EngineInner::process_per_tick_movement`]).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn apply_seek_refresh(
+        &mut self,
+        owner: EntityId,
+        seq_id: crate::sequence::SequenceId,
+        elem_idx: usize,
+        target: EntityId,
+        action: crate::order::OrderType,
+        flags: MoveFlags,
+        tolerance: f32,
+        new_target_pos: crate::element::Point2D,
+    ) {
+        let same_building = self
+            .get_entity(owner)
+            .zip(self.get_entity(target))
+            .is_some_and(|(owner_e, target_e)| {
+                owner_e.element_data().sector() == target_e.element_data().sector()
+                    && self.sector_is_building(owner_e.element_data().sector())
+            });
+        if flags.contains(MoveFlags::SEEK_IN_BUILDINGS) && same_building {
+            let has_post_seek = self
+                .get_entity(owner)
+                .and_then(|e| e.actor_data())
+                .is_some_and(|a| a.post_seek_sequence.is_some());
+            if has_post_seek
+                && let Some(pos) = self
+                    .get_entity(target)
+                    .map(|e| e.element_data().position_map())
+                && let Some(owner_e) = self.get_entity_mut(owner)
+            {
+                owner_e
+                    .position_iface_mut()
+                    .set_position_map(pos.to_geo_point());
+                self.start_post_seek_sequence(owner, Some((seq_id, elem_idx)));
+                return;
+            }
+        }
+
+        let Some(resolved) = self.resolve_entity_seek(owner, target, flags, tolerance) else {
+            self.stop_owner_active_mechanics(owner);
+            self.sequence_manager.element_impossible(seq_id, elem_idx);
+            return;
+        };
+        if resolved.stop_npc {
+            self.send_seek_stop_to_npc(target);
+        }
+
+        let mut new_elem =
+            SequenceElement::new_movement(1, crate::element::Command::Seek, Some(owner), action);
+        if let SequenceElementData::Movement {
+            flags: f,
+            element,
+            tolerance: t,
+            speed_factor,
+            destination,
+            ..
+        } = &mut new_elem.data
+        {
+            *f = flags;
+            *element = Some(target);
+            *t = resolved.tolerance;
+            *speed_factor = resolved.speed_factor;
+            *destination = Point2D {
+                x: resolved.destination.x,
+                y: resolved.destination.y,
+            };
+        }
+
+        // Stamp the new last-seek-position so the next tick's
+        // threshold check measures against this launch, and re-arm
+        // `seek_refresh_wait` (every refresh re-arms the countdown).
+        // `try_dispatch_move_path` will overwrite both when the new
+        // element dispatches, but stamp them here too so a dispatch
+        // failure still leaves coherent state.
+        if let Some(Some(entity)) = self.entities.get_mut(owner.0 as usize)
+            && let Some(actor) = entity.actor_data_mut()
+        {
+            actor.last_seek_target_position = new_target_pos;
+            actor.seek_refresh_wait = 25;
+        }
+
+        self.relaunch_seek_replacement(owner, seq_id, elem_idx, new_elem);
+    }
+
+    /// Point-target RefreshSeek.
+    ///
+    /// Rebuilds a single-element point-target Seek sequence, interrupts
+    /// the current movement element, and launches the replacement at
+    /// info priority.  Three arms — (1) seek-into-door, (2) seek-to-line
+    /// via `MoveFlags::LINE`, and (3) classical point-seek —
+    /// distinguished by the current element's sector and flag bits.
+    /// This port covers the classical arm only; the door and line arms
+    /// are guarded with TODOs because neither the actor-side seek-sector
+    /// bundle nor the line-goal movement pipeline is wired yet.
+    ///
+    /// The initial dispatch of a SEEK command element whose target is
+    /// null (i.e., a pure point-seek) is handled directly through the
+    /// pathfinder by `tick.rs`'s hourglass, so this entry is currently
+    /// unreachable — it exists for symmetry with the element-target
+    /// overload and for future callers once point-seek sub-sequences
+    /// are needed.
+    #[allow(dead_code)]
+    pub(super) fn refresh_seek_point(
+        &mut self,
+        owner: EntityId,
+        pt_seek: Point2D,
+        action: OrderType,
+    ) {
+        let Some(entity) = self.get_entity(owner) else {
+            tracing::warn!(?owner, "refresh_seek_point: owner entity missing");
+            return;
+        };
+        let Some(actor) = entity.actor_data() else {
+            tracing::warn!(?owner, "refresh_seek_point: owner has no actor data");
+            return;
+        };
+        let Some(seq_id) = actor.active_movement.sequence_id else {
+            tracing::warn!(
+                ?owner,
+                "refresh_seek_point: no active movement sequence to refresh",
+            );
+            return;
+        };
+        let elem_idx = actor.active_movement.element_index;
+        let Some(elem) = self.sequence_manager.get_element(seq_id, elem_idx) else {
+            tracing::warn!(
+                ?owner,
+                ?seq_id,
+                elem_idx,
+                "refresh_seek_point: active movement element missing",
+            );
+            return;
+        };
+        let SequenceElementData::Movement {
+            flags,
+            tolerance,
+            layer,
+            speed_factor,
+            sector,
+            line_id,
+            ..
+        } = &elem.data
+        else {
+            tracing::warn!(
+                ?owner,
+                ?seq_id,
+                elem_idx,
+                "refresh_seek_point: active element is not a Movement",
+            );
+            return;
+        };
+        let cur_flags = *flags;
+        let cur_tolerance = *tolerance;
+        let cur_layer = *layer;
+        let cur_speed = *speed_factor;
+        let cur_sector = *sector;
+        let cur_line = *line_id;
+
+        // ── Arm 1: seek-into-door ───────────────────────────────────
+        // ActorData already carries the seek-sector bundle (sector,
+        // layer, distance) used by the door arm.  Rebuild with the
+        // active element's stored sector/layer so the door path remains
+        // a door goal instead of degrading to an ordinary point seek.
+        let sector_is_door = cur_sector
+            .and_then(|h| self.fast_grid.level.sectors.get(usize::from(h.get())))
+            .is_some_and(|s| s.sector_type.is_door());
+        if sector_is_door {
+            tracing::trace!(
+                ?owner,
+                ?seq_id,
+                elem_idx,
+                "refresh_seek_point: rebuilding door seek"
+            );
+        }
+
+        // ── Arm 2: seek-to-line via MoveFlags::LINE ─────────────────
+        // Line-goal movement is represented directly by `line_id` +
+        // `MoveFlags::LINE`; preserve those fields on the replacement
+        // so `try_dispatch_move_path` and final line-snap keep the line
+        // semantics.
+        if cur_flags.contains(MoveFlags::LINE) {
+            tracing::trace!(
+                ?owner,
+                ?seq_id,
+                elem_idx,
+                ?cur_line,
+                "refresh_seek_point: rebuilding line seek"
+            );
+        }
+
+        // ── Arm 3: classical point-seek ─────────────────────────────
+        let mut new_elem =
+            SequenceElement::new_movement(1, crate::element::Command::Seek, Some(owner), action);
+        if let SequenceElementData::Movement {
+            flags,
+            element,
+            tolerance,
+            speed_factor,
+            destination,
+            layer,
+            sector,
+            line_id,
+            ..
+        } = &mut new_elem.data
+        {
+            // Preserve the source flag set and force SEEK.
+            *flags = cur_flags | MoveFlags::SEEK;
+            *element = None;
+            *tolerance = cur_tolerance;
+            *speed_factor = cur_speed;
+            *destination = pt_seek;
+            *layer = cur_layer;
+            *sector = cur_sector;
+            *line_id = cur_line;
+        }
+
+        tracing::trace!(
+            ?owner,
+            pt_x = pt_seek.x,
+            pt_y = pt_seek.y,
+            "refresh_seek_point: rebuilding point-target seek sequence",
+        );
+
+        self.relaunch_seek_replacement(owner, seq_id, elem_idx, new_elem);
+    }
+
+    /// Shared tail of both `RefreshSeek` overloads: interrupt the
+    /// actor's current movement element and launch a fresh single-
+    /// element seek sequence at info priority.  The
+    /// `stop_owner_active_mechanics` call cancels any in-flight path
+    /// request belonging to the interrupted element.
+    pub(super) fn relaunch_seek_replacement(
+        &mut self,
+        owner: EntityId,
+        seq_id: SequenceId,
+        elem_idx: usize,
+        new_elem: SequenceElement,
+    ) {
+        self.stop_owner_active_mechanics(owner);
+        self.sequence_manager
+            .element_interrupted(seq_id, elem_idx, CascadeFlags::NEXT_LEVEL);
+
+        let mut seq = Sequence::new();
+        seq.append_element(new_elem);
+        self.launch_sequence(seq);
+    }
+}
