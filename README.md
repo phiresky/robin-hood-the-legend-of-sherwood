@@ -9,7 +9,7 @@ and plays them through a pure-Rust engine.
 ## Status
 
 Playable mostly on the Leicester demo and the full campaign: main
-menu, campaign map, missions, save/load, replays should all _mostly_ work.
+menu, missions, save/load, replays should all _mostly_ work. Most testing has been done on the demo so the campaign logic is likely not fully working yet.
 A fair amount of things are still broken, like bow / special items and some triggers.
 ~270K LOC across five workspace crates, ~1,600 tests. See [NEW_FEATURES.md](NEW_FEATURES.md)
 for new and future additions.
