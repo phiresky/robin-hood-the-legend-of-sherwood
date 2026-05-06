@@ -418,7 +418,7 @@ impl SaveGameManager {
 
     /// Thumbnail file path.
     pub fn thumb_path(&self, index: usize) -> PathBuf {
-        Path::new(&self.save_directory).join(format!("{}_t", &self.saves[index].filename))
+        Path::new(&self.save_directory).join(format!("{}_t", self.saves[index].filename))
     }
 
     /// Full path to a save file on disk (JSON format, with `.json` extension).

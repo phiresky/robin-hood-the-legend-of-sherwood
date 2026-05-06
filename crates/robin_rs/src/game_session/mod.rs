@@ -1350,15 +1350,16 @@ pub(crate) async fn run_mission(
         if mp_waiting_for_initial_snapshot || mp_waiting_for_begin_sim {
             manual_pause = true;
         }
-        if host.net.is_some() && host.local_seat != robin_engine::player_command::PlayerId::HOST {
-            if let Some((clock_frame, ms_until_next_frame)) = net_drain.latest_host_clock_sample {
-                accept_host_frame_schedule(
-                    &mut mp_host_frame_schedule,
-                    clock_frame,
-                    ms_until_next_frame,
-                    manager.sim_frame,
-                );
-            }
+        if host.net.is_some()
+            && host.local_seat != robin_engine::player_command::PlayerId::HOST
+            && let Some((clock_frame, ms_until_next_frame)) = net_drain.latest_host_clock_sample
+        {
+            accept_host_frame_schedule(
+                &mut mp_host_frame_schedule,
+                clock_frame,
+                ms_until_next_frame,
+                manager.sim_frame,
+            );
         }
         let mut mp_clock_pause = false;
         if host.net.is_some()
@@ -2523,18 +2524,17 @@ pub(crate) async fn run_mission(
             if mp_waiting_for_initial_snapshot || mp_waiting_for_begin_sim {
                 manual_pause = true;
             }
-            if host.net.is_some() && host.local_seat != robin_engine::player_command::PlayerId::HOST
-            {
-                if let Some((clock_frame, ms_until_next_frame)) =
+            if host.net.is_some()
+                && host.local_seat != robin_engine::player_command::PlayerId::HOST
+                && let Some((clock_frame, ms_until_next_frame)) =
                     pre_tick_net_drain.latest_host_clock_sample
-                {
-                    accept_host_frame_schedule(
-                        &mut mp_host_frame_schedule,
-                        clock_frame,
-                        ms_until_next_frame,
-                        manager.sim_frame,
-                    );
-                }
+            {
+                accept_host_frame_schedule(
+                    &mut mp_host_frame_schedule,
+                    clock_frame,
+                    ms_until_next_frame,
+                    manager.sim_frame,
+                );
             }
             if host.net.is_some()
                 && host.local_seat != robin_engine::player_command::PlayerId::HOST
@@ -3020,7 +3020,7 @@ pub(crate) async fn run_mission(
                     &mut replay_modal_dismissals,
                 )
             {
-                active_modal = Some(ActiveModal::Dialogue(batch));
+                active_modal = Some(ActiveModal::Dialogue(Box::new(batch)));
             }
             if active_modal.is_some() {
                 let outcome = tick_active_modal(
@@ -3081,7 +3081,7 @@ pub(crate) async fn run_mission(
                     manager.engine.frame_counter(),
                 )
             {
-                active_modal = Some(ActiveModal::PopupScroll(batch));
+                active_modal = Some(ActiveModal::PopupScroll(Box::new(batch)));
             }
             if active_modal.is_none()
                 && let Some(batch) = start_active_sherwood_report(
@@ -3092,7 +3092,7 @@ pub(crate) async fn run_mission(
                     &mut replay_modal_dismissals,
                 )
             {
-                active_modal = Some(ActiveModal::PopupScroll(batch));
+                active_modal = Some(ActiveModal::PopupScroll(Box::new(batch)));
             }
             if active_modal.is_some() {
                 let outcome = tick_active_modal(
@@ -3134,7 +3134,7 @@ pub(crate) async fn run_mission(
                     &mut replay_modal_dismissals,
                 )
             {
-                active_modal = Some(ActiveModal::Debriefing(batch));
+                active_modal = Some(ActiveModal::Debriefing(Box::new(batch)));
             }
             if active_modal.is_some() {
                 let outcome = tick_active_modal(

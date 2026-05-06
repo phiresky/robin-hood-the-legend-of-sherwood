@@ -77,6 +77,7 @@ impl ShaderPresetRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         mode: TextureScaleMode,
@@ -169,6 +170,7 @@ impl ShaderPresetRenderer {
         Self
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         _mode: TextureScaleMode,

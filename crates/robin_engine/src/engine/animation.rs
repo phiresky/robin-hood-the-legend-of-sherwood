@@ -2112,9 +2112,7 @@ fn hold_weak_sword_at_action_done(
     if !sprite_is_at_action_done(&entity.element_data().sprite) {
         return None;
     }
-    let Some(human) = entity.human_data_mut() else {
-        return None;
-    };
+    let human = entity.human_data_mut()?;
     human.tiredness = human.tiredness.saturating_sub(WEAKNESS_DISMISH);
     if human.tiredness == 0 {
         None

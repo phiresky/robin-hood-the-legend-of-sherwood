@@ -25,6 +25,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use winit::application::ApplicationHandler;
@@ -728,8 +729,7 @@ impl AppHandler {
 
 impl ApplicationHandler for AppHandler {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            let window = self.window.as_ref().expect("window checked above");
+        if let Some(window) = &self.window {
             #[cfg(target_os = "android")]
             window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
             #[cfg(target_os = "android")]
@@ -1126,8 +1126,9 @@ where
     let events_rx_for_game = events_rx.clone();
     let cmd_tx_for_game = cmd_tx.clone();
     let cmd_tx_for_exit = cmd_tx.clone();
-    let (exit_code_tx, exit_code_rx) = std::sync::mpsc::channel::<i32>();
+    let (exit_code_tx, _exit_code_rx) = std::sync::mpsc::channel::<i32>();
 
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut handler = AppHandler {
         title: title.to_string(),
         width,
@@ -1230,7 +1231,7 @@ where
         event_loop
             .run_app(&mut handler)
             .map_err(|e| format!("EventLoop::run_app: {e}"))?;
-        Ok(exit_code_rx.try_recv().unwrap_or(0))
+        Ok(_exit_code_rx.try_recv().unwrap_or(0))
     }
     #[cfg(target_arch = "wasm32")]
     {

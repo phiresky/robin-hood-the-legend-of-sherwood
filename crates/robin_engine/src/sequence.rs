@@ -2476,9 +2476,7 @@ impl SequenceManager {
         actor: EntityId,
         mut predicate: impl FnMut(&SequenceElement) -> bool,
     ) -> Option<(SequenceId, usize)> {
-        let Some(set) = self.actor_live.get(&actor) else {
-            return None;
-        };
+        let set = self.actor_live.get(&actor)?;
         for elem_ref in set {
             let Some(elem) = self.get_element(elem_ref.sequence_id, elem_ref.element_index) else {
                 debug_assert!(false, "actor_live contains stale element ref");

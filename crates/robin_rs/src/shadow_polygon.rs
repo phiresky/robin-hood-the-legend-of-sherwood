@@ -541,6 +541,7 @@ pub fn render_darken_inside(
 
 /// GPU path for `render_darken_inside`: the CPU builds scanline span geometry
 /// and mask exclusions; the actual tint/fade blend is done by GPU quads.
+#[allow(clippy::too_many_arguments)]
 fn render_darken_inside_gpu_spans(
     renderer: &mut Renderer,
     view_rect: &BBox,

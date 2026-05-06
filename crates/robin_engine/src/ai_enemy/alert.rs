@@ -64,10 +64,8 @@ impl EnemyAi {
         let _ = global;
         let (layer, sector_handle): (u16, Option<crate::position_interface::SectorHandle>) =
             if ctx.in_building {
-                match tick.my_exit_door {
-                    Some(door) => (door.layer_out, door.sector_out),
-                    None => return None,
-                }
+                let door = tick.my_exit_door?;
+                (door.layer_out, door.sector_out)
             } else {
                 (ctx.position.level, ctx.position.sector)
             };

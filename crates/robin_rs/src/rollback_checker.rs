@@ -203,12 +203,10 @@ impl RollbackChecker {
             .worker
             .as_ref()
             .is_some_and(|worker| worker.is_finished())
+            && let Some(worker) = self.worker.take()
+            && let Err(e) = worker.join()
         {
-            if let Some(worker) = self.worker.take()
-                && let Err(e) = worker.join()
-            {
-                tracing::error!("Rollback checker worker panicked: {e:?}");
-            }
+            tracing::error!("Rollback checker worker panicked: {e:?}");
         }
     }
 }

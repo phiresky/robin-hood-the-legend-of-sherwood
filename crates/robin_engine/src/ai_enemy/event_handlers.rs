@@ -914,7 +914,7 @@ impl EnemyAi {
                     let hiking_paths = &ctx.hiking_paths;
                     let advanced_dest = if let Some(ref mut path) = self.base.patrol_path {
                         path.advance();
-                        path.current_waypoint(&hiking_paths).map(|wp| Position {
+                        path.current_waypoint(hiking_paths).map(|wp| Position {
                             x: wp.x as f32,
                             y: wp.y as f32,
                             sector: SectorHandle::new(wp.sector),

@@ -1212,28 +1212,28 @@ fn convert_shipping(data_in: PathBuf, data_out: &Path, opts: ShippingOpts) -> Re
         if let Some(p) = in_path(rel) {
             let mut mgr = ResourceManager::new();
             mgr.attach_resource_file(&p.to_string_lossy())?;
-            if is_interface_path(rel) {
-                if let Some(q) = opts.interface_image_format.jxl_quality() {
-                    let encoded = mgr.encode_pictures_for_shipping(|pic| {
-                        Ok(EncodedPicture::jxl_rgba565_keyed(
-                            transcode_picture_to_jxl_rgba_keyed(pic, q)?,
-                        ))
-                    })?;
-                    tracing::info!(
-                        "interface res {rel}: encoded {encoded} pictures as JXL {}",
-                        jxl_quality_label(q)
-                    );
-                }
+            if is_interface_path(rel)
+                && let Some(q) = opts.interface_image_format.jxl_quality()
+            {
+                let encoded = mgr.encode_pictures_for_shipping(|pic| {
+                    Ok(EncodedPicture::jxl_rgba565_keyed(
+                        transcode_picture_to_jxl_rgba_keyed(pic, q)?,
+                    ))
+                })?;
+                tracing::info!(
+                    "interface res {rel}: encoded {encoded} pictures as JXL {}",
+                    jxl_quality_label(q)
+                );
             }
             dd.res_files.insert(rel.into(), mgr);
         }
     }
-    if let Some(p) = in_path("Interface/Loading.pak") {
-        if opts.interface_image_format != InterfaceImageFormat::Raw {
-            let pictures = read_pak_pictures(&p)?;
-            let encoded = encode_interface_pak_pictures(&pictures, opts.interface_image_format)?;
-            dd.pak_files.insert("interface/loading.pak".into(), encoded);
-        }
+    if let Some(p) = in_path("Interface/Loading.pak")
+        && opts.interface_image_format != InterfaceImageFormat::Raw
+    {
+        let pictures = read_pak_pictures(&p)?;
+        let encoded = encode_interface_pak_pictures(&pictures, opts.interface_image_format)?;
+        dd.pak_files.insert("interface/loading.pak".into(), encoded);
     }
     for (rel, key) in [
         ("Configuration/keyset1.cfg", "keyset1"),
@@ -1415,7 +1415,7 @@ fn convert_shipping(data_in: PathBuf, data_out: &Path, opts: ShippingOpts) -> Re
         if rel.is_empty() {
             continue;
         }
-        if let Some(p) = in_path(&rel) {
+        if let Some(p) = in_path(rel) {
             let (signature, profiles) =
                 sprite_scriptor::SpriteScriptor::load_all_profiles(&p.to_string_lossy())
                     .map_err(|e| anyhow!("rhs {rel}: {e}"))?;

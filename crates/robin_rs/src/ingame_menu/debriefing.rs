@@ -252,9 +252,7 @@ impl DebriefingModalState {
                     .current_page
                     .as_mut()
                     .and_then(|page| page.tick(event_pump, renderer, resources, cursor));
-                let Some(outcome) = outcome else {
-                    return None;
-                };
+                let outcome = outcome?;
                 self.current_page = None;
                 match outcome {
                     PageOutcome::Ok { text_remaining } => {
@@ -299,9 +297,7 @@ impl DebriefingModalState {
                     .current_page
                     .as_mut()
                     .and_then(|page| page.tick(event_pump, renderer, resources, cursor));
-                let Some(outcome) = outcome else {
-                    return None;
-                };
+                let outcome = outcome?;
                 self.current_page = None;
                 match outcome {
                     PageOutcome::Ok { .. } => self.phase = DebriefingPhase::Done,
@@ -316,11 +312,9 @@ impl DebriefingModalState {
                 }
                 None
             }
-            DebriefingPhase::Done => {
-                return Some(DebriefingOutcome::Ok {
-                    text_remaining: String::new(),
-                });
-            }
+            DebriefingPhase::Done => Some(DebriefingOutcome::Ok {
+                text_remaining: String::new(),
+            }),
         }
     }
 }

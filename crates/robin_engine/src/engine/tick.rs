@@ -5707,12 +5707,12 @@ impl EngineInner {
             _ => None,
         };
         let Some(posture) = posture else {
-            if let Some((direction, posture)) = transition_start {
-                if let Some(Some(entity)) = self.entities.get_mut(entity_id.0 as usize) {
-                    entity.element_data_mut().set_direction_instantly(direction);
-                    if let Some(posture) = posture {
-                        entity.set_posture(posture);
-                    }
+            if let Some((direction, posture)) = transition_start
+                && let Some(Some(entity)) = self.entities.get_mut(entity_id.0 as usize)
+            {
+                entity.element_data_mut().set_direction_instantly(direction);
+                if let Some(posture) = posture {
+                    entity.set_posture(posture);
                 }
             }
             return;

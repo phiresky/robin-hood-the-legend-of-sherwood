@@ -127,6 +127,7 @@ fn maybe_begin_sim_locked(peers: &mut ServerPeers) -> Option<(u32, u64, Vec<Send
 /// process should also push its own [`PlayerCommand`]s into
 /// `outgoing_rx` via the sibling sender so they are broadcast to
 /// peers and folded into the local input batch.
+#[allow(clippy::too_many_arguments)]
 pub fn start_server(
     addr: &str,
     host_nickname: String,
@@ -629,7 +630,7 @@ fn run_server_peer_reader(
                 Ok(NetMsg::ReadyToSim { frame }) => {
                     let begin = {
                         let mut p = peers.lock().unwrap();
-                        p.ready_seats.insert(seat.0 as u8, frame);
+                        p.ready_seats.insert(seat.0, frame);
                         maybe_begin_sim_locked(&mut p)
                     };
                     if let Some((begin_frame, start_epoch_ms, senders)) = begin {

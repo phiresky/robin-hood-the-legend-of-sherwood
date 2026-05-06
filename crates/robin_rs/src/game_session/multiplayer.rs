@@ -548,7 +548,9 @@ pub(super) fn setup_multiplayer_session(
     host: &mut Host,
     args: &crate::main_entry::CliArgs,
 ) -> Result<(), String> {
-    use crate::multiplayer::{NetChannels, NetEvent, connect_client, start_server};
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::multiplayer::NetEvent;
+    use crate::multiplayer::{NetChannels, connect_client, start_server};
     #[cfg(not(target_arch = "wasm32"))]
     use std::time::{Duration, Instant};
 

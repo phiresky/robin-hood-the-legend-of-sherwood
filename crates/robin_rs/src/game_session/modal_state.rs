@@ -79,9 +79,9 @@ impl ActiveDebriefingBatch {
 }
 
 pub(super) enum ActiveModal {
-    Dialogue(ActiveDialogueBatch),
-    PopupScroll(ActivePopupScrollBatch),
-    Debriefing(ActiveDebriefingBatch),
+    Dialogue(Box<ActiveDialogueBatch>),
+    PopupScroll(Box<ActivePopupScrollBatch>),
+    Debriefing(Box<ActiveDebriefingBatch>),
     MissionState {
         kind: robin_engine::player_command::ModalKind,
         state: crate::ingame_menu::MissionStatePopupState,

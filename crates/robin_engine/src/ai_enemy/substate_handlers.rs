@@ -3610,20 +3610,19 @@ impl EnemyAi {
                             && let Some(chief_view) = ctx.entity_view(self.base.patrol_chief)
                             && chief_view.is_soldier()
                             && chief_view.is_able_to_fight
+                            && chief_view.rank == ProfileRank::Officer
                         {
-                            if chief_view.rank == ProfileRank::Officer {
-                                self.base.pending_cross_npc_actions.push(
-                                    CrossNpcAction::SendStimulus {
-                                        target: self.base.patrol_chief,
-                                        stimulus_type: StimulusType::EventSeesBrawl,
-                                        info: crate::ai::StimulusInfo::Human(
-                                            self.base.me as HumanHandle,
-                                        ),
-                                        fallback_to_sender: None,
-                                        to_whole_patrol: false,
-                                    },
-                                );
-                            }
+                            self.base.pending_cross_npc_actions.push(
+                                CrossNpcAction::SendStimulus {
+                                    target: self.base.patrol_chief,
+                                    stimulus_type: StimulusType::EventSeesBrawl,
+                                    info: crate::ai::StimulusInfo::Human(
+                                        self.base.me as HumanHandle,
+                                    ),
+                                    fallback_to_sender: None,
+                                    to_whole_patrol: false,
+                                },
+                            );
                         }
                     } else {
                         self.base.launch_timer(20, ctx.frame);

@@ -490,7 +490,8 @@ impl VideoBlit {
         });
         // Stash the buffer alongside the bind group via Self; we'll
         // rewrite it on each frame.
-        let me = Self {
+
+        Self {
             pipeline,
             sampler,
             bgl,
@@ -499,8 +500,7 @@ impl VideoBlit {
             letterbox_buffer: buffer,
             vid_w,
             vid_h,
-        };
-        me
+        }
     }
 
     fn upload_frame(

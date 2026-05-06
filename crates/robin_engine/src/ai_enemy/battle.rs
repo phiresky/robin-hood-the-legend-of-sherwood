@@ -1492,14 +1492,13 @@ impl EnemyAi {
 
         // primary_target then emoticon.
         self.base.primary_target = enemy;
-        if let Some(global) = global {
-            if !global
+        if let Some(global) = global
+            && !global
                 .same_frame_target_claims
                 .iter()
                 .any(|&(attacker, target)| attacker == self.base.me && target == enemy)
-            {
-                global.same_frame_target_claims.push((self.base.me, enemy));
-            }
+        {
+            global.same_frame_target_claims.push((self.base.me, enemy));
         }
         debug_assert!(
             ctx.entity_view(enemy)

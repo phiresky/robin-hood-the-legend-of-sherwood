@@ -3112,13 +3112,18 @@ impl EngineInner {
                     lift_translations[idx] = Some(LiftAnimContext::Upright(lt));
                 }
                 crate::element::Posture::OnLadder | crate::element::Posture::OnWall
-                    if match (posture, lt, door_pass_action) {
-                        (crate::element::Posture::OnWall, crate::sector::LiftType::Wall, _) => true,
-                        (crate::element::Posture::OnLadder, crate::sector::LiftType::Ladder, _) => {
-                            true
-                        }
-                        _ => false,
-                    } =>
+                    if matches!(
+                        (posture, lt, door_pass_action),
+                        (
+                            crate::element::Posture::OnWall,
+                            crate::sector::LiftType::Wall,
+                            _
+                        ) | (
+                            crate::element::Posture::OnLadder,
+                            crate::sector::LiftType::Ladder,
+                            _
+                        )
+                    ) =>
                 {
                     let (pt_low, pt_high) = self.lift_endpoint_points(gs.sector_number);
                     let ladder_dx = pt_low.x - pt_high.x;

@@ -64,7 +64,19 @@ jobs:
             --out-dir "${artifact}" \
             --out-name robin \
             target/wasm32-unknown-unknown/wasm-release/robin.wasm
+
+          smoke_wasm_artifact() {
+            node --input-type=module -e '
+              import { readFile } from "node:fs/promises";
+              const artifact = process.argv[1];
+              const wasm = await import(`file://${process.cwd()}/${artifact}/robin.js`);
+              const bytes = await readFile(`${artifact}/robin_bg.wasm`);
+              await wasm.default({ module_or_path: bytes });
+            ' "$1"
+          }
+
           node wasm-www/scripts/optimize-wasm.mjs "${artifact}"
+          smoke_wasm_artifact "${artifact}"
 
           wasm_sha="$(sha256sum "${artifact}/robin_bg.wasm" | cut -d ' ' -f 1)"
           built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

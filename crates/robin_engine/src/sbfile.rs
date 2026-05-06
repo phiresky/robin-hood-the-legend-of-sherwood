@@ -3,10 +3,12 @@
 //! All Rust-side persistence uses serde (JSON). SbFile only reads
 //! binary game data (`.cpf` profiles, level files, sprite data, etc.).
 
-use std::fs;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs;
 
 pub const SBFILE_NO_ERROR: i32 = 0;
 pub const SBFILE_ERROR_FILE_NOT_FOUND: i32 = -1;

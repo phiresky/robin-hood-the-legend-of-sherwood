@@ -81,10 +81,10 @@ pub(crate) async fn show_main_menu_options(
     let sound_dir = std::path::PathBuf::from("Data/Sounds");
     let mut audio_backend = SdlMixerBackend::new(&sound_dir, crate::sound::NUM_CHANNELS).ok();
     let mut sound_mgr = SoundManager::default();
-    if let Some(ref mut backend) = audio_backend {
-        if let Err(e) = sound_mgr.initialize(backend, sound_cfg.sound_3d) {
-            tracing::warn!("Main-menu Options: SoundManager init failed: {e}");
-        }
+    if let Some(ref mut backend) = audio_backend
+        && let Err(e) = sound_mgr.initialize(backend, sound_cfg.sound_3d)
+    {
+        tracing::warn!("Main-menu Options: SoundManager init failed: {e}");
     }
     // Load the menu sound bank so the slider's `(noisy_id << 16) +
     // event_id` lookup actually finds entries.  Same path + parse as
@@ -148,15 +148,13 @@ pub(crate) async fn show_main_menu_options(
     if let Some(profile_id) = active_profile_id {
         if outcome.changed {
             let mut profile_guard = PlayerProfileManager::global();
-            if let Some(mgr) = profile_guard.as_mut() {
-                if let Some(profile) = mgr.profiles.iter_mut().find(|p| p.id == profile_id) {
-                    profile.graphic_config = graphic;
-                    profile.sound_config = sound_cfg;
-                    if let Err(err) = mgr.save() {
-                        tracing::error!(
-                            "Main menu Options: failed to save profile manager: {err:#}"
-                        );
-                    }
+            if let Some(mgr) = profile_guard.as_mut()
+                && let Some(profile) = mgr.profiles.iter_mut().find(|p| p.id == profile_id)
+            {
+                profile.graphic_config = graphic;
+                profile.sound_config = sound_cfg;
+                if let Err(err) = mgr.save() {
+                    tracing::error!("Main menu Options: failed to save profile manager: {err:#}");
                 }
             }
         }

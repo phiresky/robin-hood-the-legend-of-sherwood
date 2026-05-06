@@ -1395,42 +1395,6 @@ pub(super) fn render_frame(
     // clears it.
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn print_screen_modifier_request_priority_matches_reference() {
-        assert_eq!(
-            print_screen_request_from_modifiers(false, false),
-            PrintScreenRequest::Plain
-        );
-        assert_eq!(
-            print_screen_request_from_modifiers(false, true),
-            PrintScreenRequest::Median3x3
-        );
-        assert_eq!(
-            print_screen_request_from_modifiers(true, false),
-            PrintScreenRequest::WideSnapshot
-        );
-        assert_eq!(
-            print_screen_request_from_modifiers(true, true),
-            PrintScreenRequest::WideSnapshot
-        );
-    }
-
-    #[test]
-    fn median_filter_preserves_alpha_and_uses_channel_median() {
-        let rgba = vec![
-            0, 0, 0, 1, 10, 10, 10, 2, 20, 20, 20, 3, 30, 30, 30, 4, 250, 250, 250, 5, 50, 50, 50,
-            6, 60, 60, 60, 7, 70, 70, 70, 8, 80, 80, 80, 9,
-        ];
-        let out = median_filter_rgba_3x3(3, 3, &rgba);
-        let center = (3 + 1) * 4;
-        assert_eq!(&out[center..center + 4], &[50, 50, 50, 5]);
-    }
-}
-
 /// Draw the rewind HUD indicator: two left-pointing triangles forming
 /// a "◀◀" glyph, with a subtle dark backdrop rectangle behind them so
 /// the icon reads against any scene.
@@ -1465,5 +1429,41 @@ pub(super) fn draw_rewind_icon(
             255,
             220,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn print_screen_modifier_request_priority_matches_reference() {
+        assert_eq!(
+            print_screen_request_from_modifiers(false, false),
+            PrintScreenRequest::Plain
+        );
+        assert_eq!(
+            print_screen_request_from_modifiers(false, true),
+            PrintScreenRequest::Median3x3
+        );
+        assert_eq!(
+            print_screen_request_from_modifiers(true, false),
+            PrintScreenRequest::WideSnapshot
+        );
+        assert_eq!(
+            print_screen_request_from_modifiers(true, true),
+            PrintScreenRequest::WideSnapshot
+        );
+    }
+
+    #[test]
+    fn median_filter_preserves_alpha_and_uses_channel_median() {
+        let rgba = vec![
+            0, 0, 0, 1, 10, 10, 10, 2, 20, 20, 20, 3, 30, 30, 30, 4, 250, 250, 250, 5, 50, 50, 50,
+            6, 60, 60, 60, 7, 70, 70, 70, 8, 80, 80, 80, 9,
+        ];
+        let out = median_filter_rgba_3x3(3, 3, &rgba);
+        let center = (3 + 1) * 4;
+        assert_eq!(&out[center..center + 4], &[50, 50, 50, 5]);
     }
 }

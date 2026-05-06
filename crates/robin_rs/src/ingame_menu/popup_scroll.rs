@@ -267,7 +267,7 @@ impl PopupScrollModalState {
         renderer: &mut Renderer,
         resources: &IngameMenuResources,
         sound: &mut SoundManager,
-        mut audio_backend: Option<&mut dyn AudioBackend>,
+        audio_backend: Option<&mut dyn AudioBackend>,
         sample_loader: &SampleLoader,
         cursor: Option<ModalCursor<'_>>,
         modal_net: Option<&super::ModalNet<'_>>,
@@ -301,7 +301,7 @@ impl PopupScrollModalState {
         let widget_input = self.input_state.as_widget_input();
         let events = self.frame.process_input(&widget_input);
         self.input_state.end_frame();
-        if let Some(backend) = audio_backend.as_deref_mut() {
+        if let Some(backend) = audio_backend {
             widget_bridge::play_widget_noise(
                 &events,
                 widget_bridge::WIDGET_NOISY_BUTTON,

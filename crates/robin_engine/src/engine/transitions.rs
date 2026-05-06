@@ -1990,11 +1990,11 @@ impl EngineInner {
             return false;
         };
 
-        if let Some(elem) = self.sequence_manager.get_element_mut(seq_id, elem_idx) {
-            if elem.posture_after_transition == Posture::Undefined {
-                elem.posture_after_transition = actor_posture;
-                elem.action_state_after_transition = actor_action_state;
-            }
+        if let Some(elem) = self.sequence_manager.get_element_mut(seq_id, elem_idx)
+            && elem.posture_after_transition == Posture::Undefined
+        {
+            elem.posture_after_transition = actor_posture;
+            elem.action_state_after_transition = actor_action_state;
         }
 
         let Some(ctx) = build_ctx(self, owner, seq_id, elem_idx) else {

@@ -745,6 +745,7 @@ fn floor_bottom(anchor: f32, extent: u16) -> i32 {
 /// (`0x001F`) replaced by the day-ambience shadow color, and that shadow
 /// color baked to a semi-transparent alpha so the GPU blend produces
 /// the same dim grey shadow effect as the original software blit path.
+#[allow(clippy::too_many_arguments)]
 fn load_row(
     resource_manager: &mut ResourceManager,
     gpu: &crate::window::GpuContext,
@@ -889,11 +890,10 @@ fn rgb565_to_argb8888(
     let mut bytes = Vec::with_capacity(n * 4);
 
     for &px in pixels.iter().take(n) {
-        let (b, g, r, a) = if px == transparent {
-            (0u8, 0, 0, 0)
-        } else if matches!(alpha_mode, TitbitAlphaMode::ConstantPercent(_))
-            && px == SPRITE_SHADOW_KEY_16
-        {
+        let transparent_pixel = px == transparent
+            || (matches!(alpha_mode, TitbitAlphaMode::ConstantPercent(_))
+                && px == SPRITE_SHADOW_KEY_16);
+        let (b, g, r, a) = if transparent_pixel {
             (0, 0, 0, 0)
         } else if alpha_mode == TitbitAlphaMode::SolidWithShadow && px == shadow_color {
             // Black tint so SDL blend collapses to pure multiply-darken.

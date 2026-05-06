@@ -718,12 +718,12 @@ impl DialogueModalState {
         &mut self,
         sound: &mut SoundManager,
         sound_config: &crate::sound_config::SoundConfig,
-        mut audio: Option<&mut dyn AudioBackend>,
+        audio: Option<&mut dyn AudioBackend>,
         result: DialogResult,
         remote: bool,
         modal_net: Option<&super::ModalNet<'_>>,
     ) -> DialogResult {
-        if let Some(backend) = audio.as_deref_mut() {
+        if let Some(backend) = audio {
             sound.close_dialog(backend);
         }
         if self.entered_dialogue {

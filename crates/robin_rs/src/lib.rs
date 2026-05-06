@@ -39,6 +39,7 @@ pub fn init_tracing() {
 /// targets (e.g. `RUST_LOG=robin_engine=info,robin_rs=info`).  Without
 /// this floor, the `robin` binary's own `tracing::error!` calls — and
 /// anything else outside the listed targets — would be silenced.
+#[cfg(not(target_arch = "wasm32"))]
 fn build_env_filter() -> tracing_subscriber::EnvFilter {
     use tracing_subscriber::EnvFilter;
     match std::env::var("RUST_LOG") {
@@ -50,6 +51,7 @@ fn build_env_filter() -> tracing_subscriber::EnvFilter {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn compose_env_filter(s: &str) -> String {
     // A bare global directive such as `RUST_LOG=debug` should mean
     // "debug the game" during normal development, not "enable
@@ -248,7 +250,7 @@ pub use robin_assets::serialize;
 pub use robin_assets::shipping_datadir;
 pub use robin_engine::vm;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::compose_env_filter;
 

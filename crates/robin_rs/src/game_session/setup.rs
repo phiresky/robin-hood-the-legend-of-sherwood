@@ -1284,7 +1284,7 @@ pub(super) fn load_level_and_sprite_bank(
     // Runs host-side because the engine crate doesn't reference
     // `FrameHolder`.
     crate::level_loading_host::initialize_sprite_variants(host, &engine);
-    tick_progress(loading_screen, event_pump.as_deref_mut(), 1.0);
+    tick_progress(loading_screen, event_pump, 1.0);
 
     Ok((
         engine,

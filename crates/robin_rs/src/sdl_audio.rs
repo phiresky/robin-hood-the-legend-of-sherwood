@@ -12,7 +12,6 @@
 //! the rest of the game expects (`play_sound` returns an `i32` channel
 //! number) keeps working.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::sound::AudioBackend;
@@ -29,6 +28,8 @@ use kira::{
     },
     track::{SpatialTrackBuilder, SpatialTrackHandle},
 };
+#[cfg(feature = "audio")]
+use std::collections::HashMap;
 
 /// kira-backed audio backend. Name preserved from the SDL backend so
 /// existing call sites (`SdlMixerBackend::new(...)`) keep compiling.

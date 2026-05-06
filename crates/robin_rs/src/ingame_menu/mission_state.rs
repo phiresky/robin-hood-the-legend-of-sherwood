@@ -69,7 +69,7 @@ enum TransitionDirection {
 
 enum MissionStatePopupPhase {
     Opening(MissionStateTransition),
-    Confirming(YesNoModalState),
+    Confirming(Box<YesNoModalState>),
     Closing(MissionStateTransition),
     Done,
 }
@@ -116,11 +116,8 @@ impl MissionStatePopupState {
         match &mut self.phase {
             MissionStatePopupPhase::Opening(transition) => {
                 if transition.tick(event_pump, renderer, resources, cursor) {
-                    self.phase = MissionStatePopupPhase::Confirming(YesNoModalState::new(
-                        event_pump,
-                        renderer,
-                        resources,
-                        self.message.clone(),
+                    self.phase = MissionStatePopupPhase::Confirming(Box::new(
+                        YesNoModalState::new(event_pump, renderer, resources, self.message.clone()),
                     ));
                 }
                 None

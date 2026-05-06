@@ -989,6 +989,7 @@ impl PathFinder {
         changed
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn find_path(
         &self,
         graph: &PathGraph,

@@ -514,6 +514,7 @@ impl Game {
     ///
     /// Returns `Some(code)` if the mission ended this frame, `None`
     /// if still in progress.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_engine_tick(
         &mut self,
         host: &mut Host,
@@ -551,7 +552,7 @@ impl Game {
             host.selection_mark.tick();
         }
         host.trajectory_ground_mark.tick(
-            host.viewport.view_position.into(),
+            host.viewport.view_position,
             host.viewport.zoom_factor,
             host.viewport.screen_size.x as i32,
             host.viewport.screen_size.y as i32,
@@ -1063,7 +1064,7 @@ mod tests {
     fn run_engine_tick_in_progress() {
         let mut game = Game::default();
         let mut dev = robin_engine::engine::DevState::default();
-        let (mut engine, mut assets) = fresh_engine();
+        let (mut engine, assets) = fresh_engine();
         let mut host = Host::new(800.0, 600.0);
         let mut display = robin_engine::engine::HostDisplayState::default();
 
@@ -1071,7 +1072,7 @@ mod tests {
         let result = game.run_engine_tick(
             &mut host,
             &mut display,
-            &mut assets,
+            &assets,
             &mut engine,
             &mut dev,
             false,
@@ -1086,7 +1087,7 @@ mod tests {
     fn run_engine_tick_skips_when_paused() {
         let mut game = Game::default();
         let mut dev = robin_engine::engine::DevState::default();
-        let (mut engine, mut assets) = fresh_engine();
+        let (mut engine, assets) = fresh_engine();
         let mut host = Host::new(800.0, 600.0);
         let mut display = robin_engine::engine::HostDisplayState::default();
 
@@ -1094,7 +1095,7 @@ mod tests {
         let result = game.run_engine_tick(
             &mut host,
             &mut display,
-            &mut assets,
+            &assets,
             &mut engine,
             &mut dev,
             false,
@@ -1108,7 +1109,7 @@ mod tests {
     fn run_engine_tick_skips_when_console() {
         let mut game = Game::default();
         let mut dev = robin_engine::engine::DevState::default();
-        let (mut engine, mut assets) = fresh_engine();
+        let (mut engine, assets) = fresh_engine();
         let mut host = Host::new(800.0, 600.0);
         let mut display = robin_engine::engine::HostDisplayState::default();
 
@@ -1116,7 +1117,7 @@ mod tests {
         let result = game.run_engine_tick(
             &mut host,
             &mut display,
-            &mut assets,
+            &assets,
             &mut engine,
             &mut dev,
             true,
@@ -1130,7 +1131,7 @@ mod tests {
     fn run_engine_tick_mission_won() {
         let mut game = Game::default();
         let mut dev = robin_engine::engine::DevState::default();
-        let (mut engine, mut assets) = fresh_engine();
+        let (mut engine, assets) = fresh_engine();
         let mut host = Host::new(800.0, 600.0);
         let mut display = robin_engine::engine::HostDisplayState::default();
         engine.test_set_mission_flags(true, false, false);
@@ -1138,7 +1139,7 @@ mod tests {
         let result = game.run_engine_tick(
             &mut host,
             &mut display,
-            &mut assets,
+            &assets,
             &mut engine,
             &mut dev,
             false,
@@ -1152,7 +1153,7 @@ mod tests {
     fn run_engine_tick_mission_lost() {
         let mut game = Game::default();
         let mut dev = robin_engine::engine::DevState::default();
-        let (mut engine, mut assets) = fresh_engine();
+        let (mut engine, assets) = fresh_engine();
         let mut host = Host::new(800.0, 600.0);
         let mut display = robin_engine::engine::HostDisplayState::default();
         engine.test_set_mission_flags(false, true, false);
@@ -1160,7 +1161,7 @@ mod tests {
         let result = game.run_engine_tick(
             &mut host,
             &mut display,
-            &mut assets,
+            &assets,
             &mut engine,
             &mut dev,
             false,

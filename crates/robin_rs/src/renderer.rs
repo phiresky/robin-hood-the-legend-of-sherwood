@@ -2872,6 +2872,7 @@ impl Renderer {
     }
 
     /// Queue the cached edge-map outline tinted by `rgb * alpha`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_cached_outline(
         &mut self,
         bank_id: u32,

@@ -1125,6 +1125,7 @@ fn dist((ax, ay): (f32, f32), (bx, by): (f32, f32)) -> f32 {
 ///
 /// `allow_leave_map` is set on map-leaving move orders: when true,
 /// reinforcement doors are not hard-blocked by `is_actor_authorized`.
+#[allow(clippy::too_many_arguments)]
 pub fn find_path_gates(
     doors: &[Door],
     source: (f32, f32),
@@ -1650,6 +1651,7 @@ pub struct GateWaitPosition {
 /// Returns `None` when no path exists or when the caller can cross
 /// every gate on the path (caller misuse — there is nothing for `me`
 /// to wait for).
+#[allow(clippy::too_many_arguments)]
 pub fn compute_avenger_wait_position(
     doors: &[Door],
     avenger_pos: (f32, f32),

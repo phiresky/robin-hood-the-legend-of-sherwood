@@ -10,7 +10,9 @@
 //! - [`crate::game_input`]   — left/right click handlers for the mission loop
 //! - [`crate::game_render`]  — in-game rendering passes (entities, outlines, minimap, …)
 
-use std::{ffi::OsString, path::Path};
+use std::ffi::OsString;
+#[cfg(any(not(target_arch = "wasm32"), target_os = "android"))]
+use std::path::Path;
 
 use clap::Parser;
 
@@ -365,6 +367,7 @@ pub const FALLBACK_LOCALE_FOLDER: &str = "1033";
 /// separator (`:` on Unix, `;` on Windows).
 pub const OVERLAY_DATA_DIRS_ENV: &str = "ROBINHOOD_OVERLAY_DATA_DIRS";
 
+#[cfg(not(target_arch = "wasm32"))]
 fn add_overlay_data_dirs() {
     let Ok(value) = std::env::var(OVERLAY_DATA_DIRS_ENV) else {
         return;

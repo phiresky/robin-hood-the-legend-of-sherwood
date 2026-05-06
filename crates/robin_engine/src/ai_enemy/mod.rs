@@ -3290,7 +3290,6 @@ impl EnemyAi {
     /// Think queue.  The nearest reachable officer additionally gets a
     /// `CALL_TOWER_GUARD_CALLS_ME` so they come to investigate.  If no
     /// officer is in ear-shot but a "far officer" exists, the nearest
-
     pub fn init_one_ai(
         &mut self,
         ctx: &AiContext,

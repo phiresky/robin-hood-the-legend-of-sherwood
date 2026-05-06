@@ -701,10 +701,8 @@ impl Host {
                     actor_id,
                 } => {
                     if let Some(actor_id) = actor_id {
-                        let had_deferred_stop = self
-                            .pending_stop_exclamations
-                            .iter()
-                            .any(|id| *id == actor_id.0);
+                        let had_deferred_stop =
+                            self.pending_stop_exclamations.contains(&actor_id.0);
                         if had_deferred_stop {
                             self.pending_stop_exclamations
                                 .retain(|id| *id != actor_id.0);

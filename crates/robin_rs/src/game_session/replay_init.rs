@@ -33,6 +33,7 @@ impl std::io::Write for TeeWriter {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn default_replay_path() -> String {
     use std::path::PathBuf;
     #[cfg(feature = "native-fs")]

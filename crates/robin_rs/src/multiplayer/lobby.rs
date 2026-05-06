@@ -8,6 +8,7 @@
 //! path drives the actual simulation.
 
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -236,6 +237,8 @@ pub fn run_lobby_server(addr: &str) -> Result<(), String> {
                 } => {
                     self.next_id = self.next_id.saturating_add(1);
                     let id = self.next_id.to_string();
+                    #[allow(clippy::disallowed_methods)]
+                    // Lobby host tokens are network authentication nonces, not gameplay RNG.
                     let host_token = format!("{:016x}", fastrand::u64(..));
                     let connect_addr = advertised_connect_addr(&bind_addr, peer_addr);
                     tracing::info!(
@@ -579,6 +582,7 @@ fn normalize_ws_url(raw: &str) -> String {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn advertised_connect_addr(bind_addr: &str, peer_addr: Option<std::net::SocketAddr>) -> String {
     let peer_host = peer_addr
         .map(|addr| addr.ip().to_string())
@@ -596,6 +600,7 @@ fn advertised_connect_addr(bind_addr: &str, peer_addr: Option<std::net::SocketAd
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn is_unroutable_advertised_host(host: &str) -> bool {
     matches!(
         host,
@@ -715,10 +720,10 @@ fn connect_persistent(lobby_url: &str) -> Result<LobbyClient, String> {
 struct WasmLobbyHandle {
     socket: web_sys::WebSocket,
     interval_id: i32,
-    on_message: wasm_bindgen::prelude::Closure<dyn FnMut(web_sys::MessageEvent)>,
-    on_close: wasm_bindgen::prelude::Closure<dyn FnMut(web_sys::CloseEvent)>,
-    on_error: wasm_bindgen::prelude::Closure<dyn FnMut(web_sys::Event)>,
-    pump: wasm_bindgen::prelude::Closure<dyn FnMut()>,
+    _on_message: wasm_bindgen::prelude::Closure<dyn FnMut(web_sys::MessageEvent)>,
+    _on_close: wasm_bindgen::prelude::Closure<dyn FnMut(web_sys::CloseEvent)>,
+    _on_error: wasm_bindgen::prelude::Closure<dyn FnMut(web_sys::Event)>,
+    _pump: wasm_bindgen::prelude::Closure<dyn FnMut()>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -835,10 +840,10 @@ fn connect_persistent(lobby_url: &str) -> Result<LobbyClient, String> {
         _wasm: WasmLobbyHandle {
             socket,
             interval_id,
-            on_message,
-            on_close,
-            on_error,
-            pump,
+            _on_message: on_message,
+            _on_close: on_close,
+            _on_error: on_error,
+            _pump: pump,
         },
     })
 }

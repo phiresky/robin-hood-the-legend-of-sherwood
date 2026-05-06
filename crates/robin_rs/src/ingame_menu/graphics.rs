@@ -56,10 +56,10 @@ pub async fn show_graphics(
     let mut working = config.clone();
     let mut dirty = false;
     let retroarch_presets = crate::shader_preset::retroarch_presets();
-    if working.shader_preset.is_empty() {
-        if let Some(preset) = retroarch_presets.first() {
-            working.shader_preset = preset.id.clone();
-        }
+    if working.shader_preset.is_empty()
+        && let Some(preset) = retroarch_presets.first()
+    {
+        working.shader_preset = preset.id.clone();
     }
     let mut preset_scroll = preset_index(retroarch_presets, &working.shader_preset)
         .unwrap_or(0)
@@ -293,13 +293,12 @@ pub async fn show_graphics(
                         Keycode::End => retroarch_presets.len().saturating_sub(1),
                         _ => current,
                     };
-                    if next != current {
-                        if let Some(preset) = retroarch_presets.get(next) {
-                            working.shader_preset = preset.id.clone();
-                            preset_scroll =
-                                keep_visible(next, preset_scroll, retroarch_presets.len());
-                            dirty = true;
-                        }
+                    if next != current
+                        && let Some(preset) = retroarch_presets.get(next)
+                    {
+                        working.shader_preset = preset.id.clone();
+                        preset_scroll = keep_visible(next, preset_scroll, retroarch_presets.len());
+                        dirty = true;
                     }
                 }
                 _ => {}

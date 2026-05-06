@@ -522,6 +522,7 @@ fn set_button(frame: &mut FrameWnd, id: u32, label: &str, enabled: bool) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_lobby(
     renderer: &mut Renderer,
     resources: &IngameMenuResources,

@@ -276,6 +276,7 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render_multipass(
         &mut self,
         mode: TextureScaleMode,
