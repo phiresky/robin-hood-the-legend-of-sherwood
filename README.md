@@ -104,13 +104,13 @@ same 12-character git hash that the Rust build embeds in `ROBIN_GIT_HASH`:
     /wasm/<short-hash>/robin_bg.wasm
     /wasm/<short-hash>/manifest.json
     /wasm/latest.json
-    /datadirs/demo-leicester/v3-q80.rhdata.zst
+    /datadirs/demo-leicester/v4-q80.rhdata.zst
 
 The shell fetches `/wasm/latest.json` when no query parameter is present.  With
 `?replay=rhrec-<hash>-...`, it extracts `<hash>` and loads that exact
 artifact directory.  The game-data blob is not rebuilt by CI; build it
 locally and push it manually to
-`/datadirs/demo-leicester/v3-q80.rhdata.zst` in the binaries repo.
+`/datadirs/demo-leicester/v4-q80.rhdata.zst` in the binaries repo.
 Replay delivery itself remains handled by the existing browser/RPC path.
 Wasm logging defaults to `info`; add `?wasm-log=debug` (or `trace`,
 `warn`, `error`) to the URL to override it for browser sessions.
@@ -118,7 +118,7 @@ Wasm logging defaults to `info`; add `?wasm-log=debug` (or `trace`,
 The publishing workflow needs:
 
 - `BINARIES_REPO_TOKEN`: a token that can push to the binaries repo.
-- A manually maintained `/datadirs/demo-leicester/v3-q80.rhdata.zst` in the binaries
+- A manually maintained `/datadirs/demo-leicester/v4-q80.rhdata.zst` in the binaries
   repo.
 
 ### Android
@@ -128,7 +128,7 @@ Android entry point is exported from the `robin_rs` cdylib, the
 packaging manifest lives at `android/AndroidManifest.xml`, and the
 Leicester demo shipping datadir is bundled as
 `android/assets/Data/datadir.bin` from
-`../../../binaries/datadirs/demo-leicester/v3-q80.rhdata.zst`.
+`../../../binaries/datadirs/demo-leicester/v4-q80.rhdata.zst`.
 
 Prerequisites:
 

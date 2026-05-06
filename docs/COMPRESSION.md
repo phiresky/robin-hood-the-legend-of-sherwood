@@ -4,10 +4,10 @@ Summary of a benchmark sweep looking at whether we can shrink the shipping datad
 
 ## TL;DR
 
-- **Character sprites (~78% of bank, ~67% of shipping blob)**: keep the existing shipping format, but trim demo shipping banks to the sprite IDs reachable from RHS profiles loaded by the demo mission. For the Leicester demo q80 blob this keeps 47 539 / 65 100 sprite slots and drops `datadir.bin` to **25 259 451 B**.
+- **Character sprites (~78% of bank, ~67% of shipping blob)**: keep the existing shipping format, but trim demo shipping banks to the sprite IDs reachable from RHS profiles loaded by the demo mission. The current Leicester demo v4 q80 blob keeps 64 774 / 65 100 sprite slots and is **35 213 242 B**.
 - **Patch / animation-overlay sprites (~22% of bank)**: also keep RLE/VQ + zstd. Counter-intuitively, JXL *loses* on the full patch bucket: small UI/icon patches dominate the bucket and compress phenomenally well under cross-sprite zstd, swamping JXL's per-image overhead. JXL only wins on the ~20 large hand-painted overlays — too small a slice to be worth a runtime format detour.
 - **Background maps (`Data/Levels/*/*.map`)**: switch from bzip2-compressed RGB565 to JXL. Lossless JXL modular saves ~15%; **visually-lossless JXL `-q 90` saves ~60%** (2.5× smaller than shipping today). Wired up end-to-end behind `convert_datadir --map-format jxl-q90`, decoded at runtime via `jxl-rs` (the official libjxl Rust port).
-- **Interface resource pictures**: q80 JXL is wired behind `--interface-image-format jxl-q80`. Interface pictures encode RGB565 transparent-key pixels as real alpha, then decode back to RGB565 with the key restored, so keyed UI compositing stays exact.
+- **Interface resource pictures**: JXL is wired behind `--interface-image-format`, but the deployed shipping blob keeps interface pictures raw. Lossy interface JXL has broken transparent/keyed art in practice; only terrain maps should use lossy JXL.
 
 ## Demo-only follow-up, 2026-04-30
 
@@ -83,17 +83,17 @@ saved by interface jxl after sprite trim                        2,435,771 B
 saved vs v2 q80                                                 7,229,849 B
 ```
 
-The production converter path for the artifact named `v3-q80.rhdata.zst` is:
+The production converter path for the artifact named `v4-q80.rhdata.zst` is:
 
 ```
 convert_datadir --format shipping \
   --map-format jxl-q80 \
-  --interface-image-format jxl-q80 \
   --zstd-window-log 30
 ```
 
-Map and interface qualities are explicit. Interface JXL is RGBA internally for
-keyed pictures; alpha pixels decode back to the `0x07C0` RGB565 key.
+Only map quality is lossy. Interface pictures are left in the raw RGB565
+shipping representation so transparent/keyed UI art remains exact. The
+generated v4 artifact is 35 213 242 B.
 
 ### Demo mission sprite trim
 
