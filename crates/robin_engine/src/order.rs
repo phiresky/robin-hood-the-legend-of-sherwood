@@ -517,8 +517,6 @@ pub struct Order {
     /// Target position (2D map coordinates).
     pub target_x: f32,
     pub target_y: f32,
-    /// Target position Z (height).
-    pub target_z: f32,
     /// The actor this order targets, if any (entity ID).
     pub target_actor: Option<u32>,
     /// Higher priority orders are executed first.
@@ -531,8 +529,6 @@ pub struct Order {
     pub lock_ai: bool,
     /// Play the animation in reverse.
     pub reverse: bool,
-    /// Whether the entity can fly / ignore terrain.
-    pub fly: bool,
     /// Whether this order has been completed.
     pub done: bool,
     /// Movement flags propagated from AI GotoFlags.
@@ -579,14 +575,12 @@ impl Order {
             order_type,
             target_x: x,
             target_y: y,
-            target_z: 0.0,
             target_actor: None,
             priority: 0,
             compute_direction: true,
             tolerance: 0.0,
             lock_ai: false,
             reverse: false,
-            fly: false,
             done: false,
             move_flags: 0,
             no_halt: false,
@@ -688,14 +682,12 @@ pub struct AiOrderIntent {
     pub order_type: OrderType,
     pub target_x: f32,
     pub target_y: f32,
-    pub target_z: f32,
     pub target_actor: Option<u32>,
     pub priority: i32,
     pub compute_direction: bool,
     pub tolerance: f32,
     pub lock_ai: bool,
     pub reverse: bool,
-    pub fly: bool,
     pub done: bool,
     pub move_flags: u16,
     /// Movement speed multiplier copied onto generated movement sequence elements.
@@ -730,14 +722,12 @@ impl AiOrderIntent {
             order_type,
             target_x: x,
             target_y: y,
-            target_z: 0.0,
             target_actor: None,
             priority: 0,
             compute_direction: true,
             tolerance: 0.0,
             lock_ai: false,
             reverse: false,
-            fly: false,
             done: false,
             move_flags: 0,
             speed_factor: 1.0,
@@ -769,14 +759,12 @@ impl AiOrderIntent {
             order_type: self.order_type,
             target_x: self.target_x,
             target_y: self.target_y,
-            target_z: self.target_z,
             target_actor: self.target_actor,
             priority: self.priority,
             compute_direction: self.compute_direction,
             tolerance: self.tolerance,
             lock_ai: self.lock_ai,
             reverse: self.reverse,
-            fly: self.fly,
             done: self.done,
             move_flags: self.move_flags,
             no_halt: self.no_halt,

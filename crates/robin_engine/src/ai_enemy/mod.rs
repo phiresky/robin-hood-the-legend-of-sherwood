@@ -62,7 +62,6 @@ pub struct EnemyAi {
 
     // -- Private fields --
     pub missed_pc: ElementHandle,
-    pub last_seek_direction_index: u8,
     pub pc_missed: bool,
     pub pc_gone_away_in_this_direction: u16,
     pub beggar_to_examine: HumanHandle,
@@ -75,12 +74,6 @@ pub struct EnemyAi {
     pub minimal_task_priority: u16,
     pub new_task_priority: u16,
 
-    pub detected_something_there: Position,
-
-    // "CheckFor" stuff
-    pub number_of_different_check_points: u8,
-
-    pub thirsty: bool,
     pub other_bodies_to_examine: Vec<HumanHandle>,
     pub beggars_to_control: Vec<HumanHandle>,
     pub positions_of_beggars_to_control: Vec<Position>,
@@ -104,8 +97,6 @@ pub struct EnemyAi {
     pub seek_flags: SeekFlags,
 
     pub old_odds: i16,
-
-    pub position_change_locked_for_test: bool,
 
     pub gather_position: Position,
     pub gather_direction: u16,
@@ -137,7 +128,6 @@ pub struct EnemyAi {
     pub changed_to_alert_path: bool,
 
     pub already_seen_bodies: Vec<HumanHandle>,
-    pub heard_nets: Vec<ObjectHandle>,
 
     /// Soldiers this officer has called to a group.
     /// Populated by `alert_soldiers`, read by group coordination substates.
@@ -172,7 +162,6 @@ pub struct EnemyAi {
     pub my_door_index: Option<u32>,
 
     pub fleeing_seen_enemy_counter: u16,
-    pub frame_when_missed_charly: u32,
 
     pub last_stimulus_dispatched_to_patrol: Option<Stimulus>,
 
@@ -285,7 +274,6 @@ impl Default for EnemyAi {
             pending_release_archery_sector: false,
             pending_release_shooting_point: None,
             missed_pc: 0,
-            last_seek_direction_index: 0,
             pc_missed: false,
             pc_gone_away_in_this_direction: 0,
             beggar_to_examine: 0,
@@ -293,9 +281,6 @@ impl Default for EnemyAi {
             current_task_priority: task_priority::NONE,
             minimal_task_priority: task_priority::NONE,
             new_task_priority: task_priority::NONE,
-            detected_something_there: Position::default(),
-            number_of_different_check_points: 0,
-            thirsty: false,
             other_bodies_to_examine: Vec::new(),
             beggars_to_control: Vec::new(),
             positions_of_beggars_to_control: Vec::new(),
@@ -309,7 +294,6 @@ impl Default for EnemyAi {
             seek_point_view_directions: Vec::new(),
             seek_flags: SeekFlags::empty(),
             old_odds: 0,
-            position_change_locked_for_test: false,
             gather_position: Position::default(),
             gather_direction: 0,
             gather_position_instructed: false,
@@ -330,7 +314,6 @@ impl Default for EnemyAi {
             phalanx_aborted: false,
             changed_to_alert_path: false,
             already_seen_bodies: Vec::new(),
-            heard_nets: Vec::new(),
             alerted_us: Vec::new(),
             my_shooting_point: None,
             my_archery_sector: None,
@@ -345,7 +328,6 @@ impl Default for EnemyAi {
             return_to_patrol_point: Position::default(),
             my_door_index: None,
             fleeing_seen_enemy_counter: 0,
-            frame_when_missed_charly: 0,
             last_stimulus_dispatched_to_patrol: None,
             character_id: 0,
             old_life_points: 0,
@@ -392,17 +374,13 @@ impl Default for EnemyAi {
 
 impl EnemyAi {
     pub fn new(owner: NpcHandle) -> Self {
-        // The derived malignity constructor overrides three fields
-        // after the base-class defaults: `attitude = Hostile`,
-        // `thirsty = true`, `reset_battle_decision = true`. Apply
-        // the same overrides here so `EnemyAi::new` matches the
-        // authored initial state rather than the AiController base
-        // defaults.
+        // The derived malignity constructor overrides two fields after
+        // the base-class defaults: `attitude = Hostile` and
+        // `reset_battle_decision = true`.
         let mut base = AiController::new(owner);
         base.attitude = Attitude::Hostile;
         Self {
             base,
-            thirsty: true,
             reset_battle_decision: true,
             ..Default::default()
         }
@@ -3324,11 +3302,6 @@ impl EnemyAi {
             self.set_state(AiState::Default, Substate::DefaultEnroute);
             self.return_to_duty(DutyFlags::empty(), ctx, tick);
         }
-
-        // Seed the hint-freshness clock to the spawn frame so newly
-        // created NPCs aren't treated as "infinitely stale" by the
-        // hint freshness comparison.
-        self.base.last_hint_actuality = ctx.frame;
 
         // GoTo checks `think_method_recursion_depth > 0` and
         // either sets `already_on_point` (for the enclosing `EndThink`

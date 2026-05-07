@@ -946,7 +946,14 @@ impl EnemyAi {
                         self.base.launch_timer(50, ctx.frame);
                         self.base.clear_emoticon();
                     } else {
+                        // Dead-body / rider-confirms-dead branch: remember
+                        // this body so a later officer "examine here" call
+                        // can short-circuit (see the `CallYourTalk1` arm).
+                        if body_handle != 0 && !self.already_seen_bodies.contains(&body_handle) {
+                            self.already_seen_bodies.push(body_handle);
+                        }
                         self.set_state(AiState::Seeking, Substate::SeekingBodyLookingDeadBody);
+                        self.base.set_emoticon(EmoticonType::XMark);
                         self.base.launch_timer(
                             parameters_ai::AI_WATCH_DEADBODY_AGAIN_TIME as u32,
                             ctx.frame,

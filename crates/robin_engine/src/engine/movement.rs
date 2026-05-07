@@ -3324,7 +3324,6 @@ impl EngineInner {
                 move_seq_id,
                 move_elem_idx,
                 active_move_flags,
-                rider_move_flags,
                 order_compute_direction,
                 order_reverse,
             ) = {
@@ -3429,7 +3428,6 @@ impl EngineInner {
                     seq_id,
                     elem_idx,
                     active_move_flags,
-                    actor.rider_move_flags,
                     order_compute_direction,
                     order_reverse,
                 )
@@ -3856,7 +3854,7 @@ impl EngineInner {
             if matches!(motion_state, MotionState::Terminated) && is_sword_motion {
                 sword_movement_terminations.push(EntityId(idx as u32));
             }
-            if rider_move_flags & crate::sequence::MoveFlags::RIDER_CHARGE.bits() as u16 != 0
+            if active_move_flags.contains(crate::sequence::MoveFlags::RIDER_CHARGE)
                 && anim == OrderType::RunningUpright
             {
                 let frame_count = sprite.num_frames_for_anim(OrderType::RunningUpright);
@@ -4365,7 +4363,6 @@ impl EngineInner {
                 }
 
                 if start_post_seek {
-                    actor.rider_move_flags = 0;
                     actor.clear_path();
                     actor.action_state = if is_swordfighting || actor.action_state.is_sword() {
                         crate::element::ActionState::WaitingSword
@@ -4431,8 +4428,6 @@ impl EngineInner {
                             if let Some((door_index, direct)) = completed {
                                 completed_door_passes.push((eid, door_index, direct));
                             }
-                            // Clear rider charge flags when movement ends.
-                            actor.rider_move_flags = 0;
                             // Final waypoint's do_next_order pop was
                             // already collected above when
                             // `path_waypoint_index` advanced past the
@@ -4786,7 +4781,7 @@ impl EngineInner {
         // order rewrites before the order_pops drain — the rewrite
         // operates on the current front order plus any orders behind
         // it, so it must run before `do_next_order` pops the front.
-        // Three outcomes per entry:
+        // Two outcomes per entry:
         //   1. First following order with `order_type !=
         //      current.order_type && (target_x, target_y) != (0, 0)`
         //      found at index `k`: insert a clone of the current
@@ -4795,11 +4790,7 @@ impl EngineInner {
         //      preserves the order's unique id so the sprite pipeline
         //      keeps treating the new front as a continuation after
         //      the front pop.
-        //   2. The first following order is a flight (`target_z !=
-        //      0`) *and* shares the current order's action (so the
-        //      scan doesn't pick a different-action target): leave
-        //      the queue untouched, just terminate.
-        //   3. No different-action order found: drop every following
+        //   2. No different-action order found: drop every following
         //      order so only the current front remains.
         for rewrite in till_last_frame_rewrites {
             let Some(elem) = self
@@ -4813,7 +4804,6 @@ impl EngineInner {
             };
             let mut animation_new: Option<crate::order::OrderType> = None;
             let mut insertion_idx: Option<usize> = None;
-            let mut early_terminate = false;
             for k in 1..elem.orders.len() {
                 let nxt = &elem.orders[k];
                 let dest_2d_zero = nxt.target_x == 0.0 && nxt.target_y == 0.0;
@@ -4821,13 +4811,7 @@ impl EngineInner {
                     animation_new = Some(nxt.order_type);
                     insertion_idx = Some(k);
                     break;
-                } else if k == 1 && nxt.target_z != 0.0 {
-                    early_terminate = true;
-                    break;
                 }
-            }
-            if early_terminate {
-                continue;
             }
             match (animation_new, insertion_idx) {
                 (Some(new_action), Some(idx)) => {

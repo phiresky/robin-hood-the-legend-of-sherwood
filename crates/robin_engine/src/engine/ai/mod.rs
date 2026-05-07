@@ -2987,27 +2987,18 @@ impl EngineInner {
     }
 
     /// Iterates every NPC except the body itself and registers the
-    /// body under DETECTABLE_BODY.  Also resets `body_visitors` to
-    /// zero and sets the `has_already_been_detectable_body` flag on
-    /// the body.
+    /// body under DETECTABLE_BODY.
     #[tracing::instrument(level = "trace", skip_all, fields(body = body_id.0))]
     pub(super) fn broadcast_body_detectable(&mut self, body_id: EntityId) {
         use crate::element::DetectableType;
 
-        // Reset body_visitors + mark body as globally detectable; snapshot
-        // the body's position + `knocked_out_in_money_fight` flag for the
-        // per-friend radius check below.
+        // Snapshot the body's position + `knocked_out_in_money_fight`
+        // flag for the per-friend radius check below.
         let (body_pos, body_knocked_out_in_money_fight, body_is_soldier) = {
             let Some(Some(entity)) = self.entities.get_mut(body_id.0 as usize) else {
                 return;
             };
             let is_soldier = matches!(entity, Entity::Soldier(_));
-            if let Some(npc) = entity.npc_data_mut() {
-                npc.body_visitors = 0;
-            }
-            if let Some(human) = entity.human_data_mut() {
-                human.has_already_been_detectable_body = true;
-            }
             let pos = entity.element_data().position_map();
             let ko = entity
                 .npc_data()

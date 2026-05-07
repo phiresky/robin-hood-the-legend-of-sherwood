@@ -41,7 +41,6 @@ use crate::geo2d::Point2D as GeoPoint2D;
 use crate::jump_line::JumpLineIndex;
 use crate::movement::{ActiveMovement, ActiveShot};
 use crate::order::OrderType;
-use crate::pathfinder::PathFinderSpeed;
 use crate::position_interface::PositionInterface;
 use crate::profiles::{
     Action, CharacterProfile, CharacterProfileIdx, CivilianProfileIdx, SoldierProfileIdx,
@@ -766,11 +765,6 @@ pub struct ActorData {
     pub old_action: Animation,
     pub is_ignored_for_anti_collision: bool,
 
-    // Surrender
-    pub is_about_to_surrender: bool,
-    pub is_surrendering: bool,
-    pub menacer: Option<EntityId>,
-
     // Current state
     pub action_state: ActionState,
     pub execution_frozen: bool,
@@ -829,9 +823,6 @@ pub struct ActorData {
     pub passing_door_directly: bool,
 
     pub script_class: String,
-
-    /// Pathfinder speed / priority for this actor's path requests.
-    pub pathfinder_speed: PathFinderSpeed,
 
     /// Tracks the sequence element that initiated the current movement,
     /// so we can notify the sequence manager when movement completes.
@@ -902,11 +893,6 @@ pub struct ActorData {
     pub active_lift: Option<ActiveLiftClimb>,
 
     // -- Rider charge state --
-    /// Movement flags for the current path (from `MoveFlags` bits).
-    /// Set when path is dispatched from pathfinder; cleared when path ends.
-    /// Used to detect `RIDER_CHARGE` for firing `EventGaloppLoopEnd`.
-    pub rider_move_flags: u16,
-
     /// Active rider charge state.  When `Some`, the rider is executing
     /// `ExecuteRiderCharge` — moving along a path while checking a
     /// polygon hit zone each frame.
@@ -952,9 +938,6 @@ impl Default for ActorData {
         Self {
             old_action: Animation::default(),
             is_ignored_for_anti_collision: false,
-            is_about_to_surrender: false,
-            is_surrendering: false,
-            menacer: None,
             action_state: ActionState::default(),
             execution_frozen: false,
             sequence_element_started: false,
@@ -969,7 +952,6 @@ impl Default for ActorData {
             post_seek_sequence: None,
             passing_door_directly: false,
             script_class: String::new(),
-            pathfinder_speed: PathFinderSpeed::default(),
             active_movement: ActiveMovement::none(),
             pending_door_pass: None,
             active_door_pass: None,
@@ -987,7 +969,6 @@ impl Default for ActorData {
             jump_z_offset: 0.0,
             active_flight: None,
             active_lift: None,
-            rider_move_flags: 0,
             active_rider_charge: None,
             shield_obstacle: None,
             last_noise_volume: 0,
@@ -1050,7 +1031,6 @@ pub struct HumanData {
 
     // Visibility
     pub hollow_man: bool,
-    pub has_already_been_detectable_body: bool,
 
     // Swordfight — opponent list
     /// Active swordfight opponents. The first entry is the principal opponent.
@@ -1086,7 +1066,6 @@ pub struct HumanData {
     pub last_is_lying_for_corpse_intersection: Option<bool>,
     pub killed_by_accident: bool,
     pub parry_counter: u16,
-    pub detectable_list_index: u16,
     pub invulnerable: bool,
     pub last_motion_was_step_back_in_combat: bool,
 
@@ -1113,7 +1092,6 @@ impl Default for HumanData {
             sword_strike_boredom: Vec::new(),
             stuck_under_nets_counter: 0,
             hollow_man: false,
-            has_already_been_detectable_body: false,
             opponents: Vec::new(),
             opponent_jump_lines: Vec::new(),
             smalltalk_initiative: false,
@@ -1125,7 +1103,6 @@ impl Default for HumanData {
             last_is_lying_for_corpse_intersection: None,
             killed_by_accident: false,
             parry_counter: 0,
-            detectable_list_index: 0,
             invulnerable: false,
             last_motion_was_step_back_in_combat: false,
             running_hulk: 0,
@@ -1529,13 +1506,11 @@ pub struct NpcData {
     pub initial_position_y: f32,
     pub initial_position_sector: Option<crate::position_interface::SectorHandle>,
     pub initial_position_level: u16,
-    pub register_number: u16,
 
     pub inform_my_friends: bool,
     pub money: u32,
     pub wasp_victim: bool,
 
-    pub body_visitors: u16,
     pub old_cover_noise_deafness: u16,
     pub old_cover_noise_deafness_frame_counter: u32,
 
@@ -1561,7 +1536,6 @@ pub struct NpcData {
 
     pub custom_values: [i32; NpcCustomValue::COUNT],
 
-    pub fried_pikachu: bool,
     pub display_double_status_bar: bool,
 
     // -- Cross-module reference: AI controller --
@@ -1711,11 +1685,9 @@ impl Default for NpcData {
             initial_position_y: 0.0,
             initial_position_sector: None,
             initial_position_level: 0,
-            register_number: 0,
             inform_my_friends: false,
             money: 0,
             wasp_victim: false,
-            body_visitors: 0,
             old_cover_noise_deafness: 0,
             old_cover_noise_deafness_frame_counter: 0,
             stuck_on_ladder_emergency_counter: 0,
@@ -1726,7 +1698,6 @@ impl Default for NpcData {
             worst_detected_type: DetectableType::None,
             has_given_money_to_beggar: false,
             custom_values: [0; NpcCustomValue::COUNT],
-            fried_pikachu: false,
             display_double_status_bar: false,
             ai_brain: AiBrain::None,
             alerted: false,
@@ -1983,7 +1954,6 @@ pub struct ObjectData {
     pub reference: Option<EntityId>,
     pub belongs_to_beggar: bool,
     pub taken: bool,
-    pub register_number: u16,
 }
 
 impl Default for ObjectData {
@@ -1999,7 +1969,6 @@ impl Default for ObjectData {
             reference: None,
             belongs_to_beggar: false,
             taken: false,
-            register_number: 0,
         }
     }
 }
@@ -3477,10 +3446,6 @@ pub trait Actor: Element {
     fn is_execution_frozen(&self) -> bool {
         self.actor_data().execution_frozen
     }
-    fn is_prisoner(&self) -> bool {
-        let d = self.actor_data();
-        d.is_surrendering || d.is_about_to_surrender
-    }
     fn is_tied(&self) -> bool {
         self.posture() == Posture::Tied
     }
@@ -4555,10 +4520,7 @@ mod tests {
                 kind: ElementKind::ActorSoldier,
                 ..ElementData::default()
             },
-            actor: ActorData {
-                pathfinder_speed: PathFinderSpeed::Fast,
-                ..ActorData::default()
-            },
+            actor: ActorData::default(),
             human: HumanData::default(),
             npc: NpcData {
                 ai_brain: AiBrain::Enemy(Box::new(enemy_ai)),

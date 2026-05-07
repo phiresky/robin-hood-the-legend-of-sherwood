@@ -30,10 +30,6 @@ pub struct FriendlyAi {
     pub base: AiController,
 
     // -- Civilian-specific private fields --
-    pub wants_to_talk: bool,
-    pub last_talk_partner: NpcHandle,
-    pub can_go_away: bool,
-
     pub beggar_dont_talk_counter: u16,
     pub fleeing_seen_enemy_counter: u16,
 }
@@ -46,9 +42,6 @@ impl Default for FriendlyAi {
                 attitude: Attitude::Suspicious,
                 ..AiController::default()
             },
-            wants_to_talk: true,
-            last_talk_partner: 0,
-            can_go_away: true,
             beggar_dont_talk_counter: 0,
             fleeing_seen_enemy_counter: 0,
         }
@@ -59,17 +52,11 @@ impl FriendlyAi {
     pub fn new(owner: NpcHandle) -> Self {
         Self {
             base: AiController::new(owner),
-            wants_to_talk: true,
-            can_go_away: true,
             ..Default::default()
         }
     }
 
     // -- Accessors --
-
-    pub fn dont_go_away(&mut self, dont_go: bool) {
-        self.can_go_away = !dont_go;
-    }
 
     pub fn set_beggar_dont_talk_counter(&mut self, value: u16) {
         self.beggar_dont_talk_counter = value;
@@ -1981,8 +1968,6 @@ impl FriendlyAi {
     /// entity-side mutations the caller must apply on NpcData /
     /// HumanData / ElementData / ActorData.
     pub fn init_one_ai(&mut self, ctx: &AiContext) -> InitStateSideEffects {
-        self.wants_to_talk = false;
-
         // Default civilian life points are set on `NpcData::default()`
         // (in `element.rs`) to the engine's `CIVILIAN_LIFE_POINTS = 100`.
 
@@ -2158,19 +2143,7 @@ mod tests {
         let ai = FriendlyAi::new(99);
         assert_eq!(ai.base.me, 99);
         assert_eq!(ai.base.current_state, AiState::Default);
-        assert!(ai.wants_to_talk);
-        assert!(ai.can_go_away);
         assert_eq!(ai.beggar_dont_talk_counter, 0);
-    }
-
-    #[test]
-    fn dont_go_away() {
-        let mut ai = FriendlyAi::new(1);
-        assert!(ai.can_go_away);
-        ai.dont_go_away(true);
-        assert!(!ai.can_go_away);
-        ai.dont_go_away(false);
-        assert!(ai.can_go_away);
     }
 
     #[test]

@@ -1704,21 +1704,28 @@ impl EngineInner {
                     Some(a) => a,
                     None => continue,
                 };
-                // Check if this entity is in rider charging movement but
-                // hasn't been initialized yet.
-                if actor.active_rider_charge.is_some() || actor.rider_move_flags == 0 {
+                // Skip if already initialized.
+                if actor.active_rider_charge.is_some() {
                     continue;
                 }
-                // Only initialize if the action state indicates the charge animation.
-                // The RIDER_CHARGE_HIT flag sets the order to RiderCharging,
-                // which puts the entity in MovingFast with active path.
-                let has_charge_hit = actor.rider_move_flags
-                    & crate::sequence::MoveFlags::RIDER_CHARGE.bits() as u16
-                    != 0;
-                // Rider-charge gate: must carry the RIDER_CHARGE_HIT
-                // flag AND have an active Move element (the charge
-                // path is queued as orders on the Move element).
-                if !has_charge_hit || actor.active_movement.sequence_id.is_none() {
+                // Rider-charge gate: must have an active Move element
+                // whose flags carry `RIDER_CHARGE` (the charge path is
+                // queued as orders on the Move element).
+                let Some(seq_id) = actor.active_movement.sequence_id else {
+                    continue;
+                };
+                let elem_idx = actor.active_movement.element_index;
+                let has_charge_hit = self
+                    .sequence_manager
+                    .get_element(seq_id, elem_idx)
+                    .map(|e| match &e.data {
+                        crate::sequence::SequenceElementData::Movement { flags, .. } => {
+                            flags.contains(crate::sequence::MoveFlags::RIDER_CHARGE)
+                        }
+                        _ => false,
+                    })
+                    .unwrap_or(false);
+                if !has_charge_hit {
                     continue;
                 }
 

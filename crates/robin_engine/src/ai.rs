@@ -4317,9 +4317,6 @@ pub struct AiController {
     pub likes_to_sit_around: bool,
     pub special_action: bool,
 
-    // -- Drunkenness --
-    pub remaining_tequila_gulps: u8,
-
     pub friends_are_alerted: bool,
     pub is_stay_at_home: bool,
 
@@ -4332,10 +4329,6 @@ pub struct AiController {
 
     // -- House leaving order --
     pub leave_house_number: u16,
-
-    // -- Hint comparison --
-    pub last_hint_actuality: u32,
-    pub last_hint_subject: Question,
 
     // -- Objects --
     pub forgotten_objects: Vec<ObjectHandle>,
@@ -4366,7 +4359,6 @@ pub struct AiController {
     // -- Synchronizing actors --
     pub synchronizing_actors: Vec<NpcHandle>,
     pub default_path_walking_flags: GotoFlags,
-    pub looking_for_help_because_of_enemy_seen: bool,
 
     // -- Script-forbidden remarks --
     /// Remark IDs (as u32 indices into the Remark enum) that this NPC is
@@ -4880,7 +4872,6 @@ impl Default for AiController {
             already_turned: false,
             likes_to_sit_around: false,
             special_action: false,
-            remaining_tequila_gulps: 0,
             friends_are_alerted: false,
             is_stay_at_home: false,
             locks_flag_field: AiLockFlags::empty(),
@@ -4889,8 +4880,6 @@ impl Default for AiController {
             script_locked: false,
             remember_events: false,
             leave_house_number: 0,
-            last_hint_actuality: 0,
-            last_hint_subject: Question::ShallIStayOnMyPost,
             forgotten_objects: Vec::new(),
             object_of_desire: 0,
             checkpoint_charly: 0,
@@ -4902,7 +4891,6 @@ impl Default for AiController {
             inside_halt_method: false,
             synchronizing_actors: Vec::new(),
             default_path_walking_flags: GotoFlags::empty(),
-            looking_for_help_because_of_enemy_seen: false,
             forbidden_remark_ids: Vec::new(),
             initial_view_cone: ViewCone::Commandoslike,
             current_remark: Remark::TheSoundOfSilence,

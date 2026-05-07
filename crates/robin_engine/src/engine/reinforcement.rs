@@ -367,20 +367,6 @@ impl EngineInner {
                 }
             }
         }
-
-        // DETECTABLE_BODY tail: after broadcasting, stamp the target as
-        // "has been a body" so later resurrection / cleanup paths know
-        // to inform everyone.  The melee net-flow caller already sets
-        // this flag directly via `broadcast_body_detectable`, so today
-        // this arm is only reached by a future
-        // `AddDetectableForAllNPC(_, Body)` caller — wiring it now
-        // keeps the helper complete.
-        if det_type == DetectableType::Body
-            && let Some(entity) = self.get_entity_mut(element_id)
-            && let Some(human) = entity.human_data_mut()
-        {
-            human.has_already_been_detectable_body = true;
-        }
     }
 }
 
