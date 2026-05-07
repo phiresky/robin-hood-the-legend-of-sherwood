@@ -49,13 +49,14 @@ Tests and lints:
 ### WebAssembly (browser)
 
 The game builds for `wasm32-unknown-unknown` and uses `wasm-bindgen`
-browser glue.  Audio, `ffmpeg-next`, and OS-data-dir support are disabled
-for wasm builds. TODO: fix audio.
+browser glue.  Audio is enabled for wasm builds; `ffmpeg-next` and
+OS-data-dir support stay disabled.
 
     cargo build -Zbuild-std=std,panic_abort \
         --target wasm32-unknown-unknown \
         --profile wasm-dev            \
         --no-default-features         \
+        --features audio              \
         -p robin_rs --bin robin
 
 Swap `--profile wasm-dev` for `--profile wasm-release` for the smallest
@@ -111,6 +112,9 @@ The shell fetches `/wasm/latest.json` when no query parameter is present.  With
 artifact directory.  The game-data blob is not rebuilt by CI; build it
 locally and push it manually to
 `/datadirs/demo-leicester/v4-q80.rhdata.zst` in the binaries repo.
+Audio assets for the demo are published beside the wasm artifact and listed in
+`/wasm/<short-hash>/preload-assets.json`; the shell preloads those files into
+Rust before `wasm_boot` starts the synchronous game loop.
 Replay delivery itself remains handled by the existing browser/RPC path.
 Wasm logging defaults to `info`; add `?wasm-log=debug` (or `trace`,
 `warn`, `error`) to the URL to override it for browser sessions.

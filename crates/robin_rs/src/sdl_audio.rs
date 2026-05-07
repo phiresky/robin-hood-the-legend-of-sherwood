@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use crate::sound::AudioBackend;
 use crate::sound_cache::SampleLoader;
 
+#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};
 #[cfg(feature = "audio")]
 use kira::{
     AudioManager, AudioManagerSettings, DefaultBackend, Tween,
@@ -24,12 +26,18 @@ use kira::{
     sound::{
         FromFileError,
         static_sound::{StaticSoundData, StaticSoundHandle},
-        streaming::{StreamingSoundData, StreamingSoundHandle},
     },
     track::{SpatialTrackBuilder, SpatialTrackHandle},
 };
 #[cfg(feature = "audio")]
 use std::collections::HashMap;
+#[cfg(all(feature = "audio", target_arch = "wasm32"))]
+use std::io::Cursor;
+
+#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+type MusicHandle = StreamingSoundHandle<FromFileError>;
+#[cfg(all(feature = "audio", target_arch = "wasm32"))]
+type MusicHandle = StaticSoundHandle;
 
 /// kira-backed audio backend. Name preserved from the SDL backend so
 /// existing call sites (`SdlMixerBackend::new(...)`) keep compiling.
@@ -45,7 +53,7 @@ pub struct SdlMixerBackend {
     /// `None` means the slot is free.
     channels: Vec<Option<StaticSoundHandle>>,
     /// Music slot — independent from SFX channels.
-    music_handle: Option<StreamingSoundHandle<FromFileError>>,
+    music_handle: Option<MusicHandle>,
     /// `was_music_playing` — tracked so `take_music_finished` can edge-detect.
     was_music_playing: bool,
     /// Channel slot the active jingle occupies.
@@ -132,7 +140,7 @@ impl SdlMixerBackend {
             return Some(s.clone());
         }
         let path = self.resolve_path(file_name);
-        match StaticSoundData::from_file(&path) {
+        match load_static_sound(&path) {
             Ok(data) => {
                 self.sample_cache
                     .insert(file_name.to_string(), data.clone());
@@ -196,6 +204,17 @@ impl SdlMixerBackend {
             crate::sbfile::resolve_case_insensitive(&raw).unwrap_or(raw)
         }
     }
+}
+
+#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+fn load_static_sound(path: &Path) -> Result<StaticSoundData, FromFileError> {
+    StaticSoundData::from_file(path)
+}
+
+#[cfg(all(feature = "audio", target_arch = "wasm32"))]
+fn load_static_sound(path: &Path) -> Result<StaticSoundData, FromFileError> {
+    let bytes = robin_util::asset_fs::read(path).map_err(std::io::Error::other)?;
+    StaticSoundData::from_cursor(Cursor::new(bytes))
 }
 
 #[cfg(feature = "audio")]
@@ -296,6 +315,7 @@ impl AudioBackend for SdlMixerBackend {
 
     fn play_music(&mut self, path: &str, looping: bool) -> bool {
         let full_path = SdlMixerBackend::resolve_music_path(path);
+        #[cfg(not(target_arch = "wasm32"))]
         let data = match StreamingSoundData::from_file(&full_path) {
             Ok(data) => data,
             Err(e) => {
@@ -304,6 +324,14 @@ impl AudioBackend for SdlMixerBackend {
                     full_path.display(),
                     e
                 );
+                return false;
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let data = match load_static_sound(&full_path) {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::warn!("kira: load static music '{}': {}", full_path.display(), e);
                 return false;
             }
         };
@@ -374,7 +402,7 @@ impl AudioBackend for SdlMixerBackend {
 
     fn play_jingle(&mut self, path: &str) -> Option<i32> {
         let full_path = self.resolve_path(path);
-        let data = match StaticSoundData::from_file(&full_path) {
+        let data = match load_static_sound(&full_path) {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!("kira: load jingle '{}': {}", full_path.display(), e);
@@ -611,18 +639,18 @@ pub fn create_sample_loader(base_dir: PathBuf) -> Box<SampleLoader> {
         } else {
             base_dir.join(&normalised)
         };
-        let resolved = if path.exists() {
-            Some(path.clone())
-        } else if let Some(p) = crate::sbfile::resolve_case_insensitive(&path)
-            && p.exists()
-        {
-            Some(p)
-        } else {
-            let full = path.to_str().map(|s| s.to_string())?;
-            crate::sbfile::resolve_data_path(&full)
+        let data = match robin_util::asset_fs::read(&path) {
+            Ok(data) => data,
+            Err(_) => {
+                let resolved = if let Some(p) = crate::sbfile::resolve_case_insensitive(&path) {
+                    Some(p)
+                } else {
+                    let full = path.to_str().map(|s| s.to_string())?;
+                    crate::sbfile::resolve_data_path(&full)
+                };
+                robin_util::asset_fs::read(resolved?).ok()?
+            }
         };
-        let final_path = resolved?;
-        let data = std::fs::read(&final_path).ok()?;
         let size = data.len() as u32;
         let duration_ms = wav_duration_ms(&data).unwrap_or(0);
         Some((data, size, duration_ms))
