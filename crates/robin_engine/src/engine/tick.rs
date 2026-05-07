@@ -6027,6 +6027,8 @@ impl EngineInner {
                     y: door.point_mid.1,
                 }),
                 OT::TransitionClimbingWallDownWaitingUpright
+                | OT::TransitionClimbingLadderDownWaitingUpright
+                | OT::TransitionClimbingLadderDownWaitingUprightAlerted
                 | OT::TransitionClimbingWallUpWaitingCrouchedCrenel => None,
                 _ => return None,
             };
@@ -6035,6 +6037,10 @@ impl EngineInner {
                     (Posture::OnWall, ActionState::Moving)
                 }
                 OT::TransitionClimbingWallDownWaitingUpright => {
+                    (Posture::Upright, ActionState::Waiting)
+                }
+                OT::TransitionClimbingLadderDownWaitingUpright
+                | OT::TransitionClimbingLadderDownWaitingUprightAlerted => {
                     (Posture::Upright, ActionState::Waiting)
                 }
                 OT::TransitionClimbingWallUpWaitingCrouchedCrenel => {

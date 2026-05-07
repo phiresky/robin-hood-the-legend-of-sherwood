@@ -277,7 +277,7 @@ fn translate_ladder(ctx: &DoorPassContext) -> VecDeque<DoorPassStep> {
             } else {
                 OrderType::TransitionClimbingLadderDownWaitingUpright
             };
-            s.push_back(walk_nodir(ctx.point_mid, climb_end));
+            s.push_back(transition(climb_end));
             s.push_back(passing_door());
             if ctx.is_pc && ctx.sector_out_forces_crouch {
                 s.push_back(transition(OrderType::TransitionCrouchingDown));
@@ -391,8 +391,7 @@ fn translate_wall(ctx: &DoorPassContext) -> VecDeque<DoorPassStep> {
         } else {
             // Low, inside -> outside (climb DOWN)
             s.push_back(walk_nodir(ctx.point_mid, OrderType::ClimbingWallDown));
-            s.push_back(walk_nodir(
-                ctx.point_mid,
+            s.push_back(transition(
                 OrderType::TransitionClimbingWallDownWaitingUpright,
             ));
             s.push_back(passing_door());
