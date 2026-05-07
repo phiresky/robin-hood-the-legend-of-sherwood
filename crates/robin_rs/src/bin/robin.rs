@@ -199,6 +199,8 @@ pub fn wasm_boot(datadir_bin: &[u8]) -> Result<(), wasm_bindgen::JsValue> {
     let dd = std::sync::Arc::new(dd);
     let _ = robin_assets::shipping_datadir::install_global(dd.clone());
     let _ = robin_util::asset_fs::install_bundle(std::sync::Arc::new(dd.raw.clone()));
+    robin_rs::http_server::start_global(0)
+        .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("rpc init: {e}")))?;
 
     wasm_bindgen_futures::spawn_local(async move {
         if let Err(e) = wasm_main(dd).await {

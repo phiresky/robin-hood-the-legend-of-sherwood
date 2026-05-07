@@ -15,6 +15,7 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use clap::Parser;
+use serde::Deserialize;
 
 use crate::campaign::Campaign;
 
@@ -53,8 +54,9 @@ fn parse_replay_spec(s: &str) -> Result<String, String> {
 }
 
 /// Robin Hood — The Legend of Sherwood (Rust port)
-#[derive(Parser, Debug, Clone)]
+#[derive(Parser, Debug, Clone, Deserialize)]
 #[command(version, about)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct CliArgs {
     /// Disable audio playback.
     #[arg(long)]
@@ -108,6 +110,15 @@ pub struct CliArgs {
     /// The replay's header picks the mission to load.
     #[arg(long, value_parser = parse_replay_spec)]
     pub replay: Option<String>,
+
+    /// Decoded replay payload supplied by the wasm shell over script RPC.
+    ///
+    /// Kept separate from `replay` so the engine can be seeded before
+    /// construction without serializing an already-decoded replay back
+    /// into a command-line string.
+    #[arg(skip)]
+    #[serde(skip)]
+    pub replay_data: Option<robin_engine::replay::ReplayData>,
 
     /// Runtime rollback consistency checker: rewind a short window of
     /// engine state and re-simulate it to detect desyncs.
@@ -231,7 +242,47 @@ pub struct CliArgs {
     /// Runtime startup options consumed by engine/UI layers that have
     /// not been threaded through `CliArgs` directly.
     #[clap(skip)]
+    #[serde(skip)]
     pub global_options: robin_engine::engine::GlobalOptions,
+}
+
+impl Default for CliArgs {
+    fn default() -> Self {
+        let mut args = Self {
+            no_sound: false,
+            no_script: false,
+            goldeneye: false,
+            highlander2: false,
+            no_fog: false,
+            whatsup: false,
+            no_default_loose: false,
+            record_default_key_config: false,
+            check_sound_data: false,
+            view_cones: false,
+            record: None,
+            replay: None,
+            replay_data: None,
+            rollback_check: true,
+            sherwood: false,
+            force_main_menu: false,
+            mission: None,
+            proto: None,
+            lobby_server: None,
+            http_server: crate::http_server::DEFAULT_PORT,
+            fast_forward: false,
+            headless: false,
+            start_paused: false,
+            wait_for_command: false,
+            server: None,
+            connect: None,
+            mp_start_at_epoch_ms: None,
+            mp_expected_players: None,
+            mp_nickname: String::new(),
+            global_options: robin_engine::engine::GlobalOptions::default(),
+        };
+        install_global_options(&mut args);
+        args
+    }
 }
 
 fn install_global_options(args: &mut CliArgs) {
@@ -273,8 +324,60 @@ where
     try_parse_cli_from(itr).unwrap_or_else(|e| e.exit())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn parse_cli() -> CliArgs {
     parse_cli_from(std::env::args_os())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn parse_cli() -> CliArgs {
+    wasm_cli_args_from_location()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wasm_cli_args_from_location() -> CliArgs {
+    let query = web_sys::window()
+        .and_then(|window| window.location().search().ok())
+        .unwrap_or_default();
+    let query = query.strip_prefix('?').unwrap_or(&query);
+    let query = normalize_wasm_query(query);
+    let mut args = match serde_urlencoded::from_str::<CliArgs>(&query) {
+        Ok(args) => args,
+        Err(e) => {
+            tracing::warn!("invalid wasm URL options: {e}; using defaults");
+            CliArgs::default()
+        }
+    };
+    if args.replay.is_some() {
+        // URL replays are loaded by the shell over RPC after Rust has
+        // finished initialization, so the mission header can choose the
+        // correct mission without racing demo auto-start.
+        args.wait_for_command = true;
+        args.replay = None;
+    }
+    install_global_options(&mut args);
+    args
+}
+
+#[cfg(target_arch = "wasm32")]
+fn normalize_wasm_query(query: &str) -> String {
+    query
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let Some((key, value)) = part.split_once('=') else {
+                return format!("{}=true", part.replace('_', "-"));
+            };
+            let key = key.replace('_', "-");
+            let value = match value {
+                "" | "1" | "yes" | "on" => "true",
+                "0" | "no" | "off" => "false",
+                _ => value,
+            };
+            format!("{key}={value}")
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 #[cfg(test)]
@@ -1463,11 +1566,11 @@ pub async fn run_rust_game(
     shipping: Option<std::sync::Arc<robin_assets::shipping_datadir::ShippingDatadir>>,
     args: &CliArgs,
 ) -> Result<i32, String> {
-    // Bring up the script-RPC HTTP listener (loopback only). Default
-    // port 17640; pass `--http-server 0` to disable. The handle lives
-    // in a process-global so the per-tick drain in `game_session` can
-    // reach it without threading the queue through every signature.
-    #[cfg(not(target_arch = "wasm32"))]
+    // Bring up the script-RPC transport. Native binds a loopback HTTP
+    // listener; wasm installs the in-process JS bridge queue. The
+    // handle lives in a process-global so the per-tick drain in
+    // `game_session` can reach it without threading the queue through
+    // every signature.
     crate::http_server::start_global(args.http_server)?;
 
     // `--headless` previously routed SDL through its dummy video/audio
@@ -1495,12 +1598,12 @@ pub async fn run_rust_game(
     // Data is fully loaded at this point (`rust_init` ran before
     // `run_rust_game`), so we just spin on the pending-replay slot
     // while pumping SDL events.  When a replay lands, its header
-    // picks the mission and we fall through to `run_mission` (which
-    // `take_pending_replay`s the slot inside
-    // `init_replay_and_rollback`).  Skips every auto-start branch
-    // below (demo / sherwood / --replay / menu) by design — the whole
-    // point is to let the JS side drive mission selection without
-    // racing a hard-coded default.
+    // picks the mission, then we move the decoded replay into
+    // `CliArgs::replay_data` before `run_mission` so engine
+    // construction can use the recording's RNG seed. Skips every
+    // auto-start branch below (demo / sherwood / --replay / menu) by
+    // design — the whole point is to let the JS side drive mission
+    // selection without racing a hard-coded default.
     if wait_for_command {
         tracing::info!("--wait-for-command: data loaded, idling until load-replay RPC arrives");
         let mission_id = wait_for_replay_command(window).await;
@@ -1547,6 +1650,12 @@ pub async fn run_rust_game(
         }
         campaign.add_all_to_mission_team();
         campaign.current_mission_idx = Some(idx);
+        let Some(pending) = crate::http_server::take_pending_replay() else {
+            return Err("--wait-for-command: replay disappeared before mission start".into());
+        };
+        let mut replay_args = args.clone();
+        replay_args.replay_data = Some(pending.data);
+        replay_args.start_paused = replay_args.start_paused || pending.paused;
         let mut callbacks = RustCallbacks::new();
         run_mission(
             window,
@@ -1555,7 +1664,7 @@ pub async fn run_rust_game(
             &profiles,
             idx,
             location,
-            args,
+            &replay_args,
         )
         .await?;
         return Ok(0);

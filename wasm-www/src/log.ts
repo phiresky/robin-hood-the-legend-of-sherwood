@@ -14,6 +14,7 @@ const ANSI_COLORS: Record<number, string> = {
 };
 
 const ANSI_RE = /\x1b\[([\d;]*)m/g;
+const MAX_LOG_LINES = 600;
 
 function ansiStyleFor(codes: number[]): string {
     let s = '';
@@ -74,5 +75,8 @@ export function appendLogLine(
     }
     flush(msg.length);
     target.appendChild(line);
+    while (target.childElementCount > MAX_LOG_LINES) {
+        target.firstElementChild?.remove();
+    }
     target.scrollTop = target.scrollHeight;
 }

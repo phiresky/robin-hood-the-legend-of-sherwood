@@ -1,4 +1,6 @@
 import { appendLogLine } from './log.js';
+import { applyReplayFromQuery, installShareButton, type RobinRpc } from './replay.js';
+import { installTimeline } from './timeline.js';
 
 declare global {
     // Optional test/dev override for loading binaries from a local checkout.
@@ -16,6 +18,7 @@ declare global {
 type BuildSelection = {
     readonly short: string;
     readonly source: 'latest' | 'replay';
+    readonly buildBase?: string;
 };
 
 type BuildManifest = {
@@ -24,7 +27,7 @@ type BuildManifest = {
 };
 
 type RobinWasmModule = {
-    readonly default: (moduleOrPath?: string | URL | Request) => Promise<unknown>;
+    readonly default: (init?: { module_or_path?: string | URL | Request }) => Promise<unknown>;
     readonly wasm_boot: (datadir: Uint8Array) => void;
     readonly wasm_preload_asset?: (path: string, bytes: Uint8Array) => void;
     readonly rh_rpc_enqueue?: (id: number, json: Uint8Array) => void;
@@ -38,7 +41,10 @@ type PreloadEntry = string | {
 const DEFAULT_BINARIES_BASE = import.meta.env.DEV
     ? window.location.origin
     : 'https://phiresky.github.io/robin-hood-the-legend-of-sherwood-remake-binaries';
+const pageParams = new URLSearchParams(window.location.search);
 const BINARIES_BASE =
+    pageParams.get('binaries-base') ??
+    pageParams.get('binaries_base') ??
     globalThis.ROBIN_WASM_BINARIES_BASE ??
     DEFAULT_BINARIES_BASE;
 const WASM_BUILDS_BASE = `${BINARIES_BASE}/wasm`;
@@ -49,6 +55,9 @@ const logEl = document.querySelector<HTMLDivElement>('#log');
 if (logEl === null) {
     throw new Error('main.ts: missing #log element in index.html');
 }
+const shareReplayButton = document.querySelector<HTMLButtonElement>('#share-replay');
+const fullscreenButton = document.querySelector<HTMLButtonElement>('#fullscreen');
+const replayTimeline = document.querySelector<HTMLDivElement>('#replay-timeline');
 
 const logOk = (t: string): void => appendLogLine(logEl, t);
 const logErr = (t: string): void => appendLogLine(logEl, t, 'err');
@@ -57,6 +66,9 @@ const rpcPending = new Map<number, {
     readonly reject: (reason?: unknown) => void;
 }>();
 let nextRpcId = 1;
+
+installConsoleMirror(logEl);
+installFullscreenButton(fullscreenButton);
 
 globalThis.rh_rpc_resolve = (
     id: number,
@@ -91,6 +103,84 @@ function parseRpcBody(contentType: string, body: string | Uint8Array): unknown {
     return body;
 }
 
+function installConsoleMirror(target: HTMLElement): void {
+    const pendingLines: Array<{ text: string; cls?: 'err' }> = [];
+    let flushScheduled = false;
+    const flush = (): void => {
+        flushScheduled = false;
+        for (const { text, cls } of pendingLines.splice(0)) {
+            appendLogLine(target, text, cls);
+        }
+    };
+    const enqueue = (text: string, cls?: 'err'): void => {
+        pendingLines.push(cls === undefined ? { text } : { text, cls });
+        if (!flushScheduled) {
+            flushScheduled = true;
+            requestAnimationFrame(flush);
+        }
+    };
+
+    const methods = ['log', 'info', 'warn', 'error'] as const;
+    for (const method of methods) {
+        const original = console[method].bind(console);
+        console[method] = (...args: unknown[]): void => {
+            original(...args);
+            const line = formatConsoleArgs(args);
+            enqueue(line, method === 'error' ? 'err' : undefined);
+        };
+    }
+}
+
+function formatConsoleArgs(args: readonly unknown[]): string {
+    const [first, ...rest] = args;
+    if (typeof first === 'string' && first.includes('%c')) {
+        const styleArgCount = first.match(/%c/g)?.length ?? 0;
+        const message = first.replaceAll('%c', '');
+        const remaining = rest.slice(styleArgCount);
+        return [message, ...remaining].map(formatConsoleArg).join(' ');
+    }
+    return args.map(formatConsoleArg).join(' ');
+}
+
+function formatConsoleArg(arg: unknown): string {
+    if (typeof arg === 'string') {
+        return arg;
+    }
+    if (arg instanceof Error) {
+        return arg.message;
+    }
+    try {
+        return JSON.stringify(arg);
+    } catch {
+        return String(arg);
+    }
+}
+
+function installFullscreenButton(button: HTMLButtonElement | null): void {
+    if (button === null) {
+        return;
+    }
+    const canvas = document.querySelector<HTMLCanvasElement>('#canvas');
+    button.addEventListener('click', () => {
+        void (async (): Promise<void> => {
+            try {
+                if (document.fullscreenElement !== null) {
+                    await document.exitFullscreen();
+                } else {
+                    await (canvas ?? document.documentElement).requestFullscreen();
+                }
+            } catch (e) {
+                console.error('fullscreen failed:', e);
+            }
+        })();
+    });
+    document.addEventListener('fullscreenchange', () => {
+        const active = document.fullscreenElement !== null;
+        button.textContent = active ? 'Exit fullscreen' : 'Fullscreen';
+        button.title = active ? 'Exit fullscreen' : 'Enter fullscreen';
+    });
+}
+
 async function fetchJson(url: string): Promise<BuildManifest> {
     const resp = await fetch(url, { cache: 'no-cache' });
     if (!resp.ok) {
@@ -111,8 +201,16 @@ function replayBuildHash(replay: string): string {
 }
 
 async function resolveBuild(): Promise<BuildSelection> {
-    const params = new URLSearchParams(window.location.search);
-    const replay = params.get('replay');
+    const wasmBase = pageParams.get('wasm-base') ?? pageParams.get('wasm_base');
+    if (wasmBase !== null && wasmBase.length > 0) {
+        return {
+            short: 'local',
+            source: 'latest',
+            buildBase: new URL(wasmBase, window.location.href).toString().replace(/\/$/, ''),
+        };
+    }
+
+    const replay = pageParams.get('replay');
     if (replay !== null && replay.length > 0) {
         const hash = replayBuildHash(replay);
         return { short: hash, source: 'replay' };
@@ -128,13 +226,12 @@ async function resolveBuild(): Promise<BuildSelection> {
 
 async function main(): Promise<void> {
     const build = await resolveBuild();
-    const buildBase = `${WASM_BUILDS_BASE}/${build.short}`;
+    const buildBase = build.buildBase ?? `${WASM_BUILDS_BASE}/${build.short}`;
     logOk(`[selected ${build.source} build ${build.short}]`);
 
     logOk('[loading wasm module]');
     const wasm = await import(/* @vite-ignore */ `${buildBase}/robin.js`) as RobinWasmModule;
-    await wasm.default(`${buildBase}/robin_bg.wasm`);
-    installRpcClient(wasm);
+    await wasm.default({ module_or_path: `${buildBase}/robin_bg.wasm` });
 
     logOk('[wasm module ready, fetching datadir]');
 
@@ -150,20 +247,36 @@ async function main(): Promise<void> {
 
     await preloadAssets(wasm, buildBase, build.source === 'latest');
 
+    const rpc = installRpcClient(wasm);
+
     wasm.wasm_boot(new Uint8Array(buf));
     logOk('[handed off to Rust - winit drives rAF from here]');
+    await waitForRpcBridge(rpc);
+    if (shareReplayButton !== null) {
+        installShareButton(shareReplayButton, rpc);
+    }
+    const replayLoaded = await applyReplayFromQuery(rpc);
+    if (replayLoaded) {
+        logOk('[replay queued from URL - start a mission to play it back]');
+        if (replayTimeline !== null && !new URL(location.href).searchParams.has('notimeline')) {
+            installTimeline(replayTimeline, rpc);
+        }
+    }
 }
 
-function installRpcClient(wasm: RobinWasmModule): void {
+function installRpcClient(wasm: RobinWasmModule): RobinRpc {
     if (wasm.rh_rpc_enqueue === undefined) {
-        return;
+        throw new Error('wasm module does not export rh_rpc_enqueue');
     }
     const encoder = new TextEncoder();
-    globalThis.robinRpc = (method: string, params: unknown = null): Promise<unknown> => {
+    const rpc: RobinRpc = <T = unknown>(method: string, params: unknown = null): Promise<T> => {
         const id = nextRpcId++;
         const payload = encoder.encode(JSON.stringify({ method, params }));
         return new Promise((resolve, reject) => {
-            rpcPending.set(id, { resolve, reject });
+            rpcPending.set(id, {
+                resolve: resolve as (value: unknown) => void,
+                reject,
+            });
             try {
                 wasm.rh_rpc_enqueue?.(id, payload);
             } catch (e) {
@@ -172,6 +285,12 @@ function installRpcClient(wasm: RobinWasmModule): void {
             }
         });
     };
+    globalThis.robinRpc = rpc;
+    return rpc;
+}
+
+async function waitForRpcBridge(rpc: RobinRpc): Promise<void> {
+    await rpc('info');
 }
 
 async function preloadAssets(
@@ -219,7 +338,7 @@ async function preloadAssets(
 }
 
 main().catch((e: unknown) => {
-    const msg = e instanceof Error ? e.stack ?? e.message : String(e);
+    const msg = e instanceof Error ? e.message : String(e);
     // eslint-disable-next-line no-console
     console.error(msg);
     logErr(`[boot failed] ${msg}`);

@@ -752,7 +752,7 @@ impl ApplicationHandler for AppHandler {
             {
                 self.resize_refresh_frames = 30;
             }
-            event_loop.set_control_flow(ControlFlow::Poll);
+            set_game_control_flow(event_loop);
             return;
         }
         let attrs = winit::window::Window::default_attributes()
@@ -800,7 +800,7 @@ impl ApplicationHandler for AppHandler {
         // future is fine because the thread can sleep.
         (self.on_window_ready)(window);
 
-        event_loop.set_control_flow(ControlFlow::Poll);
+        set_game_control_flow(event_loop);
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -1034,6 +1034,26 @@ impl ApplicationHandler for AppHandler {
     }
 }
 
+fn set_game_control_flow(event_loop: &impl EventLoopControlFlow) {
+    event_loop.set_control_flow(ControlFlow::Wait);
+}
+
+trait EventLoopControlFlow {
+    fn set_control_flow(&self, control_flow: ControlFlow);
+}
+
+impl EventLoopControlFlow for ActiveEventLoop {
+    fn set_control_flow(&self, control_flow: ControlFlow) {
+        ActiveEventLoop::set_control_flow(self, control_flow);
+    }
+}
+
+impl<T> EventLoopControlFlow for EventLoop<T> {
+    fn set_control_flow(&self, control_flow: ControlFlow) {
+        EventLoop::set_control_flow(self, control_flow);
+    }
+}
+
 // ---------------------------------------------------------------------
 // Public entry: run a game future under a winit ApplicationHandler.
 // ---------------------------------------------------------------------
@@ -1102,7 +1122,7 @@ where
         #[cfg(target_os = "android")]
         android_app,
     )?;
-    event_loop.set_control_flow(ControlFlow::Poll);
+    set_game_control_flow(&event_loop);
 
     let (events_tx, events_rx) = async_channel::unbounded::<HostMsg>();
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<HostCmd>();

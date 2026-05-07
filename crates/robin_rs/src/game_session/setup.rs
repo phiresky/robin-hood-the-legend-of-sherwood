@@ -1212,11 +1212,13 @@ pub(super) fn load_level_and_sprite_bank(
 
     // Resolve the engine's initial RNG seed before construction so
     // `Engine::new` is the only site that touches RNG state during
-    // setup.  Priority: `--replay` header seed (so the recording's
-    // recorded actions reproduce its recorded state) > the
-    // multiplayer-negotiated `mp_mission_seed` > the hardcoded
-    // single-player default of 0.
-    let rng_seed = if let Some(spec) = args.replay.as_deref() {
+    // setup.  Priority: already-decoded RPC replay > `--replay`
+    // header seed (so the recording's recorded actions reproduce its
+    // recorded state) > the multiplayer-negotiated `mp_mission_seed`
+    // > the hardcoded single-player default of 0.
+    let rng_seed = if let Some(data) = args.replay_data.as_ref() {
+        data.header.rng_seed
+    } else if let Some(spec) = args.replay.as_deref() {
         match crate::replay_format::load_replay_spec(spec) {
             Ok(data) => data.header.rng_seed,
             Err(e) => {

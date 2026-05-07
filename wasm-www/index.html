@@ -30,10 +30,50 @@
             border-top: 1px solid #333;
         }
         .err { color: #f77; }
+        #replay-timeline {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-top: 1px solid #333;
+            background: #1a1a1a;
+            font-size: 12px;
+        }
+        #replay-timeline .timeline-scrub { flex: 1; }
+        #replay-timeline .timeline-time {
+            min-width: 5ch;
+            font-variant-numeric: tabular-nums;
+        }
+        #toolbar {
+            display: flex;
+            gap: 8px;
+            padding: 6px 8px;
+            border-top: 1px solid #333;
+            background: #1a1a1a;
+        }
+        #toolbar button {
+            background: #333;
+            color: #eee;
+            border: 1px solid #555;
+            padding: 4px 10px;
+            font: inherit;
+            cursor: pointer;
+        }
+        #toolbar button:hover:not(:disabled) { background: #444; }
+        #toolbar button:disabled { opacity: .5; cursor: default; }
     </style>
 </head>
 <body>
     <canvas id="canvas" width="1024" height="768"></canvas>
+    <div id="replay-timeline"></div>
+    <div id="toolbar">
+        <button id="share-replay" type="button" title="Copy a shareable URL of the current replay">
+            Share replay
+        </button>
+        <button id="fullscreen" type="button" title="Enter fullscreen">
+            Fullscreen
+        </button>
+    </div>
     <div id="log"></div>
     <script type="module" src="./src/main.ts"></script>
 </body>

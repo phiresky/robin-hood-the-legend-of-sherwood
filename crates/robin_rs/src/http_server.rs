@@ -112,6 +112,8 @@ pub enum HttpPayload {
     Console(String),
     /// `POST /command` — apply a PlayerCommand to the engine.
     Command(PlayerCommand),
+    /// `GET /state` / `robin.call("state")` — compact frame/replay status.
+    State,
     /// `GET /engine-dump` — full serialized engine for ad-hoc debug.
     EngineDump,
     /// `GET /script` — class/function listing for the mission script.
@@ -334,6 +336,7 @@ fn run_listener(server: tiny_http::Server, queue: Queue) {
         let (code, body): (u16, ReplyBody) = match (&method, path.as_str()) {
             (Method::Get, "/") | (Method::Get, "/info") => (200, info_json().into()),
             (Method::Get, "/natives") => (200, list_natives_json().into()),
+            (Method::Get, "/state") => relay(&queue, HttpPayload::State),
             (Method::Get, "/engine-dump") => relay(&queue, HttpPayload::EngineDump),
             (Method::Get, "/script") => relay(&queue, HttpPayload::Script),
             (Method::Get, "/script/decompile") => {
@@ -790,6 +793,7 @@ fn dispatch_in_engine(
             }
             Ok(ReplyBody::Json(serde_json::json!({"ok": true})))
         }
+        HttpPayload::State => Ok(ReplyBody::Json(snapshot_state(engine))),
         HttpPayload::EngineDump => engine_dump_json(engine)
             .map(ReplyBody::Json)
             .map_err(|e| format!("engine serialize: {e}")),
@@ -811,6 +815,20 @@ fn dispatch_in_engine(
         },
         HttpPayload::LoadReplay { data, paused } => decode_load_replay(&data, paused),
     }
+}
+
+fn snapshot_state(engine: &Engine) -> serde_json::Value {
+    let replay = replay_status().map(|s| {
+        serde_json::json!({
+            "frame": s.frame,
+            "total": s.total,
+        })
+    });
+    serde_json::json!({
+        "frame": engine.frame_counter(),
+        "map": engine.mission_map_name(),
+        "replay": replay,
+    })
 }
 
 fn engine_dump_json(engine: &Engine) -> Result<serde_json::Value, String> {
@@ -894,8 +912,7 @@ pub fn set_pending_replay(p: PendingReplay) {
         .expect("pending replay poisoned") = Some(p);
 }
 
-/// Take the pending replay, leaving the slot empty.  Called once at
-/// the top of [`crate::game_session::init_replay_and_rollback`].
+/// Take the pending replay, leaving the slot empty.
 pub fn take_pending_replay() -> Option<PendingReplay> {
     pending_replay_slot()
         .lock()
@@ -907,7 +924,7 @@ pub fn take_pending_replay() -> Option<PendingReplay> {
 /// stamped into the replay header, e.g. `"Dem_Lei_MP"`) without
 /// consuming the slot.  Used by `--wait-for-command` to pick which
 /// mission to launch; [`take_pending_replay`] consumes the slot
-/// later inside `init_replay_and_rollback`.
+/// later before mission startup.
 pub fn peek_pending_replay_mission_id() -> Option<String> {
     pending_replay_slot()
         .lock()
@@ -1406,6 +1423,7 @@ pub mod wasm_rpc {
 
         match method {
             "script" => Ok(HttpPayload::Script),
+            "state" => Ok(HttpPayload::State),
             "decompile" => {
                 #[derive(serde::Deserialize, Default)]
                 #[serde(default)]

@@ -87,15 +87,15 @@ pub(super) fn init_replay_and_rollback(
     engine_rng_seed: u64,
     is_multiplayer: bool,
 ) -> ReplayAndRollback {
-    // A `load-replay` RPC call takes precedence over `--replay`: the
-    // user asked us explicitly, live, to play this data.  `paused` is
-    // surfaced through `replay_pause_override` so the caller in
-    // `run_mission` can OR it into `manual_pause`.
+    // A `load-replay` RPC call normally gets converted into
+    // `args.replay_data` before mission construction. Keep this
+    // fallback for true mid-session / restart flows that queue a
+    // replay against an already-built mission.
     let pending = crate::http_server::take_pending_replay();
     let pending_paused = pending.as_ref().is_some_and(|p| p.paused);
 
     // No recording while playing back (either source).
-    let is_playing_back = pending.is_some() || args.replay.is_some();
+    let is_playing_back = pending.is_some() || args.replay_data.is_some() || args.replay.is_some();
     // The script-RPC `get-replay` endpoint serves a byte-for-byte
     // mirror of the recorder's output.  Reset it here (fresh mission =
     // fresh buffer) and tee every recorder write into it via
@@ -171,14 +171,19 @@ pub(super) fn init_replay_and_rollback(
             p.data.header.rng_seed,
             p.paused,
         );
-        // `pending` is the mid-session `load-replay` RPC path: the
-        // engine is already up and running with whatever RNG state the
-        // current mission produced, so we DO need to override here to
-        // reproduce the recording.  The `--replay` startup path does
-        // not need this — `Engine::new` was already constructed with
-        // `EngineArgs::rng_seed` set to the recording's header seed.
         engine.restore_rng_from_seed(p.data.header.rng_seed);
         Some(crate::replay::ReplayPlayer::new(p.data))
+    } else if let Some(data) = args.replay_data.clone() {
+        tracing::info!(
+            "Loaded replay (decoded): mission `{}`, {} frames, seed {}",
+            data.header.mission_id,
+            data.frame_count(),
+            data.header.rng_seed,
+        );
+        // No restore_rng_from_seed here: see EngineArgs setup in
+        // `load_level_and_sprite_bank` — the engine RNG was already
+        // seeded at construction with this header's seed.
+        Some(crate::replay::ReplayPlayer::new(data))
     } else {
         args.replay
             .as_ref()
