@@ -9,10 +9,10 @@ use crate::game::Game;
 use crate::game_render::{
     apply_ambiance_overlay, render_bg_animations_gpu, render_combat_status_bars,
     render_debug_animation_lines, render_debug_doors, render_debug_motion_graph,
-    render_debug_whatsup_overlay, render_door_overlays, render_entities_gpu, render_ground_marks,
-    render_listen_ping, render_minimap, render_noise_display, render_ransom_amulet_overlay,
-    render_selection_outlines_gpu, render_shadow_polygon_sphere_debug, render_trajectory_preview,
-    render_view_cone_overlay,
+    render_debug_surfaces, render_debug_whatsup_overlay, render_door_overlays, render_entities_gpu,
+    render_ground_marks, render_listen_ping, render_minimap, render_noise_display,
+    render_ransom_amulet_overlay, render_selection_outlines_gpu,
+    render_shadow_polygon_sphere_debug, render_trajectory_preview, render_view_cone_overlay,
 };
 use crate::geo2d;
 use crate::host::PrintScreenRequest;
@@ -852,6 +852,13 @@ pub(super) fn render_frame(
     // console cheat "euler"). Draws graph edges + node corner stubs
     // at PC[0]'s pathfinder/half-diagonal index.
     render_debug_motion_graph(host, engine, assets, dev, renderer);
+
+    // ── GPU phase: surface debug overlay ──
+    // Toggle: console cheat `SURFACE` or `--debug-surfaces` CLI flag.
+    // Outlines every walkable `MotionArea` polygon, highlights the
+    // selected character's current surface, and draws their committed
+    // path waypoints colored by destination surface.
+    render_debug_surfaces(host, engine, assets, dev, renderer);
 
     // ── GPU phase: per-NPC "whatsup" debug overlay ──
     // Gated on `GlobalOptions::whatsup` so it is off by default.

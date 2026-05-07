@@ -2205,6 +2205,238 @@ pub(crate) fn render_debug_motion_graph(
     );
 }
 
+// ─── Debug surfaces overlay ──────────────────────────────────────────
+
+/// Hash a `(layer, area)` pair to a stable RGB color.  Uses a Wang-style
+/// integer hash to spread adjacent indices across the hue circle so
+/// neighbouring areas get visually distinct colors.
+fn surface_color(layer: u16, area: u16) -> (u8, u8, u8) {
+    let mut h = (layer as u32).wrapping_mul(0x9E3779B1) ^ (area as u32).wrapping_mul(0x85EBCA77);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7FEB352D);
+    h ^= h >> 15;
+    let hue = (h & 0xFF) as f32 / 255.0;
+    // HSV → RGB with fixed S=0.7, V=0.9.
+    let (s, v) = (0.7_f32, 0.9_f32);
+    let i = (hue * 6.0).floor() as i32;
+    let f = hue * 6.0 - i as f32;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - f * s);
+    let t = v * (1.0 - (1.0 - f) * s);
+    let (r, g, b) = match i.rem_euclid(6) {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+}
+
+/// Ray-casting point-in-polygon (mirrors `pathfinder::point_in_polygon`).
+fn point_in_polygon_world(
+    pt: robin_engine::geo2d::Point2D,
+    verts: &[robin_engine::geo2d::Point2D],
+) -> bool {
+    if verts.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let n = verts.len();
+    let mut j = n - 1;
+    for i in 0..n {
+        let vi = verts[i];
+        let vj = verts[j];
+        if (vi.y > pt.y) != (vj.y > pt.y) {
+            let x_intersect = (vj.x - vi.x) * (pt.y - vi.y) / (vj.y - vi.y) + vi.x;
+            if pt.x < x_intersect {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Locate the `(layer, area_index)` of a world-space point by scanning
+/// every motion area on every layer.  Returns `None` if the point is
+/// outside every walkable area.
+fn locate_surface(
+    move_layers: &[Vec<robin_engine::pathfinder::MotionArea>],
+    pt: robin_engine::geo2d::Point2D,
+) -> Option<(u16, u16)> {
+    for (layer_idx, areas) in move_layers.iter().enumerate() {
+        for area in areas {
+            if point_in_polygon_world(pt, &area.polygon) {
+                return Some((layer_idx as u16, area.area_index));
+            }
+        }
+    }
+    None
+}
+
+/// Draw a closed polyline outline on the GPU layer.
+fn draw_polygon_outline_world(
+    renderer: &mut Renderer,
+    verts: &[robin_engine::geo2d::Point2D],
+    world_to_screen: &dyn Fn(robin_engine::geo2d::Point2D) -> (i32, i32),
+    r: u8,
+    g: u8,
+    b: u8,
+) {
+    if verts.len() < 2 {
+        return;
+    }
+    for i in 0..verts.len() {
+        let a = verts[i];
+        let bp = verts[(i + 1) % verts.len()];
+        let (x1, y1) = world_to_screen(a);
+        let (x2, y2) = world_to_screen(bp);
+        renderer.render_gpu_line(x1, y1, x2, y2, r, g, b);
+    }
+}
+
+/// Fill a polygon via fan triangulation from vertex 0.  Correct for
+/// star-shaped polygons w.r.t. vertex 0; on arbitrary concave polys
+/// the fill may slightly overshoot — acceptable for a debug overlay
+/// since the outline is also drawn and gives the precise shape.
+fn fill_polygon_world(
+    renderer: &mut Renderer,
+    verts: &[robin_engine::geo2d::Point2D],
+    world_to_screen: &dyn Fn(robin_engine::geo2d::Point2D) -> (f32, f32),
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+) {
+    if verts.len() < 3 {
+        return;
+    }
+    let p0 = world_to_screen(verts[0]);
+    for i in 1..verts.len() - 1 {
+        let p1 = world_to_screen(verts[i]);
+        let p2 = world_to_screen(verts[i + 1]);
+        renderer.render_gpu_triangle([p0, p1, p2], r, g, b, a);
+    }
+}
+
+/// Render the surface debug overlay (`SURFACE` cheat / `--debug-surfaces`).
+///
+/// Draws:
+/// - Every `MotionArea` polygon outline on every layer in a hashed color.
+/// - Active obstacle polygon outlines in red.
+/// - The selected character's current surface filled translucent yellow
+///   and outlined bright yellow.
+/// - The committed path waypoints as a polyline starting from the
+///   character's current position; each segment colored by the surface
+///   its endpoint waypoint lies on.  An X marker is drawn at every
+///   waypoint to make transitions between surfaces visible.
+pub(crate) fn render_debug_surfaces(
+    host: &Host,
+    engine: &Engine,
+    assets: &LevelAssets,
+    dev: &robin_engine::engine::DevState,
+    renderer: &mut Renderer,
+) {
+    if !dev.debug.surface_display {
+        return;
+    }
+
+    let view = host.viewport.view_position;
+    let zoom = host.viewport.zoom_factor;
+    let screen_size = host.viewport.screen_size;
+    if zoom <= 0.0 || screen_size.x <= 0.0 || screen_size.y <= 0.0 {
+        return;
+    }
+
+    let to_screen_f = move |p: robin_engine::geo2d::Point2D| -> (f32, f32) {
+        ((p.x - view.x) * zoom, (p.y - view.y) * zoom)
+    };
+    let to_screen_i = move |p: robin_engine::geo2d::Point2D| -> (i32, i32) {
+        let (sx, sy) = ((p.x - view.x) * zoom, (p.y - view.y) * zoom);
+        (sx.round() as i32, sy.round() as i32)
+    };
+
+    let static_data = &assets.pathfinder_graph.static_data;
+    let move_layers = &static_data.move_layers;
+
+    // Locate the selected character's surface (if any).
+    let local_seat = host.local_seat;
+    let selected_id = engine.seat_selection(local_seat).first().copied();
+    let selected_layer_area = selected_id
+        .and_then(|id| engine.get_entity(id))
+        .and_then(|e| {
+            let ed = e.element_data();
+            let layer = ed.layer();
+            let pos3 = ed.position();
+            let pos2 = robin_engine::geo2d::pt(pos3.x, pos3.y);
+            move_layers.get(layer as usize).and_then(|areas| {
+                areas
+                    .iter()
+                    .find(|a| point_in_polygon_world(pos2, &a.polygon))
+                    .map(|a| (layer, a.area_index))
+            })
+        });
+
+    // Pass 1: outline every walkable area, plus active obstacles within.
+    for (layer_idx, areas) in move_layers.iter().enumerate() {
+        for area in areas {
+            let (r, g, b) = surface_color(layer_idx as u16, area.area_index);
+            draw_polygon_outline_world(renderer, &area.polygon, &to_screen_i, r, g, b);
+            for obstacle in &area.motion_obstacles {
+                if !obstacle.active {
+                    continue;
+                }
+                draw_polygon_outline_world(renderer, &obstacle.polygon, &to_screen_i, 200, 40, 40);
+            }
+        }
+    }
+
+    // Pass 2: highlight the selected character's surface.
+    if let Some((sel_layer, sel_area)) = selected_layer_area {
+        if let Some(area) = move_layers
+            .get(sel_layer as usize)
+            .and_then(|areas| areas.iter().find(|a| a.area_index == sel_area))
+        {
+            fill_polygon_world(renderer, &area.polygon, &to_screen_f, 255, 255, 0, 80);
+            draw_polygon_outline_world(renderer, &area.polygon, &to_screen_i, 255, 255, 0);
+        }
+    }
+
+    // Pass 3: committed path polyline, colored per segment by the
+    // destination waypoint's (layer, area).  An X marker at each
+    // waypoint highlights surface transitions.
+    if let Some(pc_id) = selected_id {
+        if let Some(waypoints) = engine.actor_path_waypoints(pc_id) {
+            if !waypoints.is_empty() {
+                let start = engine
+                    .get_entity(pc_id)
+                    .map(|e| {
+                        let p = e.element_data().position();
+                        robin_engine::geo2d::pt(p.x, p.y)
+                    })
+                    .unwrap_or_else(|| waypoints[0]);
+                let mut prev = start;
+                for &wp in &waypoints {
+                    let (r, g, b) = match locate_surface(move_layers, wp) {
+                        Some((l, a)) => surface_color(l, a),
+                        None => (255, 255, 255),
+                    };
+                    let (x1, y1) = to_screen_i(prev);
+                    let (x2, y2) = to_screen_i(wp);
+                    renderer.render_gpu_line(x1, y1, x2, y2, r, g, b);
+                    // X marker at endpoint.
+                    const M: i32 = 4;
+                    renderer.render_gpu_line(x2 - M, y2 - M, x2 + M, y2 + M, r, g, b);
+                    renderer.render_gpu_line(x2 - M, y2 + M, x2 + M, y2 - M, r, g, b);
+                    prev = wp;
+                }
+            }
+        }
+    }
+}
+
 /// Render debug animation lines: polylines for all FX entities.
 ///
 /// Active FX are drawn in white (0xFFFF), inactive in dark gray

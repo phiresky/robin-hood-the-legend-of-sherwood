@@ -422,6 +422,11 @@ impl EngineInner {
                 dev.debug.shadow_polygon_sphere = !dev.debug.shadow_polygon_sphere;
                 ConsoleResponse::Ok(String::new())
             }
+            Surface => toggle_debug(
+                &mut dev.debug.surface_display,
+                "Surface overlay displayed.",
+                "Surface overlay hidden.",
+            ),
             EnergyDisplay => toggle_debug(
                 &mut dev.debug.combat_energy_display,
                 "Combat energy display enabled !",

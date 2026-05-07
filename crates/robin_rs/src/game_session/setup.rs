@@ -1028,6 +1028,9 @@ pub(super) fn load_level_and_sprite_bank(
     // (Campaign no longer owns its own copy).
     assets.profile_manager = std::sync::Arc::new(profiles.clone());
     let mut dev = robin_engine::engine::DevState::new();
+    if let Some(opts) = robin_engine::engine::GlobalOptions::global().as_ref() {
+        dev.debug.surface_display = opts.debug_surfaces;
+    }
 
     // Load sprite bank (robinhood.dic + robinhood.bks) — must happen
     // before entity sprite loading in initialize_for_mission.

@@ -108,6 +108,7 @@ const COMPLETION_KEYWORDS_DEV: &[&str] = &[
     "SHADOW",
     "SPHERE",
     "STATUS",
+    "SURFACE",
     "UBIQUITY",
     "WAKEUP",
     "WAPPEN",

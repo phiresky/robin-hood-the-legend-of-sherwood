@@ -103,6 +103,7 @@ pub enum ConsoleCommand {
     SeekAndDestroy,
     Shadow,
     Sphere,
+    Surface,
     StatusFramecache,
     StatusHardware,
     StatusShadow,
@@ -291,6 +292,7 @@ fn parse_dev(tokens: &[&str]) -> Option<ConsoleCommand> {
         "SEEKANDDESTROY" => Some(ConsoleCommand::SeekAndDestroy),
         "SHADOW" => Some(ConsoleCommand::Shadow),
         "SPHERE" => Some(ConsoleCommand::Sphere),
+        "SURFACE" => Some(ConsoleCommand::Surface),
         "STATUS" => match tokens.get(1).copied() {
             Some("FRAMECACHE") => Some(ConsoleCommand::StatusFramecache),
             Some("HARDWARE") => Some(ConsoleCommand::StatusHardware),

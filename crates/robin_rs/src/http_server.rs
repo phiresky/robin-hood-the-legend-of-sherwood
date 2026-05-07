@@ -168,6 +168,7 @@ pub struct ScreenshotFlags {
     pub view_cones: Option<bool>,
     pub pc_sight: Option<bool>,
     pub motion_graph: Option<bool>,
+    pub surface: Option<bool>,
     pub all_obstacles: Option<bool>,
     pub elevation: Option<bool>,
     pub noise: Option<bool>,
@@ -478,6 +479,7 @@ fn parse_screenshot_query(query: &str) -> ScreenshotRequest {
             view_cones: query_flag(query, "view_cones"),
             pc_sight: query_flag(query, "pc_sight"),
             motion_graph: query_flag(query, "motion_graph"),
+            surface: query_flag(query, "surface"),
             all_obstacles: query_flag(query, "all_obstacles"),
             elevation: query_flag(query, "elevation"),
             noise: query_flag(query, "noise"),
@@ -1149,6 +1151,7 @@ pub fn apply_screenshot_flags(
     set!(view_cones, all_view_cones);
     set!(pc_sight, pc_sight);
     set!(motion_graph, motion_graph_display);
+    set!(surface, surface_display);
     set!(all_obstacles, all_obstacles_display);
     set!(elevation, elevation_display);
     set!(noise, noise_display);

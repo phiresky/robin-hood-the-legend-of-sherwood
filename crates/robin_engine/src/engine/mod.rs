@@ -2825,6 +2825,28 @@ impl EngineInner {
         &self.pathfinder
     }
 
+    /// Committed path waypoints for an actor's active movement, if any.
+    ///
+    /// Returns the `(target_x, target_y)` of each remaining (non-`done`)
+    /// order on the actor's currently-executing sequence element, in
+    /// execution order.  Used by the surface debug overlay to draw the
+    /// path the character will follow.  Returns `None` when the actor
+    /// has no active movement element.
+    pub fn actor_path_waypoints(&self, actor: EntityId) -> Option<Vec<crate::geo2d::Point2D>> {
+        let entity = self.get_entity(actor)?;
+        let actor_data = entity.actor_data()?;
+        let seq_id = actor_data.active_movement.sequence_id?;
+        let elem_idx = actor_data.active_movement.element_index;
+        let elem = self.sequence_manager.get_element(seq_id, elem_idx)?;
+        Some(
+            elem.orders
+                .iter()
+                .filter(|o| !o.done)
+                .map(|o| crate::geo2d::pt(o.target_x, o.target_y))
+                .collect(),
+        )
+    }
+
     /// Destination markers drawn on the ground.
     pub fn ground_mark(&self) -> &GroundMark {
         &self.ground_mark

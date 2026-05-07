@@ -328,6 +328,10 @@ pub struct DebugFlags {
     pub motion_obstacles_display: bool,
     pub motion_graph_display: bool,
     pub motion_graph_display_index: u16,
+    /// `SURFACE` cheat — outline every walkable `MotionArea` polygon and
+    /// highlight the area the selected character is currently on, plus
+    /// the committed path waypoints colored by surface.
+    pub surface_display: bool,
     pub elevation_display: bool,
     pub actor_info_display: bool,
     pub noise_display: bool,
