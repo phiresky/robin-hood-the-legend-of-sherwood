@@ -201,20 +201,31 @@ pub extern "system" fn Java_io_github_phiresky_robinhood_RobinHoodActivity_nativ
     }
 }
 
-/// Process-wide handle on the host-command sender.  Populated once the
-/// event loop is set up so global helpers like [`reset_dead_keys`] can
-/// reach the [`AppHandler`] without threading the channel through
-/// every caller.
-static HOST_CMD_TX: std::sync::OnceLock<std::sync::Mutex<Option<async_channel::Sender<HostCmd>>>> =
+/// Process-wide handle on the live winit [`Window`].  Populated when
+/// the OS window is created so the game thread can reach the window
+/// for fire-and-forget calls like [`Window::reset_dead_keys`] without
+/// round-tripping through the [`HostCmd`] queue.  The cmd queue is
+/// only drained at `about_to_wait`, which is too late for dead-key
+/// resets — by the time it runs, the next keypress has already been
+/// composed.
+static GAME_WINDOW: std::sync::OnceLock<std::sync::Mutex<Option<Arc<Window>>>> =
     std::sync::OnceLock::new();
 
-fn host_cmd_tx() -> &'static std::sync::Mutex<Option<async_channel::Sender<HostCmd>>> {
-    HOST_CMD_TX.get_or_init(|| std::sync::Mutex::new(None))
+fn game_window_slot() -> &'static std::sync::Mutex<Option<Arc<Window>>> {
+    GAME_WINDOW.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-fn try_send_host_cmd(cmd: HostCmd) {
-    if let Some(tx) = host_cmd_tx().lock().expect("host cmd tx poisoned").as_ref() {
-        let _ = tx.try_send(cmd);
+fn set_game_window(window: Arc<Window>) {
+    *game_window_slot().lock().expect("game window poisoned") = Some(window);
+}
+
+fn with_game_window<F: FnOnce(&Window)>(f: F) {
+    if let Some(w) = game_window_slot()
+        .lock()
+        .expect("game window poisoned")
+        .as_ref()
+    {
+        f(w);
     }
 }
 
@@ -223,11 +234,6 @@ fn try_send_host_cmd(cmd: HostCmd) {
 pub(crate) enum HostCmd {
     GrabMouse(bool),
     Exit,
-    /// Reset the OS dead-key composition state.  Sent when a text-input
-    /// surface (e.g. the dev console) opens via a key bound to a dead
-    /// key (`^`, `~`, etc.) so the next typed character isn't composed
-    /// into a diacritic.
-    ResetDeadKeys,
 }
 
 // ---------------------------------------------------------------------
@@ -744,11 +750,6 @@ impl AppHandler {
                     // when about_to_wait next fires.
                     self.events_tx.close();
                 }
-                HostCmd::ResetDeadKeys => {
-                    if let Some(w) = &self.window {
-                        w.reset_dead_keys();
-                    }
-                }
             }
         }
     }
@@ -817,6 +818,7 @@ impl ApplicationHandler for AppHandler {
         window.set_cursor_visible(false);
         let window = Arc::new(window);
         self.window = Some(window.clone());
+        set_game_window(window.clone());
 
         // Hand the bare window to the game future.  All wgpu init
         // (`request_adapter`, `request_device`) happens *async* on the
@@ -1153,7 +1155,6 @@ where
 
     let (events_tx, events_rx) = async_channel::unbounded::<HostMsg>();
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<HostCmd>();
-    *host_cmd_tx().lock().expect("host cmd tx poisoned") = Some(cmd_tx.clone());
     #[cfg(target_os = "android")]
     {
         *android_back_tx().lock().expect("android back tx poisoned") = Some(events_tx.clone());
@@ -1338,9 +1339,13 @@ where
 /// any pending dead-key composition: when the player opens a text
 /// surface (e.g. the dev console) using a key bound to a dead key
 /// (`^`, `~`, etc.), the OS would otherwise compose that mark into
-/// the next typed character.
+/// the next typed character.  Called directly on the [`Window`]
+/// (rather than via the [`HostCmd`] queue) so the reset lands before
+/// the next [`WindowEvent::KeyboardInput`] is processed on the main
+/// thread.  On Linux winit's implementation is just an atomic-flag
+/// store, safe from any thread.
 pub fn start_text_input() {
-    try_send_host_cmd(HostCmd::ResetDeadKeys);
+    with_game_window(|w| w.reset_dead_keys());
 }
 pub fn stop_text_input() {}
 
