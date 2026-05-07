@@ -229,7 +229,7 @@ pub(super) fn handle_console_overlay_events(
     // selection / movement actions).  Mouse events still pass
     // through so the player can pan/click while the console is
     // up — the game keeps running underneath.
-    let console_consumed_events = console_overlay.handle_events(events, engine, assets, host, dev);
+    console_overlay.handle_events(events, engine, assets, host, dev);
     // Auto-close after WIN / WINCAMPAIGN / LOSE — same as the cheat
     // `mbCommandTerminateConsole`.  Drains the pending flag so
     // we only act once.
@@ -285,12 +285,13 @@ pub(super) fn handle_console_overlay_events(
         .iter()
         .any(|a| matches!(a, crate::input_translator::GameAction::DisplayConsole));
     let mut console_should_be_visible = console_visible_now;
-    if display_console_pressed && !auto_closed && !console_consumed_events {
+    if display_console_pressed && !auto_closed {
         // The toggle key reached us via the action stream — flip.
-        // (When the console was already visible, the same KeyDown
-        // is consumed by `handle_events` AND a release-edge fires
-        // DisplayConsole on the next frame; both paths agree to
-        // toggle, so this still ends up correct.)
+        // The action fires on key-release (`key_released`), so when
+        // the console is already visible the KeyDown is swallowed by
+        // `handle_events` (so the toggle key doesn't insert as text)
+        // while the corresponding release-edge still flips the
+        // overlay closed.
         console_should_be_visible = console_overlay.toggle();
     }
     if console_should_be_visible != console_visible_now || auto_closed {
