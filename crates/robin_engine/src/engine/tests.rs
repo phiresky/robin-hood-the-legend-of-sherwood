@@ -1230,7 +1230,9 @@ fn sort_for_minimap_priority_order() {
 
 #[test]
 fn smalltalk_strike_does_not_transfer_initiative_immediately() {
-    use crate::element::{ActorSoldier, Command, ElementData, ElementKind, Entity, Point3D};
+    use crate::element::{
+        ActorSoldier, Command, ElementData, ElementKind, Entity, Point3D, Posture,
+    };
     use crate::element_kinds::ActionState;
 
     let mut engine = EngineInner::new();
@@ -1238,6 +1240,10 @@ fn smalltalk_strike_does_not_transfer_initiative_immediately() {
 
     let mut attacker_element = ElementData {
         kind: ElementKind::ActorSoldier,
+        // Soldiers built ad-hoc in tests need an explicit posture —
+        // the level deserialiser remaps `Undefined` to a kind-specific
+        // default, but `ElementData::default()` does not.
+        posture: Posture::Upright,
         ..Default::default()
     };
     attacker_element.set_position(Point3D {
@@ -1255,6 +1261,7 @@ fn smalltalk_strike_does_not_transfer_initiative_immediately() {
 
     let mut defender_element = ElementData {
         kind: ElementKind::ActorSoldier,
+        posture: Posture::Upright,
         ..Default::default()
     };
     defender_element.set_position(Point3D {

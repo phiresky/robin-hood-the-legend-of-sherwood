@@ -1990,7 +1990,6 @@ impl WeatherState {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
 pub struct ShieldState {
     pub is_protected: bool,
-    pub danger_point: [f32; 3],
     /// The PC whose defensive arc is being honoured. `None` means no
     /// PC is protecting.
     pub protected_pc: Option<crate::element::EntityId>,

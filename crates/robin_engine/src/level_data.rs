@@ -1232,7 +1232,6 @@ pub struct RawLift {
     /// Layer.  Stored for reference even though the loader does not use it.
     pub layer: u16,
     pub lift_type: u8,
-    pub click_sector: SectorPolygon,
     pub doors: Vec<RawDoor>,
     pub direction: i16,
 }
@@ -1356,8 +1355,6 @@ pub struct LoadedProtoLevel {
     pub lifts: Vec<RawLift>,
     pub buildings: Vec<RawBuildingEntry>,
     pub motion_data: Option<RawMotionData>,
-    /// Chunk tags that were encountered and skipped.
-    pub skipped_chunks: Vec<String>,
 }
 
 /// Data loaded from a mission file (.rhm).
@@ -1382,8 +1379,6 @@ pub struct LoadedMission {
     pub hiking_paths: Vec<RawHikingPath>,
     /// AI tactic data (from AI /HIRN chunk).
     pub tactic_data: Option<RawTacticData>,
-    /// Chunk tags that were encountered and skipped.
-    pub skipped_chunks: Vec<String>,
 }
 
 /// Complete loaded level (proto-level + mission).
@@ -1424,7 +1419,6 @@ impl LoadedLevel {
                 lifts: Vec::new(),
                 buildings: Vec::new(),
                 motion_data: None,
-                skipped_chunks: Vec::new(),
             },
             mission: LoadedMission {
                 format: LevelFormat::Fullgame,
@@ -1446,7 +1440,6 @@ impl LoadedLevel {
                 script_objects: None,
                 hiking_paths: Vec::new(),
                 tactic_data: None,
-                skipped_chunks: Vec::new(),
             },
         }
     }
@@ -1634,7 +1627,6 @@ pub fn load_proto_level(
         lifts,
         buildings,
         motion_data,
-        skipped_chunks,
     })
 }
 
@@ -2148,7 +2140,6 @@ pub fn load_mission(
         script_objects,
         hiking_paths,
         tactic_data,
-        skipped_chunks,
     })
 }
 
@@ -3246,8 +3237,13 @@ fn read_lifts(reader: &mut ChunkReader, format: LevelFormat) -> Result<Vec<RawLi
         // RHSectorLift::InitializeFromProtoStream
         let lift_type = reader.read_u8()?;
 
-        // Clickable sector (RHSectorAssociated)
-        let click_sector = read_sector_polygon(reader, format)?;
+        // Clickable sector (RHSectorAssociated): parsed for stream
+        // alignment but discarded — the C++ `RHSectorLift::Initialize`
+        // path that would register this polygon as a mouse-pick sector
+        // has its `AddSector(pSectorAssociated, ...)` calls commented
+        // out in the C++ source, so the polygon carries no runtime
+        // meaning.  See `engine/level_loading.rs::initialize_motion_from_level_data`.
+        let _click_sector = read_sector_polygon(reader, format)?;
 
         // Doors
         let num_doors = reader.read_u16()?;
@@ -3262,7 +3258,6 @@ fn read_lifts(reader: &mut ChunkReader, format: LevelFormat) -> Result<Vec<RawLi
             motion_area_index,
             layer,
             lift_type,
-            click_sector,
             doors,
             direction,
         });

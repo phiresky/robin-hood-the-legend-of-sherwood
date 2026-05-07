@@ -515,11 +515,17 @@ pub struct GridSector {
 
     /// For associated sectors (`SectorType::ASSOCIATED`): the index in
     /// `FastFindGrid::sectors` of the sector this clickable overlay is
-    /// bound to (lift or drawbridge platform).  Populated at level load
-    /// by `initialize_motion_from_level_data` from the lift `click_sector`
-    /// polygon in the proto stream, and consumed by `get_sector_screen`
-    /// which follows the link to return the real lift sector when the
-    /// mouse hovers the clickable overlay.
+    /// bound to (lift or drawbridge platform).  Read by
+    /// `get_sector_screen` to follow the link to the real lift sector
+    /// when the mouse hovers a clickable overlay.  Currently never
+    /// populated in production: the lift `click_sector` polygon
+    /// (parsed-and-discarded by `read_lifts`) never reaches the grid
+    /// because the C++ `AddSector(pSectorAssociated, ...)` calls in
+    /// `RHSectorLift::Initialize` are commented out in the original
+    /// source, and the Rust port follows suit.  The field is kept on
+    /// `GridSector` because the read-side `get_sector_screen`
+    /// machinery is still wired (and exercised by tests) — a future
+    /// port of the C++ associated-sector flow would set it.
     pub associated_sector_index: Option<SectorIndex>,
 }
 

@@ -2945,8 +2945,7 @@ impl EngineInner {
 
     /// Handle the second click of the Shield two-click protocol.
     ///
-    /// 1. Store the 3D danger point in `ShieldState::danger_point` and
-    ///    flip `is_protected = true` so the cursor returns to the
+    /// 1. Flip `is_protected = true` so the cursor returns to the
     ///    first-click YES/NO state.
     /// 2. Build a compound `Seek(protected_pc, tolerance=50) →
     ///    RaiseShield(Generic with ShieldDangerPoint/Layer/Protected)`
@@ -2965,7 +2964,6 @@ impl EngineInner {
     ) {
         use crate::order::OrderType;
 
-        self.shield.danger_point = [danger_point.x, danger_point.y, 0.0];
         self.shield.is_protected = true;
         self.shield.protected_pc = Some(protected_pc);
 
