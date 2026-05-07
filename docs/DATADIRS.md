@@ -357,6 +357,23 @@ GOG installer with v1.1 hotfix (build 24778). InnoSetup exe + bin. Same extras a
     MD5:      00292c14650583a9b350ce23decda5b4
     SHA256:   7451b367a9713f43fad9a3f2b9c6a1d9af382a9a97809f676bd0aa9cd9a0c028
 
+## Windows — GOG v1.1 hotfix v3 (RuTracker repackage)
+
+GOG installer with v1.1 hotfix, GOG v3 build 80557. InnoSetup exe + bin, with bonus
+content in separate zip files.
+
+    filename: setup_robin_hood_-_the_legend_of_sherwood_1.1_gog_v3_(80557).exe + setup_robin_hood_-_the_legend_of_sherwood_1.1_gog_v3_(80557)-1.bin
+    local:    datadirs/installers/Robin_Hood_-_The_Legend_of_Sherwood_1.1_hotfix_gog_v3_(80557)_win_gog/
+    format:   InnoSetup installer (1.1 MB exe + 635 MB bin, 701 MB directory total)
+    source:   https://rutracker.org/forum/viewtopic.php?t=5606819
+    BTIH:     7B2C37C36876AFA8C186E5AECA65F6DD09247B73
+    MD5:      8ab629e662919ba32c9f1094cd7bcb4a (setup_robin_hood_-_the_legend_of_sherwood_1.1_gog_v3_(80557).exe)
+    MD5:      fe407e06182b924375bcd1e4bce034af (setup_robin_hood_-_the_legend_of_sherwood_1.1_gog_v3_(80557)-1.bin)
+    SHA256:   43fe38caa9ffe35e868d19bd358a0f9e4e4ba0e9582ee5d4f1a97cf79a2ff3d6 (setup_robin_hood_-_the_legend_of_sherwood_1.1_gog_v3_(80557).exe)
+    SHA256:   e280b9f2eab56cfa584dade364b6058f933a29f32a5b426382f5a519e7f86718 (setup_robin_hood_-_the_legend_of_sherwood_1.1_gog_v3_(80557)-1.bin)
+
+- Bonus zips: soundtrack, wallpapers, artworks, avatars, manual
+
 ## Windows — Steam release
 
 Steam store release published by Microids. The store page lists English, French,
