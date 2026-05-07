@@ -35,7 +35,14 @@ pub use robin_engine::shadow_polygon::{
 };
 
 /// A visibility polygon paired with tint/fade metadata (for per-NPC alert coloring).
-pub type TintedCone = (Vec<Point2D>, (u8, u8, u8), Point2D, f32, u8);
+pub type TintedCone = (
+    Vec<Point2D>,
+    (u8, u8, u8),
+    Point2D,
+    f32,
+    u8,
+    Option<robin_engine::position_interface::PlaneZCoeffs>,
+);
 
 // Constants/structs imported from robin_engine::shadow_polygon (see top of file).
 
@@ -515,6 +522,7 @@ pub fn render_darken_inside(
     alpha: u8,
     viewer: Point2D,
     radius: f32,
+    projection_plane: Option<robin_engine::position_interface::PlaneZCoeffs>,
     masks: &[&robin_engine::mask::RuntimeMask],
 ) {
     if alpha == 0 || visible_polygons.is_empty() {
@@ -531,6 +539,7 @@ pub fn render_darken_inside(
             alpha,
             viewer,
             radius,
+            projection_plane,
             masks,
         );
         return;
@@ -551,25 +560,29 @@ fn render_darken_inside_gpu_spans(
     alpha: u8,
     viewer: Point2D,
     radius: f32,
+    projection_plane: Option<robin_engine::position_interface::PlaneZCoeffs>,
     masks: &[&robin_engine::mask::RuntimeMask],
 ) {
     let w = renderer.screen_width() as i32;
     let h = renderer.screen_height() as i32;
     let inv_zoom = if zoom > 0.0 { 1.0 / zoom } else { 1.0 };
 
-    // Convert all polygons from world → screen coordinates
+    let project = |p: Point2D| {
+        let z = projection_plane
+            .map(|plane| plane.compute_z(p.x, p.y))
+            .unwrap_or(0.0);
+        let projected_y = p.y - z;
+        let sx = (p.x - view_rect.min.x) * zoom;
+        let sy = (projected_y - view_rect.min.y) * zoom;
+        [sx, sy]
+    };
+
+    // Convert all polygons from world → screen coordinates.
     let screen_polys: Vec<Vec<[f32; 2]>> = visible_polygons
         .iter()
-        .map(|poly| {
-            poly.iter()
-                .map(|p| {
-                    let sx = (p.x - view_rect.min.x) * zoom;
-                    let sy = (p.y - view_rect.min.y) * zoom;
-                    [sx, sy]
-                })
-                .collect()
-        })
+        .map(|poly| poly.iter().map(|p| project(*p)).collect())
         .collect();
+    let viewer_screen = project(viewer);
 
     let edge_tables: Vec<Vec<ScanEdge>> = screen_polys
         .iter()
@@ -611,12 +624,17 @@ fn render_darken_inside_gpu_spans(
             spans = subtract_spans(&spans, &merge_spans(&mask_spans));
         }
 
-        let world_y = view_rect.min.y + yf * inv_zoom;
         for (start, end) in spans {
-            let left_world_x = view_rect.min.x + (start as f32 + 0.5) * inv_zoom;
-            let right_world_x = view_rect.min.x + ((end - 1) as f32 + 0.5) * inv_zoom;
-            let alpha_left = cone_alpha_at(left_world_x, world_y, viewer, radius, alpha);
-            let alpha_right = cone_alpha_at(right_world_x, world_y, viewer, radius, alpha);
+            let alpha_left =
+                cone_alpha_at_screen(start as f32 + 0.5, yf, viewer_screen, zoom, radius, alpha);
+            let alpha_right = cone_alpha_at_screen(
+                (end - 1) as f32 + 0.5,
+                yf,
+                viewer_screen,
+                zoom,
+                radius,
+                alpha,
+            );
             renderer.render_view_cone_span(
                 crate::gfx_types::Rect::new(start, y, (end - start) as u32, 1),
                 tint,
@@ -716,12 +734,20 @@ fn subtract_spans(spans: &[(i32, i32)], cuts: &[(i32, i32)]) -> Vec<(i32, i32)> 
     out
 }
 
-fn cone_alpha_at(world_x: f32, world_y: f32, viewer: Point2D, radius: f32, alpha_start: u8) -> u8 {
+fn cone_alpha_at_screen(
+    screen_x: f32,
+    screen_y: f32,
+    viewer_screen: [f32; 2],
+    zoom: f32,
+    radius: f32,
+    alpha_start: u8,
+) -> u8 {
     if radius <= f32::EPSILON {
         return alpha_start;
     }
-    let dx = world_x - viewer.x;
-    let dy = (world_y - viewer.y) / ASPECT_RATIO;
+    let inv_zoom = if zoom > 0.0 { 1.0 / zoom } else { 1.0 };
+    let dx = (screen_x - viewer_screen[0]) * inv_zoom;
+    let dy = ((screen_y - viewer_screen[1]) * inv_zoom) / ASPECT_RATIO;
     let dist = (dx * dx + dy * dy).sqrt();
     let t = (1.0 - dist / radius).clamp(0.0, 1.0);
     let alpha = ALPHA_END as f32 + (alpha_start.saturating_sub(ALPHA_END) as f32 * t);
@@ -736,7 +762,7 @@ fn render_tinted_cones_gpu(
     zoom: f32,
     cones: &[TintedCone],
 ) {
-    for (poly, tint, viewer, radius, alpha) in cones {
+    for (poly, tint, viewer, radius, alpha, projection_plane) in cones {
         render_darken_inside_gpu_spans(
             renderer,
             view_rect,
@@ -746,6 +772,7 @@ fn render_tinted_cones_gpu(
             *alpha,
             *viewer,
             *radius,
+            *projection_plane,
             &[],
         );
     }
@@ -877,6 +904,7 @@ mod tests {
             alpha: ALPHA_DAY,
             lean_out: false,
             viewer_z: 0.0,
+            projection_plane: None,
         };
         let cone = compute_view_cone(Point2D { x: 100.0, y: 100.0 }, &params);
 
@@ -906,6 +934,7 @@ mod tests {
             alpha: ALPHA_DAY,
             lean_out: false,
             viewer_z: 0.0,
+            projection_plane: None,
         };
         let params_left = ViewParameters {
             direction: [-1.0, 0.0],
@@ -955,6 +984,7 @@ mod tests {
             alpha: ALPHA_DAY,
             lean_out: false,
             viewer_z: 0.0,
+            projection_plane: None,
         };
 
         // Place a small obstacle directly ahead
@@ -1062,6 +1092,7 @@ mod tests {
             alpha: 128,
             lean_out: false,
             viewer_z: 0.0,
+            projection_plane: None,
         };
         let viewer = Point2D { x: 0.0, y: 5.0 };
         let result = compute_visibility_polygon(viewer, &params, &[&obs]);
@@ -1090,6 +1121,7 @@ mod tests {
             alpha: 128,
             lean_out: false,
             viewer_z: 0.0,
+            projection_plane: None,
         };
         let viewer = Point2D { x: 0.0, y: 5.0 };
         let result = compute_visibility_polygon(viewer, &params, &[&obs]);
@@ -1116,6 +1148,7 @@ mod tests {
             alpha: 128,
             lean_out: false,
             viewer_z: 0.0,
+            projection_plane: None,
         };
         let viewer = Point2D { x: 0.0, y: 5.0 };
         let ccw_result = compute_visibility_polygon(viewer, &params, &[&ccw]);
@@ -1340,6 +1373,7 @@ mod tests {
             alpha: ALPHA_DAY,
             lean_out: false,
             viewer_z: 0.0,
+            projection_plane: None,
         };
 
         let mut sky_slab = SightObstacle::new_default(0);
@@ -1468,6 +1502,7 @@ mod tests {
             alpha: ALPHA_DAY,
             lean_out: false,
             viewer_z: 0.0,
+            projection_plane: None,
         };
 
         // Obstacle behind the viewer — fully outside the cone.

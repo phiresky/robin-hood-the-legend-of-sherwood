@@ -513,6 +513,7 @@ pub(crate) fn render_view_cone_overlay(
         alpha,
         viewer,
         params.radius,
+        params.projection_plane,
         &cone_masks,
     );
 }
@@ -615,10 +616,11 @@ fn render_all_view_cones(
             let color = tint.unwrap_or((0, 0, 0));
             let alpha = params.alpha.min(weather_alpha);
             let radius = params.radius;
+            let projection_plane = params.projection_plane;
             polys
                 .into_iter()
                 .filter(|p| p.len() >= 3)
-                .map(move |p| (p, color, viewer, radius, alpha))
+                .map(move |p| (p, color, viewer, radius, alpha, projection_plane))
         })
         .collect();
 

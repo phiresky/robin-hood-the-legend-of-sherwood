@@ -504,6 +504,7 @@ impl EngineInner {
             alpha,
             lean_out,
             viewer_z: eye.z,
+            projection_plane: entity.position_iface().get_plane().copied(),
         };
 
         // NPC tint from alert level — PCs use the default black overlay.
@@ -571,6 +572,7 @@ impl EngineInner {
                 alpha,
                 lean_out: matches!(edata.posture, crate::element::Posture::LeaningOut),
                 viewer_z: eye.z,
+                projection_plane: entity.position_iface().get_plane().copied(),
             };
 
             let tint = entity.ai_controller().map(|ai| {

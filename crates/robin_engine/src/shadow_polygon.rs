@@ -32,6 +32,11 @@ pub struct ViewParameters {
     /// Viewer eye altitude. Used by the obstacle-usefulness filter in
     /// `compute_visibility_polygon`.
     pub viewer_z: f32,
+    /// Projection plane for debug rendering. The original
+    /// `RHShadowPolygon::SetScreenCoords` projects rendered polygon
+    /// vertices with `screen_y = y - plane.ComputeZ(x, y)`.
+    #[serde(default)]
+    pub projection_plane: Option<crate::position_interface::PlaneZCoeffs>,
 }
 
 impl Default for ViewParameters {
@@ -43,6 +48,7 @@ impl Default for ViewParameters {
             alpha: ALPHA_DAY,
             lean_out: false,
             viewer_z: 0.0,
+            projection_plane: None,
         }
     }
 }
