@@ -383,7 +383,8 @@ German, and Spanish interface languages.
 
 ## Mac OS X — Macintosh Garden DMG
 
-HFS+ disk image containing `Install Robin Hood.pkg` and English manuals.
+HFS+ disk images from Macintosh Garden. The CD image contains `Install Robin Hood.pkg`
+and English manuals; the v1.1 image contains a ready-to-run `Robin Hood.app` bundle.
 
     filename: Robin_Hood_CD_0.dmg
     local:    datadirs/installers/Robin_Hood_CD_0.dmg
@@ -392,10 +393,20 @@ HFS+ disk image containing `Install Robin Hood.pkg` and English manuals.
     MD5:      82824a1621831fee3c0f00d7dac0eb3b
     SHA256:   0f538c7e581f4ff6d02914848450f085bce1b553307728055cab51d7d69b3733
 
+    filename: Robin_Hood_1.1.dmg
+    local:    datadirs/installers/Robin_Hood_1.1.dmg
+    format:   Apple DMG / HFS+ disk image (1.25 GB compressed, 1.36 GB unpacked)
+    source:   https://macintoshgarden.org/games/robin-hood-the-legend-of-sherwood
+    MD5:      501af9a2b8e84a5513cfd32cf976f142
+    SHA256:   065c4f6f8431b803c3177ef0f92ba4091d852826c9f924ebf336a835bbcbaa61
+
 - Volume root: `Robin Hood CD`
 - Installer package: `Install Robin Hood.pkg`
 - Package payload: `Install Robin Hood.pkg/Contents/Archive.pax.gz` (524 MB)
 - Manuals: `Manual/Robin Hood Manual.pdf`, `Manual/Robin Hood Manual for Print.pdf`
+- v1.1 volume root: `Robin Hood 1.1`
+- v1.1 app bundle: `Robin Hood.app`
+- v1.1 game data path: `Robin Hood.app/Contents/Resources/Data`
 
 ## ZETA OS — BeOS/ZETA port
 
