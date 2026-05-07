@@ -403,6 +403,18 @@ pub struct Sprite {
     /// top-left rendering origin.  Stores the active sprite anchor so
     /// engine/host geometry paths can read it directly.
     pub center: Vec2D,
+
+    /// Most recent [`MotionState`] returned by a `perform_*` advance
+    /// this tick.  Set automatically by every perform method, consumed
+    /// by `EngineInner::propagate_done_to_current_orders` at end of
+    /// tick to flip the actor's current order's `done` flag once the
+    /// sprite reports `MotionState::Done`.
+    ///
+    /// Transient: `None` between ticks, written during dispatches,
+    /// reset to `None` after the propagation pass.  Excluded from
+    /// snapshots and state-hash because it is purely a derived
+    /// per-tick quantity.
+    pub last_motion_state: Option<MotionState>,
 }
 
 #[derive(Serialize)]
@@ -536,6 +548,7 @@ impl<'de> Deserialize<'de> for Sprite {
             profile_cache_key: snapshot.profile_cache_key,
             alternate_profile_cache_key: snapshot.alternate_profile_cache_key,
             center: snapshot.center,
+            last_motion_state: None,
         })
     }
 }
@@ -600,6 +613,7 @@ impl Default for Sprite {
             profile_cache_key: String::new(),
             alternate_profile_cache_key: String::new(),
             center: Vec2D { x: 0.0, y: 0.0 },
+            last_motion_state: None,
         }
     }
 }
@@ -1560,6 +1574,16 @@ impl Sprite {
 
     // -- High-level animation methods --
 
+    /// Record `state` as the most recent motion-state on this sprite
+    /// (consumed by `EngineInner::propagate_done_to_current_orders` at
+    /// end of tick) and return it.  Every `perform_*` exit funnels
+    /// through here so one place owns the write.
+    #[inline]
+    fn record_motion_state(&mut self, state: MotionState) -> MotionState {
+        self.last_motion_state = Some(state);
+        state
+    }
+
     /// Simple frame increment without any order/motion logic.
     pub fn perform_virgin_increment(&mut self, progression: FrameProgression) -> MotionState {
         let terminated = self.increment_frame(progression);
@@ -1575,7 +1599,7 @@ impl Sprite {
             state = MotionState::Terminated;
         }
 
-        state
+        self.record_motion_state(state)
     }
 
     /// Speed-modulated increment.
@@ -1597,7 +1621,7 @@ impl Sprite {
             state = MotionState::Terminated;
         }
 
-        state
+        self.record_motion_state(state)
     }
 
     /// Perform an action: update sprite row for direction, handle frame
@@ -1623,7 +1647,7 @@ impl Sprite {
         // `row_for_action`-returns-`None` path) and consume orders
         // they should leave alone.
         if self.current_conversion().is_empty() {
-            return MotionState::InProgress;
+            return self.record_motion_state(MotionState::InProgress);
         }
 
         let mut state = MotionState::InProgress;
@@ -1637,7 +1661,7 @@ impl Sprite {
                     anim,
                     self.frame_profile_name
                 );
-                return MotionState::Aborted;
+                return self.record_motion_state(MotionState::Aborted);
             }
         };
 
@@ -1688,7 +1712,7 @@ impl Sprite {
             state = MotionState::Terminated;
         }
 
-        state
+        self.record_motion_state(state)
     }
 
     /// Get the movement distance for the current frame.
@@ -1750,7 +1774,7 @@ impl Sprite {
                 // `last_processed_order_id` for safety in case a future
                 // caller defers the pop.
                 self.last_processed_order_id = oid.get();
-                return (MotionState::Terminated, 0.0);
+                return (self.record_motion_state(MotionState::Terminated), 0.0);
             }
         }
 

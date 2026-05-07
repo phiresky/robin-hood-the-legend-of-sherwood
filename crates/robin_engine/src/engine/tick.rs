@@ -5189,6 +5189,17 @@ impl EngineInner {
         // traps) and apply cross-entity effects on completion.
         self.tick_abilities(display, assets);
 
+        // ── Per-actor `Order::done` propagation ────────────────
+        // Runs after every per-system sprite-advance tick this frame
+        // (movement, jumps, animations, bow shots, melee, abilities),
+        // each of which has already stashed its result on the sprite
+        // via `Sprite::record_motion_state`.  The pass flips
+        // `Order::done` on every actor whose sprite reported
+        // `MotionState::Done`, then clears `last_motion_state` so the
+        // next tick starts fresh.  Read by the postpone-race guard in
+        // `EngineInner::engine_postpone`.
+        self.propagate_done_to_current_orders();
+
         // ── Shouldered-carry ceiling check ─────────────────────
         // If a PC carrying another PC on their shoulders walks
         // under a low ceiling, force the shouldered PC off.
