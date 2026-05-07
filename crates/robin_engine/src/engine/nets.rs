@@ -968,7 +968,6 @@ fn advance_net_trajectory(net: &mut crate::element::ElementNet) {
     if vx != 0.0 || vy != 0.0 {
         net.element
             .set_direction_instantly(crate::position_interface::vector_to_sector_0_to_15(vx, vy));
-        proj.flight_direction = net.element.direction() as u16;
     }
 
     proj.frame_count = proj.frame_count.saturating_add(1);

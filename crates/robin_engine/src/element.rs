@@ -1951,24 +1951,21 @@ pub struct TrajectoryPoint {
 /// Projectile-level data.
 #[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
 pub struct ProjectileData {
+    /// 3D launch point.  Read by the trajectory-arc debug overlay
+    /// (`game_render::draw_trajectories`) to render from the launch
+    /// origin rather than the current frame.
     pub start: Point3D,
     pub end: Point3D,
+    /// X of the launch point.  Read by `EventGetArrow` (arrow hit) and
+    /// `EventApple` (apple hit) so the AI stimulus anchors at the
+    /// shooter's *original* position rather than the impact site.
     pub start_of_trajectory_x: f32,
+    /// Y of the launch point.  Paired with `start_of_trajectory_x`.
     pub start_of_trajectory_y: f32,
-    /// Layer of the launch point.  Stored alongside the x/y/sector so
-    /// landing events (apple drop, arrow pickup) can fire on the
-    /// *launch* layer instead of the current one.
-    pub start_of_trajectory_layer: u16,
-    /// Sector of the launch point.  Paired with
-    /// `start_of_trajectory_layer`.
-    pub start_of_trajectory_sector: Option<crate::position_interface::SectorHandle>,
-    pub flight_direction: u16,
     pub shooter: Option<EntityId>,
     pub frame_count: u16,
     pub flying: bool,
-    pub dive: bool,
     pub disappear: bool,
-    pub magic_bullet: bool,
     /// Precomputed trajectory waypoints.  `tick_arrows` pops points
     /// from the front and interpolates position toward each one over
     /// `time` frames.
@@ -1979,9 +1976,6 @@ pub struct ProjectileData {
     /// Frames remaining in the current trajectory segment.
     /// When this reaches 0, the next `TrajectoryPoint` is popped.
     pub trajectory_frame_count: u16,
-    /// True for normal/down shots (flat trajectory), false for long/high
-    /// shots.  Determines arrow mass for gravity and damage lookup.
-    pub flat_shot: bool,
     /// Precomputed damage for this projectile.  Set at spawn time from the
     /// shooter's bow profile via `BowState::get_damage()`.  Applied on hit
     /// by `apply_arrow_hit`.
@@ -1990,33 +1984,11 @@ pub struct ProjectileData {
     /// is falling to the ground.  Falling arrows skip shield and victim
     /// collision checks.
     pub falling: bool,
-    /// Sector (0..15) used by a falling arrow's visual rotation.
-    /// Seeded in `MakeFallingDown` (`(sector + 4) & 15` for shield
-    /// deflection or `sector ^ 8` for target bounce-off) and advanced
-    /// by `(falling_direction + 14) % 16` each tick while falling.  The sprite rotation itself is a rendering-pipeline
-    /// concern tracked separately — this field stores the state so a
-    /// future arrow-refresh pass has the right value.
+    /// Sector (0..15) used by a falling arrow's visual rotation.  Cycled
+    /// each tick while falling; the sprite-row driver that consumes this
+    /// is part of the unported per-frame arrow refresh pass, so the field
+    /// is preserved for the future hook-up.
     pub falling_direction: u16,
-    /// Last horizontal sector (0..15) returned by `GetOrientations`.
-    /// Cached on trajectory-non-empty ticks and returned verbatim
-    /// when the trajectory is empty.  Rust only reads orientation
-    /// when the trajectory is actively advancing, so this field is
-    /// maintained purely for serialize-layout / future Refresh-pass
-    /// parity.
-    pub last_sector: u8,
-    /// Last vertical pitch angle (degrees, clamped to [-60, 60]).
-    /// Paired cache with `last_sector`; stored for the same reason;
-    /// no consumer in Rust yet.
-    pub last_azimut: i16,
-    /// True when the arrow struck a shield / non-hurtable victim and
-    /// the engine should play impact FX 510 on the next Refresh.
-    /// Gated by `GetImpactFx` which returns 510 iff
-    /// `play_impact && !falling`.  In practice every call-site that
-    /// sets `play_impact = true` also flips `falling = true` via
-    /// `MakeFallingDown`, so the 510 gate evaluates false and no FX
-    /// plays — Rust matches that by leaving `impact_fx = None` in
-    /// those branches.
-    pub play_impact: bool,
     /// Purse / coin back-pointers — populated for `ObjectType::Purse`
     /// and `ObjectType::Coin` projectiles, default for everything else.
     /// See [`PurseData`].
@@ -2040,25 +2012,16 @@ impl Default for ProjectileData {
             end: Point3D::default(),
             start_of_trajectory_x: 0.0,
             start_of_trajectory_y: 0.0,
-            start_of_trajectory_layer: 0,
-            start_of_trajectory_sector: None,
-            flight_direction: 0,
             shooter: None,
             frame_count: 0,
             flying: false,
-            dive: false,
             disappear: false,
-            magic_bullet: false,
             trajectory: Vec::new(),
             velocity_increment: Point3D::default(),
             trajectory_frame_count: 0,
-            flat_shot: true,
             damage: 0,
             falling: false,
             falling_direction: 0,
-            last_sector: 0,
-            last_azimut: 0,
-            play_impact: false,
             purse: PurseData::default(),
             wasp: WaspData::default(),
             burst_countdown: 0,
@@ -3947,7 +3910,6 @@ pub fn advance_trajectory_one_frame(
         element.set_direction_instantly(crate::position_interface::vector_to_sector_0_to_15_iso(
             vx, vy,
         ));
-        projectile.flight_direction = element.direction() as u16;
     }
 
     projectile.frame_count = projectile.frame_count.saturating_add(1);

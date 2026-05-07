@@ -1804,23 +1804,17 @@ pub struct SpawnArrowParams {
     pub target: EntityId,
     pub target_pos: ElemPoint2D,
     pub trajectory: Vec<TrajectoryPoint>,
-    pub flat_shot: bool,
     pub damage: u16,
     pub layer: u16,
     /// Initial 3D velocity — `compute_initial_throw_velocity` output
-    /// (after any target-leading correction).  Both the sprite facing
-    /// and `flight_direction` are seeded from the XY of this vector,
-    /// not from `target - bow` — the two diverge once leading is
-    /// applied to moving targets.
+    /// (after any target-leading correction).  The sprite facing is
+    /// seeded from the XY of this vector, not from `target - bow` —
+    /// the two diverge once leading is applied to moving targets.
     ///
     /// Pass `None` from test / headless call sites that don't compute
     /// a full velocity; the fallback derives direction from
     /// `target_pos - bow_point` (old behaviour).
     pub initial_velocity: Option<Point3D>,
-    /// Set via Bloodseeker oil on PC arrows targeting FX targets in
-    /// forest levels.  Skips obstacle collision in trajectory
-    /// computation so arrows pass through tree trunks to reach the target.
-    pub magic_bullet: bool,
     /// Whether the precomputed trajectory ends inside a hole zone
     /// (before any far-edge fall-into-hole extension).  Pre-flags
     /// `ProjectileData::disappear` so `maybe_splash_on_landing` can
@@ -1842,10 +1836,8 @@ pub fn spawn_arrow(params: SpawnArrowParams) -> Entity {
         target,
         target_pos,
         trajectory,
-        flat_shot,
         damage,
         layer,
-        magic_bullet,
         lands_in_hole,
         initial_velocity,
     } = params;
@@ -1894,13 +1886,10 @@ pub fn spawn_arrow(params: SpawnArrowParams) -> Entity {
         end: end_pos,
         start_of_trajectory_x: bow_point.x,
         start_of_trajectory_y: bow_point.y,
-        flight_direction: element.direction() as u16,
         shooter: Some(shooter),
         flying: true,
         disappear: lands_in_hole,
-        magic_bullet,
         trajectory,
-        flat_shot,
         damage,
         ..ProjectileData::default()
     };
@@ -1921,7 +1910,6 @@ pub fn spawn_net(
     throw_pos: Point3D,
     target_pos: Point3D,
     layer: u16,
-    sector: Option<crate::position_interface::SectorHandle>,
     obstacle_check: Option<&TrajectoryObstacleCheck<'_>>,
 ) -> Entity {
     let dx = target_pos.x - throw_pos.x;
@@ -1984,14 +1972,10 @@ pub fn spawn_net(
         end: end_pos,
         start_of_trajectory_x: throw_pos.x,
         start_of_trajectory_y: throw_pos.y,
-        start_of_trajectory_layer: layer,
-        start_of_trajectory_sector: sector,
-        flight_direction: element.direction() as u16,
         shooter: Some(thrower),
         frame_count: 0,
         flying: true,
         trajectory,
-        flat_shot: false,
         damage: 0,
         ..ProjectileData::default()
     };
@@ -2027,7 +2011,6 @@ pub fn spawn_wasp_nest(
     throw_pos: Point3D,
     target_pos: Point3D,
     layer: u16,
-    sector: Option<crate::position_interface::SectorHandle>,
     obstacle_check: Option<&TrajectoryObstacleCheck<'_>>,
 ) -> Entity {
     let dx = target_pos.x - throw_pos.x;
@@ -2084,14 +2067,10 @@ pub fn spawn_wasp_nest(
         end: end_pos,
         start_of_trajectory_x: throw_pos.x,
         start_of_trajectory_y: throw_pos.y,
-        start_of_trajectory_layer: layer,
-        start_of_trajectory_sector: sector,
-        flight_direction: element.direction() as u16,
         shooter: Some(thrower),
         frame_count: 0,
         flying: true,
         trajectory,
-        flat_shot: false,
         damage: 0,
         ..ProjectileData::default()
     };
@@ -2149,7 +2128,6 @@ pub fn spawn_wasp(nest_id: EntityId, position: Point3D, layer: u16) -> Entity {
         // trajectories (they fly under AI control in
         // `EngineInner::tick_wasp_nests`).
         flying: false,
-        flat_shot: false,
         damage: 0,
         ..ProjectileData::default()
     };
@@ -2179,7 +2157,6 @@ pub fn spawn_apple(
     target: Option<EntityId>,
     target_forecasted_movement: Option<Point3D>,
     layer: u16,
-    sector: Option<crate::position_interface::SectorHandle>,
     obstacle_check: Option<&TrajectoryObstacleCheck<'_>>,
 ) -> Entity {
     spawn_throwable(
@@ -2189,7 +2166,6 @@ pub fn spawn_apple(
         target,
         target_forecasted_movement,
         layer,
-        sector,
         MASS_APPLE,
         APEX_APPLE,
         0,
@@ -2218,7 +2194,6 @@ pub fn spawn_stone(
     target: Option<EntityId>,
     target_forecasted_movement: Option<Point3D>,
     layer: u16,
-    sector: Option<crate::position_interface::SectorHandle>,
     obstacle_check: Option<&TrajectoryObstacleCheck<'_>>,
 ) -> Entity {
     spawn_throwable(
@@ -2228,7 +2203,6 @@ pub fn spawn_stone(
         target,
         target_forecasted_movement,
         layer,
-        sector,
         MASS_STONE,
         APEX_STONE,
         1,
@@ -2253,7 +2227,6 @@ fn spawn_throwable(
     target: Option<EntityId>,
     target_forecasted_movement: Option<Point3D>,
     layer: u16,
-    sector: Option<crate::position_interface::SectorHandle>,
     mass: f32,
     apex: f32,
     flight_time: u16,
@@ -2313,13 +2286,9 @@ fn spawn_throwable(
         end: end_pos,
         start_of_trajectory_x: throw_pos.x,
         start_of_trajectory_y: throw_pos.y,
-        start_of_trajectory_layer: layer,
-        start_of_trajectory_sector: sector,
-        flight_direction: element.direction() as u16,
         shooter: Some(thrower),
         flying: true,
         trajectory,
-        flat_shot: false,
         damage: 0,
         ..ProjectileData::default()
     };
@@ -2384,7 +2353,6 @@ pub fn spawn_purse(
     throw_pos: Point3D,
     target_pos: Point3D,
     layer: u16,
-    sector: Option<crate::position_interface::SectorHandle>,
     obstacle_check: Option<&TrajectoryObstacleCheck<'_>>,
 ) -> Entity {
     let dx = target_pos.x - throw_pos.x;
@@ -2435,14 +2403,10 @@ pub fn spawn_purse(
         end: end_pos,
         start_of_trajectory_x: throw_pos.x,
         start_of_trajectory_y: throw_pos.y,
-        start_of_trajectory_layer: layer,
-        start_of_trajectory_sector: sector,
-        flight_direction: element.direction() as u16,
         shooter: Some(thrower),
         frame_count: 0,
         flying: true,
         trajectory,
-        flat_shot: false,
         damage: 0,
         ..ProjectileData::default()
     };
@@ -2539,7 +2503,6 @@ pub fn spawn_coin(
         end: end_pos,
         start_of_trajectory_x: source_pos.x,
         start_of_trajectory_y: source_pos.y,
-        flight_direction: element.direction() as u16,
         // Burst-spawned coins carry no shooter; their owner identity
         // flows through `source_purse` instead.  Beggar coins have
         // neither a shooter nor a source purse.
@@ -2547,7 +2510,6 @@ pub fn spawn_coin(
         frame_count: 0,
         flying: true,
         trajectory,
-        flat_shot: false,
         damage: 0,
         ..ProjectileData::default()
     };
@@ -2956,7 +2918,6 @@ pub fn tick_arrows(
             proj.element.set_direction_instantly(
                 crate::position_interface::vector_to_sector_0_to_15_iso(vx, vy),
             );
-            proj.projectile.flight_direction = proj.element.direction() as u16;
         }
 
         // Cache the sector + vertical-pitch azimut into `last_sector`
@@ -2996,8 +2957,6 @@ pub fn tick_arrows(
                         azimut_deg = -azimut_deg;
                     }
                     let sector = proj.element.direction() as u16 & 15;
-                    proj.projectile.last_sector = sector as u8;
-                    proj.projectile.last_azimut = azimut_deg;
                     // row = sector, frame = `(azimut * 0.0666…) + 0.5`
                     // rounded + 4 (nine vertical-pitch frames centred
                     // on 4 for horizontal flight).
@@ -3091,9 +3050,7 @@ pub fn tick_arrows(
 
         if let Some(holder) = shield_blocker {
             // Arrow path: deflect 90° right, set falling=true,
-            // recompute trajectory.  The arrow's impact sound (510) is
-            // gated on `play_impact && !falling`, both of which are
-            // set here — so no FX fires.  `impact_fx=None` matches.
+            // recompute trajectory.
             //
             // Apple/Stone path: keep flying along the existing
             // trajectory.  The per-type FX (509/508) plays at the
@@ -3102,16 +3059,12 @@ pub fn tick_arrows(
             // reporting.
             if matches!(proj.object.object_type, ObjectType::Arrow) {
                 proj.projectile.falling = true;
-                proj.projectile.flat_shot = false;
 
                 // Deflect direction: rotate 90° right.
                 let deflect_sector = (proj.element.direction() + 4) & 15;
                 // Stash the deflect sector; the per-tick render path
                 // spins the sprite via `(falling_direction + 14) % 16`.
                 proj.projectile.falling_direction = deflect_sector as u16;
-                // Set play_impact for structural parity even though the
-                // FX is gated off when `falling` is true.
-                proj.projectile.play_impact = true;
                 let (dx, dy) = crate::element::direction_vector_16(deflect_sector);
                 // Apply aspect ratio to the deflected Y.
                 let deflect_velocity = Point3D {
@@ -3763,10 +3716,8 @@ mod tests {
             target: EntityId(1),
             target_pos: ElemPoint2D { x: 50.0, y: 0.0 },
             trajectory: traj,
-            flat_shot: true,
             damage: 30,
             layer: 0,
-            magic_bullet: false,
             lands_in_hole: false,
             initial_velocity: None,
         });
@@ -3774,7 +3725,6 @@ mod tests {
             Entity::Projectile(p) => {
                 assert!(p.projectile.flying);
                 assert_eq!(p.projectile.trajectory.len(), 2);
-                assert!(p.projectile.flat_shot);
                 assert_eq!(p.projectile.damage, 30);
                 assert_eq!(p.object.object_type, ObjectType::Arrow);
             }
@@ -3828,10 +3778,8 @@ mod tests {
                 target: EntityId(1),
                 target_pos: ElemPoint2D { x: 50.0, y: 0.0 },
                 trajectory: traj,
-                flat_shot: true,
                 damage: 30,
                 layer: 0,
-                magic_bullet: false,
                 lands_in_hole: false,
                 initial_velocity: None,
             })),
@@ -4157,16 +4105,7 @@ mod tests {
             y: 0.0,
             z: 20.0,
         };
-        let apple = spawn_apple(
-            EntityId(0),
-            start,
-            end,
-            Some(EntityId(1)),
-            None,
-            0,
-            None,
-            None,
-        );
+        let apple = spawn_apple(EntityId(0), start, end, Some(EntityId(1)), None, 0, None);
         match apple {
             Entity::Projectile(p) => {
                 assert!(p.projectile.flying);
@@ -4338,10 +4277,8 @@ mod tests {
             target: EntityId(1),
             target_pos: ElemPoint2D { x: 50.0, y: 0.0 },
             trajectory,
-            flat_shot: true,
             damage: 30,
             layer: 0,
-            magic_bullet: false,
             lands_in_hole: false,
             initial_velocity: None,
         });
@@ -4408,10 +4345,8 @@ mod tests {
             target: EntityId(1),
             target_pos: ElemPoint2D { x: 90.0, y: 0.0 },
             trajectory,
-            flat_shot: true,
             damage: 30,
             layer: 0,
-            magic_bullet: false,
             lands_in_hole: false,
             initial_velocity: None,
         });
@@ -4472,10 +4407,8 @@ mod tests {
             target: EntityId(1),
             target_pos: ElemPoint2D { x: 80.0, y: 0.0 },
             trajectory,
-            flat_shot: true,
             damage: 30,
             layer: 0,
-            magic_bullet: false,
             lands_in_hole: false,
             initial_velocity: None,
         });
@@ -4545,10 +4478,8 @@ mod tests {
             target: EntityId(1),
             target_pos: ElemPoint2D { x: 50.0, y: 0.0 },
             trajectory,
-            flat_shot: true,
             damage: 30,
             layer: 0,
-            magic_bullet: false,
             lands_in_hole: false,
             initial_velocity: None,
         });
@@ -4619,10 +4550,8 @@ mod tests {
             target: EntityId(0),
             target_pos: ElemPoint2D { x: 10.0, y: 0.0 },
             trajectory,
-            flat_shot: true,
             damage: 30,
             layer: 0,
-            magic_bullet: false,
             lands_in_hole: false,
             initial_velocity: None,
         });
@@ -4662,7 +4591,7 @@ mod tests {
             y: 0.0,
             z: 0.0,
         };
-        let nest = spawn_wasp_nest(EntityId(0), throw_pos, target_pos, 0, None, None);
+        let nest = spawn_wasp_nest(EntityId(0), throw_pos, target_pos, 0, None);
 
         match &nest {
             Entity::Projectile(p) => {
