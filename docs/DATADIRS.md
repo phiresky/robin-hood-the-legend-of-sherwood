@@ -294,6 +294,21 @@ copy-protected and does not run unmodified.
 - Internet Archive item title: `Robin Hood - Die Legende von Sherwood (German)`
 - Internet Archive metadata date: 2003-07-09
 
+## Windows — Russian retail
+
+RuTracker ISO image. Volume ID: `ROBINHOOD`.
+
+    filename: RobinHood-ru1.iso
+    local:    datadirs/installers/RobinHood-ru1.iso
+    format:   ISO 9660 CD image (594 MB)
+    source:   https://rutracker.org/forum/viewtopic.php?t=3144799
+    BTIH:     0853169003410CFB6E04BA501305029BFF6EE694
+    MD5:      5cb02915a1f8beeb54cd7b0870b629c9
+    SHA256:   75fb1dbd0b81cca47d1fc2a128190b21f5d9f31103d590f35239ee46fa02a147
+
+- Locale: 1049 (Russian)
+- Includes `NOTINC/1033/Data/Text/Level.res` and font files under `NOTINC/Data/Interfac/Fonts`
+
 ## ~~Windows — Czech magazine coverdisc (Score #152, October 2006)~~ NOT THIS GAME
 
 Despite the archive.org title listing "Robin Hood", this disc contains
