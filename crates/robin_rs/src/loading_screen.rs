@@ -432,8 +432,8 @@ pub struct LoadingScreenRenderer {
     loading_dissolve: LoadingDissolveTextures,
     /// "Version" font for the version/demo overlay text.
     version_font: Option<Font>,
-    /// Whether we are running in demo mode.
-    is_demo: bool,
+    /// Which datadir family is currently loaded, for the version overlay.
+    datadir_kind: LoadingDatadirKind,
     /// Ceiling on `state.current_level` for the current phase. Intra-phase
     /// `increment` calls clamp to this so the bar can't overshoot the
     /// next phase's start target. `set_status` bumps this to the new
@@ -449,6 +449,13 @@ pub struct LoadingScreenRenderer {
     window_focused: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadingDatadirKind {
+    FullGame,
+    DemoI,
+    DemoII,
+}
+
 impl LoadingScreenRenderer {
     /// Create a loading screen from a `.pak` file containing three
     /// sequential 16-bit picture images (initial, final, height-mask).
@@ -458,7 +465,7 @@ impl LoadingScreenRenderer {
     pub fn new(
         window: &crate::window::GameWindow,
         pak_path: &str,
-        is_demo: bool,
+        datadir_kind: LoadingDatadirKind,
         max_level: f32,
         scale_mode: TextureScaleMode,
     ) -> Option<Self> {
@@ -469,7 +476,7 @@ impl LoadingScreenRenderer {
                     &pictures[0],
                     &pictures[1],
                     &pictures[2],
-                    is_demo,
+                    datadir_kind,
                     max_level,
                     scale_mode,
                 );
@@ -504,7 +511,7 @@ impl LoadingScreenRenderer {
             &pic_initial,
             &pic_final,
             &pic_mask,
-            is_demo,
+            datadir_kind,
             max_level,
             scale_mode,
         )
@@ -515,7 +522,7 @@ impl LoadingScreenRenderer {
         pic_initial: &Picture,
         pic_final: &Picture,
         pic_mask: &Picture,
-        is_demo: bool,
+        datadir_kind: LoadingDatadirKind,
         max_level: f32,
         scale_mode: TextureScaleMode,
     ) -> Option<Self> {
@@ -598,10 +605,10 @@ impl LoadingScreenRenderer {
         };
         let version_font = load_font("Version");
         tracing::info!(
-            "Loading screen initialized: {}x{}, demo={}",
+            "Loading screen initialized: {}x{}, datadir={:?}",
             width,
             height,
-            is_demo
+            datadir_kind
         );
 
         Some(Self {
@@ -609,7 +616,7 @@ impl LoadingScreenRenderer {
             renderer,
             loading_dissolve,
             version_font,
-            is_demo,
+            datadir_kind,
             phase_ceiling: 0.0,
             window_focused: true,
         })
@@ -710,23 +717,17 @@ impl LoadingScreenRenderer {
             None => return,
         };
 
-        // We read the version from Cargo metadata at compile time.
-        let release_version = concat!("v", env!("CARGO_PKG_VERSION"));
-        let text = if self.is_demo {
-            "DEMO v1.00"
-        } else {
-            release_version
-        };
+        let text = loading_version_text(self.datadir_kind);
 
-        let tw = font.text_width(text);
+        let tw = font.text_width(&text);
         let fh = font.height() as i32;
         // Right-aligned within the top 100px band, vertically centered
         let tx = screen_w as i32 - tw - 4; // small right margin
         let ty = (100 - fh) / 2; // centered in 0..100 band
 
         match font {
-            Font::Native(native) => self.renderer.render_text_argb(native, text, tx, ty),
-            Font::TrueType(tt) => self.renderer.render_text_truetype(tt, text, tx, ty),
+            Font::Native(native) => self.renderer.render_text_argb(native, &text, tx, ty),
+            Font::TrueType(tt) => self.renderer.render_text_truetype(tt, &text, tx, ty),
         }
     }
 
@@ -734,6 +735,15 @@ impl LoadingScreenRenderer {
     pub fn close(mut self) {
         self.state.close();
         // Renderer is dropped here, freeing SDL surfaces/textures.
+    }
+}
+
+fn loading_version_text(datadir_kind: LoadingDatadirKind) -> String {
+    let base = concat!("v", env!("CARGO_PKG_VERSION"), " ", env!("ROBIN_GIT_HASH"));
+    match datadir_kind {
+        LoadingDatadirKind::FullGame => base.to_string(),
+        LoadingDatadirKind::DemoI => format!("{base} DEMO I"),
+        LoadingDatadirKind::DemoII => format!("{base} DEMO II"),
     }
 }
 
@@ -911,6 +921,27 @@ mod tests {
         };
         let mask = hf.compute_mask(50);
         assert_eq!(mask, vec![false, false, true, true]);
+    }
+
+    #[test]
+    fn version_text_uses_cargo_version_and_git_hash_for_full_game() {
+        let text = loading_version_text(LoadingDatadirKind::FullGame);
+        assert_eq!(
+            text,
+            concat!("v", env!("CARGO_PKG_VERSION"), " ", env!("ROBIN_GIT_HASH"))
+        );
+    }
+
+    #[test]
+    fn version_text_appends_demo_kind_for_demo_datadirs() {
+        assert!(
+            loading_version_text(LoadingDatadirKind::DemoI).ends_with(" DEMO I"),
+            "Demo I version label should include datadir kind"
+        );
+        assert!(
+            loading_version_text(LoadingDatadirKind::DemoII).ends_with(" DEMO II"),
+            "Demo II version label should include datadir kind"
+        );
     }
 
     // -- LoadingScreen state machine -----------------------------------------

@@ -727,10 +727,17 @@ pub(crate) async fn run_mission(
         None
     } else {
         loading_pak.and_then(|path| {
+            let datadir_kind = match detect_demo_mode().map(|(_, _, _, location)| location) {
+                Some(MissionLocation::Leicester) => {
+                    crate::loading_screen::LoadingDatadirKind::DemoI
+                }
+                Some(MissionLocation::Lincoln) => crate::loading_screen::LoadingDatadirKind::DemoII,
+                _ => crate::loading_screen::LoadingDatadirKind::FullGame,
+            };
             crate::loading_screen::LoadingScreenRenderer::new(
                 window,
                 &path,
-                detect_demo_mode().is_some(),
+                datadir_kind,
                 LOADING_MAX_LEVEL,
                 scale_mode,
             )
