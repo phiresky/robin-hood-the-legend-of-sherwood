@@ -3345,7 +3345,6 @@ impl EngineInner {
                 move_seq_id,
                 move_elem_idx,
                 active_move_flags,
-                rider_move_flags,
                 order_compute_direction,
                 order_reverse,
             ) = {
@@ -3450,7 +3449,6 @@ impl EngineInner {
                     seq_id,
                     elem_idx,
                     active_move_flags,
-                    actor.rider_move_flags,
                     order_compute_direction,
                     order_reverse,
                 )
@@ -3877,7 +3875,7 @@ impl EngineInner {
             if matches!(motion_state, MotionState::Terminated) && is_sword_motion {
                 sword_movement_terminations.push(EntityId(idx as u32));
             }
-            if rider_move_flags & crate::sequence::MoveFlags::RIDER_CHARGE.bits() as u16 != 0
+            if active_move_flags.contains(crate::sequence::MoveFlags::RIDER_CHARGE)
                 && anim == OrderType::RunningUpright
             {
                 let frame_count = sprite.num_frames_for_anim(OrderType::RunningUpright);
@@ -4386,7 +4384,6 @@ impl EngineInner {
                 }
 
                 if start_post_seek {
-                    actor.rider_move_flags = 0;
                     actor.clear_path();
                     actor.action_state = if is_swordfighting || actor.action_state.is_sword() {
                         crate::element::ActionState::WaitingSword
@@ -4452,8 +4449,6 @@ impl EngineInner {
                             if let Some((door_index, direct)) = completed {
                                 completed_door_passes.push((eid, door_index, direct));
                             }
-                            // Clear rider charge flags when movement ends.
-                            actor.rider_move_flags = 0;
                             // Final waypoint's do_next_order pop was
                             // already collected above when
                             // `path_waypoint_index` advanced past the

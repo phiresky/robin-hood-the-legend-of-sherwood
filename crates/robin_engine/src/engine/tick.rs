@@ -6293,7 +6293,6 @@ impl EngineInner {
                 // arrival teardown performed by the movement tick.
                 let arrived = if let DoorPassAdvance::Done { completed } = &adv {
                     let am = actor.active_movement;
-                    actor.rider_move_flags = 0;
                     actor.clear_path();
                     actor.action_state = if actor.action_state.is_sword() {
                         crate::element::ActionState::WaitingSword

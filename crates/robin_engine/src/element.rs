@@ -876,11 +876,6 @@ pub struct ActorData {
     pub active_lift: Option<ActiveLiftClimb>,
 
     // -- Rider charge state --
-    /// Movement flags for the current path (from `MoveFlags` bits).
-    /// Set when path is dispatched from pathfinder; cleared when path ends.
-    /// Used to detect `RIDER_CHARGE` for firing `EventGaloppLoopEnd`.
-    pub rider_move_flags: u16,
-
     /// Active rider charge state.  When `Some`, the rider is executing
     /// `ExecuteRiderCharge` — moving along a path while checking a
     /// polygon hit zone each frame.
@@ -960,7 +955,6 @@ impl Default for ActorData {
             jump_z_offset: 0.0,
             active_flight: None,
             active_lift: None,
-            rider_move_flags: 0,
             active_rider_charge: None,
             shield_obstacle: None,
             last_noise_volume: 0,

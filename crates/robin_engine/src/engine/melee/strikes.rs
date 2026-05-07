@@ -1704,21 +1704,31 @@ impl EngineInner {
                     Some(a) => a,
                     None => continue,
                 };
-                // Check if this entity is in rider charging movement but
-                // hasn't been initialized yet.
-                if actor.active_rider_charge.is_some() || actor.rider_move_flags == 0 {
+                // Skip already-initialized charges and entities with no
+                // active Move element (the charge path is queued as
+                // orders on the Move element).
+                if actor.active_rider_charge.is_some() {
                     continue;
                 }
-                // Only initialize if the action state indicates the charge animation.
-                // The RIDER_CHARGE_HIT flag sets the order to RiderCharging,
-                // which puts the entity in MovingFast with active path.
-                let has_charge_hit = actor.rider_move_flags
-                    & crate::sequence::MoveFlags::RIDER_CHARGE.bits() as u16
-                    != 0;
-                // Rider-charge gate: must carry the RIDER_CHARGE_HIT
-                // flag AND have an active Move element (the charge
-                // path is queued as orders on the Move element).
-                if !has_charge_hit || actor.active_movement.sequence_id.is_none() {
+                let Some(move_seq_id) = actor.active_movement.sequence_id else {
+                    continue;
+                };
+                let move_elem_idx = actor.active_movement.element_index;
+                // Read the live `MoveFlags` from the sequence element to
+                // gate on `RIDER_CHARGE`.  The RIDER_CHARGE_HIT flag
+                // sets the order to RiderCharging, which puts the
+                // entity in MovingFast with active path.
+                let has_charge = self
+                    .sequence_manager
+                    .get_element(move_seq_id, move_elem_idx)
+                    .and_then(|e| match &e.data {
+                        crate::sequence::SequenceElementData::Movement { flags, .. } => {
+                            Some(flags.contains(crate::sequence::MoveFlags::RIDER_CHARGE))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+                if !has_charge {
                     continue;
                 }
 
