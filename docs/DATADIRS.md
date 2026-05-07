@@ -262,6 +262,38 @@ Developer: Spellbound Entertainment AG. Flip-top big box, ¥7,980. Version 1.1.
 - Locale: 1041 (Japanese)
 - A v1.15 update patch is also available at the same archive.org item (Update_1.15.7z, 5.4 MB)
 
+## Windows — Italian retail
+
+Internet Archive CD image. Volume ID: `Robin_Hood`.
+
+    filename: robin_hood_it.iso
+    local:    datadirs/installers/robin_hood_it.iso
+    format:   ISO 9660 CD image (664 MB)
+    source:   https://archive.org/details/robin_hood_202207
+    MD5:      c446dc5b1fbc1ec2de770cf7e8d9f6f7
+    SHA256:   6bcd5bbb5b2e4f1c86905a27f97c4da0338e09f5874845fc450b3181f830e1f1
+
+- Locale: 1040 (Italian)
+- Includes Italian manual at `Manuale/RHManuale.pdf`
+
+## Windows — German retail
+
+Internet Archive Alcohol 120% disc image. The archive.org metadata notes that the CD is
+copy-protected and does not run unmodified.
+
+    filename: Robin_Hood.mdf + Robin_Hood.mds
+    local:    datadirs/installers/german-ia/
+    format:   MDF/MDS disc image (840 MB + 24 KB)
+    source:   https://archive.org/details/robin-hood-die-legende-von-sherwood-german
+    MD5:      86beed578e56ad9f250259b971606976 (Robin_Hood.mdf)
+    MD5:      a373f05fa333d0c1a8a8e1b8c4a31ff7 (Robin_Hood.mds)
+    SHA256:   cada9bb9557e5b987e1d0a5bd0cf6eebfba3881b03a2cfaa644993f0748dd646 (Robin_Hood.mdf)
+    SHA256:   ef1ea4d6597c592a8e4f1241287ec79b865c791aa698fad062f78513db1afca4 (Robin_Hood.mds)
+
+- Locale: 1031 (German)
+- Internet Archive item title: `Robin Hood - Die Legende von Sherwood (German)`
+- Internet Archive metadata date: 2003-07-09
+
 ## ~~Windows — Czech magazine coverdisc (Score #152, October 2006)~~ NOT THIS GAME
 
 Despite the archive.org title listing "Robin Hood", this disc contains
