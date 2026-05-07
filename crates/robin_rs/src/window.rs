@@ -201,11 +201,33 @@ pub extern "system" fn Java_io_github_phiresky_robinhood_RobinHoodActivity_nativ
     }
 }
 
+/// Process-wide handle on the host-command sender.  Populated once the
+/// event loop is set up so global helpers like [`reset_dead_keys`] can
+/// reach the [`AppHandler`] without threading the channel through
+/// every caller.
+static HOST_CMD_TX: std::sync::OnceLock<std::sync::Mutex<Option<async_channel::Sender<HostCmd>>>> =
+    std::sync::OnceLock::new();
+
+fn host_cmd_tx() -> &'static std::sync::Mutex<Option<async_channel::Sender<HostCmd>>> {
+    HOST_CMD_TX.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn try_send_host_cmd(cmd: HostCmd) {
+    if let Some(tx) = host_cmd_tx().lock().expect("host cmd tx poisoned").as_ref() {
+        let _ = tx.try_send(cmd);
+    }
+}
+
 /// Commands flowing from the game out to the [`AppHandler`] / window.
 /// Picked up on the next `about_to_wait` / `new_events` callback.
 pub(crate) enum HostCmd {
     GrabMouse(bool),
     Exit,
+    /// Reset the OS dead-key composition state.  Sent when a text-input
+    /// surface (e.g. the dev console) opens via a key bound to a dead
+    /// key (`^`, `~`, etc.) so the next typed character isn't composed
+    /// into a diacritic.
+    ResetDeadKeys,
 }
 
 // ---------------------------------------------------------------------
@@ -722,6 +744,11 @@ impl AppHandler {
                     // when about_to_wait next fires.
                     self.events_tx.close();
                 }
+                HostCmd::ResetDeadKeys => {
+                    if let Some(w) = &self.window {
+                        w.reset_dead_keys();
+                    }
+                }
             }
         }
     }
@@ -1126,6 +1153,7 @@ where
 
     let (events_tx, events_rx) = async_channel::unbounded::<HostMsg>();
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<HostCmd>();
+    *host_cmd_tx().lock().expect("host cmd tx poisoned") = Some(cmd_tx.clone());
     #[cfg(target_os = "android")]
     {
         *android_back_tx().lock().expect("android back tx poisoned") = Some(events_tx.clone());
@@ -1304,10 +1332,16 @@ where
 // Text-input toggles (no-ops under winit).
 // ---------------------------------------------------------------------
 
-/// SDL-era IME helpers — no-ops under winit, which delivers
-/// `GameEvent::TextInput` events whether or not we've explicitly
-/// "started" it.
-pub fn start_text_input() {}
+/// SDL-era IME helpers — winit delivers `GameEvent::TextInput` events
+/// whether or not we've explicitly "started" it, so the start/stop
+/// pair is mostly bookkeeping.  `start_text_input` additionally clears
+/// any pending dead-key composition: when the player opens a text
+/// surface (e.g. the dev console) using a key bound to a dead key
+/// (`^`, `~`, etc.), the OS would otherwise compose that mark into
+/// the next typed character.
+pub fn start_text_input() {
+    try_send_host_cmd(HostCmd::ResetDeadKeys);
+}
 pub fn stop_text_input() {}
 
 // ---------------------------------------------------------------------
