@@ -5409,7 +5409,8 @@ impl EnemyAi {
             Substate::FleeingRetireFromCombat => {
                 if stimulus_type == StimulusType::EventReachPoint {
                     self.set_state(AiState::Fleeing, Substate::FleeingRetireFromCombatTurn);
-                    self.base.face_position_fast(self.base.seek_position, ctx);
+                    self.base
+                        .face_position_with_ctx(self.base.seek_position, ctx);
                 }
             }
 

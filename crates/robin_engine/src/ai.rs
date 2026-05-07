@@ -7380,19 +7380,7 @@ impl AiController {
     /// - `elevation_delta`: `target_elevation - ctx.elevation`. Pass
     ///   `0.0` for 2D-only faces. The target's elevation shifts the
     ///   effective dy before the aspect-ratio scale.
-    /// - `fast`: when `true`, queue a fast-turn (2 sectors per frame
-    ///   instead of 1). The engine currently snaps direction
-    ///   instantaneously in `process_turn_orders`, so the flag is
-    ///   observationally a no-op today — but it is threaded through
-    ///   `AiOrderIntent::fast` so a future multi-frame turn animation
-    ///   can honour it.
-    fn face_position_impl(
-        &mut self,
-        pos: Position,
-        ctx: &AiContext,
-        elevation_delta: f32,
-        fast: bool,
-    ) {
+    fn face_position_impl(&mut self, pos: Position, ctx: &AiContext, elevation_delta: f32) {
         let dx = pos.x - ctx.position.x;
         let dy = (pos.y - ctx.position.y) + elevation_delta;
         let target_dir = crate::position_interface::vector_to_sector_0_to_15_iso(dx, dy);
@@ -7410,30 +7398,20 @@ impl AiController {
             may_short_circuit,
             already_matches = (target_dir as u16 == ctx.direction),
             elevation_delta,
-            fast,
             "face_position_impl"
         );
         if target_dir as u16 == ctx.direction && may_short_circuit {
             self.already_turned = true;
             return;
         }
-        let mut order = AiOrderIntent::face_toward(pos.x, pos.y);
-        order.fast = fast;
-        self.pending_orders.push(order);
+        self.pending_orders
+            .push(AiOrderIntent::face_toward(pos.x, pos.y));
     }
 
     /// Turn to face a position (2D — no elevation adjustment). Honours
     /// the `already_turned` same-frame short-circuit.
     pub fn face_position_with_ctx(&mut self, pos: Position, ctx: &AiContext) {
-        self.face_position_impl(pos, ctx, 0.0, false);
-    }
-
-    /// Turn to face a position, using a fast-turn animation —
-    /// observable only when the engine grows multi-frame Turn
-    /// animations (today's direction dispatch is instantaneous, so
-    /// this threads through as a semantic marker).
-    pub fn face_position_fast(&mut self, pos: Position, ctx: &AiContext) {
-        self.face_position_impl(pos, ctx, 0.0, true);
+        self.face_position_impl(pos, ctx, 0.0);
     }
 
     /// Turn to face another entity. Feeds the target's elevation into
@@ -7447,19 +7425,7 @@ impl AiController {
         };
         let elevation_delta = view.elevation - ctx.elevation;
         let target_pos = view.position;
-        self.face_position_impl(target_pos, ctx, elevation_delta, false);
-    }
-
-    /// Turn to face another entity using a fast-turn animation. Used
-    /// in combat/seek paths. Elevation delta is applied identically
-    /// to [`Self::face_entity`].
-    pub fn face_entity_fast(&mut self, handle: NpcHandle, ctx: &AiContext) {
-        let Some(view) = ctx.entity_view(handle) else {
-            return;
-        };
-        let elevation_delta = view.elevation - ctx.elevation;
-        let target_pos = view.position;
-        self.face_position_impl(target_pos, ctx, elevation_delta, true);
+        self.face_position_impl(target_pos, ctx, elevation_delta);
     }
 
     // -- Self-stimuli --
@@ -7492,7 +7458,7 @@ impl AiController {
             y: ctx.position.y + dir[1] * 100.0,
             ..ctx.position
         };
-        self.face_position_impl(target, ctx, 0.0, false);
+        self.face_position_impl(target, ctx, 0.0);
     }
 
     fn face_to_same_direction_can_short_circuit(ctx: &AiContext) -> bool {

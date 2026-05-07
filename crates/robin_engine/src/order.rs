@@ -517,8 +517,6 @@ pub struct Order {
     /// Target position (2D map coordinates).
     pub target_x: f32,
     pub target_y: f32,
-    /// Target position Z (height).
-    pub target_z: f32,
     /// The actor this order targets, if any (entity ID).
     pub target_actor: Option<u32>,
     /// Higher priority orders are executed first.
@@ -542,10 +540,6 @@ pub struct Order {
     /// dispatching this order.  Used by follow-up / continuous patrol
     /// moves that want to preserve the outgoing sequence.
     pub no_halt: bool,
-
-    /// For `OrderType::Turning`: request the fast (2-sectors-per-frame)
-    /// turn variant.  See [`AiOrderIntent::fast`].
-    pub fast: bool,
 
     /// Per-order tag used by the sprite pipeline so animation bookings
     /// don't silently restart mid-play.
@@ -577,7 +571,6 @@ impl Order {
             order_type,
             target_x: x,
             target_y: y,
-            target_z: 0.0,
             target_actor: None,
             priority: 0,
             compute_direction: true,
@@ -587,7 +580,6 @@ impl Order {
             done: false,
             move_flags: 0,
             no_halt: false,
-            fast: false,
             order_id,
             antagonist: None,
             completion: OrderCompletion::AdvanceElement,
@@ -685,7 +677,6 @@ pub struct AiOrderIntent {
     pub order_type: OrderType,
     pub target_x: f32,
     pub target_y: f32,
-    pub target_z: f32,
     pub target_actor: Option<u32>,
     pub priority: i32,
     pub compute_direction: bool,
@@ -697,14 +688,6 @@ pub struct AiOrderIntent {
     /// Movement speed multiplier copied onto generated movement sequence elements.
     pub speed_factor: f32,
     pub no_halt: bool,
-    /// For `OrderType::Turning` orders: `true` requests the
-    /// 2-sectors-per-frame turn (`TurnFast`); `false` requests the
-    /// default 1-sector-per-frame turn.  The current engine snaps
-    /// direction instantaneously in `process_turn_orders`, so this
-    /// flag is observationally a no-op — it exists so AI callers can
-    /// express the intent without losing it when a future engine
-    /// change introduces multi-frame Turn animations.
-    pub fast: bool,
     pub antagonist: Option<crate::element::EntityId>,
     /// When set, the engine drain runs
     /// `FastFindGrid::find_authorized_position` against the actor's
@@ -726,7 +709,6 @@ impl AiOrderIntent {
             order_type,
             target_x: x,
             target_y: y,
-            target_z: 0.0,
             target_actor: None,
             priority: 0,
             compute_direction: true,
@@ -737,7 +719,6 @@ impl AiOrderIntent {
             move_flags: 0,
             speed_factor: 1.0,
             no_halt: false,
-            fast: false,
             antagonist: None,
             find_accessible: false,
             ask_obstacle: false,
@@ -764,7 +745,6 @@ impl AiOrderIntent {
             order_type: self.order_type,
             target_x: self.target_x,
             target_y: self.target_y,
-            target_z: self.target_z,
             target_actor: self.target_actor,
             priority: self.priority,
             compute_direction: self.compute_direction,
@@ -774,7 +754,6 @@ impl AiOrderIntent {
             done: self.done,
             move_flags: self.move_flags,
             no_halt: self.no_halt,
-            fast: self.fast,
             order_id,
             antagonist: self.antagonist,
             completion: OrderCompletion::AdvanceElement,

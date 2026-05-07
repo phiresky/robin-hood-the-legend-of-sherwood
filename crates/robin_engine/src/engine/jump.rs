@@ -1519,10 +1519,8 @@ mod tests {
             low_exit_point: None,
             high_exit_point: None,
             lowest_door_index: None,
-            highest_door_index: None,
             jump_line_indices: Vec::new(),
             gate_indices: Vec::new(),
-            gate_directions: Vec::new(),
             underlying_sector: None,
             associated_sector_index: None,
         };
