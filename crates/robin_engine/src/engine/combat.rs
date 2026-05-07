@@ -344,10 +344,8 @@ impl EngineInner {
                 target: result.target,
                 target_pos: result.target_pos,
                 trajectory,
-                flat_shot,
                 damage,
                 layer,
-                magic_bullet,
                 lands_in_hole,
                 initial_velocity: Some(velocity),
             });
@@ -442,7 +440,6 @@ impl EngineInner {
         };
 
         proj.projectile.falling = true;
-        proj.projectile.flat_shot = false;
         proj.projectile.flying = true;
         // Seed `falling_direction` from the inverted sector so `Refresh`
         // renders the tumble animation against the ricochet direction
@@ -814,12 +811,12 @@ impl EngineInner {
             Some(t) => t,
             None => return,
         };
-        let (throw_pos, layer, sector) = match self.get_entity(actor_id) {
+        let (throw_pos, layer) = match self.get_entity(actor_id) {
             Some(e) => {
                 let hand = e
                     .compute_hand_point(None)
                     .unwrap_or(e.element_data().position());
-                (hand, e.element_data().layer(), e.element_data().sector())
+                (hand, e.element_data().layer())
             }
             None => return,
         };
@@ -864,7 +861,6 @@ impl EngineInner {
                 Some(target_id),
                 target_forecasted_movement,
                 layer,
-                sector,
                 Some(&obstacle_check),
             ),
             crate::element::ObjectType::Stone => crate::bow_shot::spawn_stone(
@@ -874,7 +870,6 @@ impl EngineInner {
                 Some(target_id),
                 target_forecasted_movement,
                 layer,
-                sector,
                 Some(&obstacle_check),
             ),
             _ => return,
@@ -2197,18 +2192,15 @@ impl EngineInner {
             }
         };
 
-        // `dive` fires only for water; HOLE material sets `disappear`
-        // instead (set at trajectory-compute time).  Water plays a
-        // splash; hole stays silent.  Route each material to its own
-        // flag so other systems that inspect ProjectileData see the
-        // right state.
+        // `disappear` fires only for HOLE material; the splash titbit
+        // and Plouf sound for water are emitted inline below.  Water
+        // doesn't need a stored flag because the side-effects fire in
+        // the same tick the landing is detected.
         let is_water = matches!(material, crate::sound_cache::Material::Water);
-        if let Some(Some(Entity::Projectile(p))) = self.entities.get_mut(arrow.0 as usize) {
-            if is_water {
-                p.projectile.dive = true;
-            } else {
-                p.projectile.disappear = true;
-            }
+        if !is_water
+            && let Some(Some(Entity::Projectile(p))) = self.entities.get_mut(arrow.0 as usize)
+        {
+            p.projectile.disappear = true;
         }
 
         if !is_water {
@@ -2938,13 +2930,13 @@ impl EngineInner {
                     // Spawn a net projectile entity with ballistic
                     // trajectory.  Launch origin is the thrower's hand
                     // point, not their feet.
-                    let (throw_pos, layer, sector) = self
+                    let (throw_pos, layer) = self
                         .get_entity(actor_id)
                         .map(|e| {
                             let hand = e
                                 .compute_hand_point(None)
                                 .unwrap_or(e.element_data().position());
-                            (hand, e.element_data().layer(), e.element_data().sector())
+                            (hand, e.element_data().layer())
                         })
                         .unwrap_or_default();
                     let target_3d = crate::element::Point3D {
@@ -2963,7 +2955,6 @@ impl EngineInner {
                         throw_pos,
                         target_3d,
                         layer,
-                        sector,
                         Some(&obstacle_check),
                     );
                     let net_id = self.add_entity(net_entity);
@@ -2994,13 +2985,13 @@ impl EngineInner {
                     // the purse arcs over walls / falls onto roofs the
                     // same way other ground-targeted throwables do.
                     // Launch origin is the thrower's hand point.
-                    let (throw_pos, layer, sector) = self
+                    let (throw_pos, layer) = self
                         .get_entity(actor_id)
                         .map(|e| {
                             let hand = e
                                 .compute_hand_point(None)
                                 .unwrap_or(e.element_data().position());
-                            (hand, e.element_data().layer(), e.element_data().sector())
+                            (hand, e.element_data().layer())
                         })
                         .unwrap_or_default();
                     let target_3d = crate::element::Point3D {
@@ -3019,7 +3010,6 @@ impl EngineInner {
                         throw_pos,
                         target_3d,
                         layer,
-                        sector,
                         Some(&obstacle_check),
                     );
                     let purse_id = self.add_entity(purse_entity);
@@ -3050,13 +3040,13 @@ impl EngineInner {
                     // Spawn a wasp nest projectile entity with ballistic
                     // trajectory.  Launch origin is the thrower's hand
                     // point.
-                    let (throw_pos, layer, sector) = self
+                    let (throw_pos, layer) = self
                         .get_entity(actor_id)
                         .map(|e| {
                             let hand = e
                                 .compute_hand_point(None)
                                 .unwrap_or(e.element_data().position());
-                            (hand, e.element_data().layer(), e.element_data().sector())
+                            (hand, e.element_data().layer())
                         })
                         .unwrap_or_default();
                     let target_3d = crate::element::Point3D {
@@ -3075,7 +3065,6 @@ impl EngineInner {
                         throw_pos,
                         target_3d,
                         layer,
-                        sector,
                         Some(&obstacle_check),
                     );
                     let wasp_id = self.add_entity(wasp_entity);
