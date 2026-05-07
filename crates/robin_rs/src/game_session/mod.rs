@@ -331,6 +331,7 @@ pub(crate) async fn run_mission_headless(
                 frame_cmds.push(PlayerInput::new(host.local_seat, cmd));
             }
         }
+        let mut headless_active_modal: Option<ActiveModal> = None;
         drain_steps(
             &mut manager,
             &mut host,
@@ -341,6 +342,7 @@ pub(crate) async fn run_mission_headless(
             &mut rollback_checker,
             &mut replay_player,
             &mut manual_pause,
+            &mut headless_active_modal,
         );
         let dismissed = dismiss_pending_modals(&mut host);
         if dismissed > 0 {
@@ -1876,6 +1878,73 @@ pub(crate) async fn run_mission(
             &mut input_translator,
         );
 
+        // ── View-only input (scroll / zoom): always allowed ──
+        // These mutate host-side viewport state only — never the sim —
+        // so they're safe during replay playback and rewind, when the
+        // user wants to pan/zoom around the paused world.  Suppressed
+        // only when the console or the pause menu has focus.
+        {
+            use crate::input_translator::GameAction;
+            use robin_engine::engine::ScrollDirection;
+            let view_suppressed =
+                console_overlay.is_visible() || pause_menu.is_some() || pause_closed_this_frame;
+            if !view_suppressed {
+                for action in kb_actions.iter().chain(mouse_actions.iter()) {
+                    let scroll_suppressed_by_minimap =
+                        matches!(
+                            action,
+                            GameAction::ScrollUp
+                                | GameAction::ScrollDown
+                                | GameAction::ScrollLeft
+                                | GameAction::ScrollRight
+                        ) && host.engine_display.minimap().drag_start();
+                    if scroll_suppressed_by_minimap {
+                        continue;
+                    }
+                    match action {
+                        GameAction::ScrollUp => {
+                            apply_local_viewport_scroll(&mut host, ScrollDirection::Up);
+                        }
+                        GameAction::ScrollDown => {
+                            apply_local_viewport_scroll(&mut host, ScrollDirection::Down);
+                        }
+                        GameAction::ScrollLeft => {
+                            apply_local_viewport_scroll(&mut host, ScrollDirection::Left);
+                        }
+                        GameAction::ScrollRight => {
+                            apply_local_viewport_scroll(&mut host, ScrollDirection::Right);
+                        }
+                        GameAction::ZoomIn => {
+                            let mp = threaded_input.position();
+                            host.viewport
+                                .zoom_by(2.0, Some(robin_engine::geo2d::pt(mp.x, mp.y)));
+                        }
+                        GameAction::ZoomOut => {
+                            let mp = threaded_input.position();
+                            host.viewport
+                                .zoom_by(0.5, Some(robin_engine::geo2d::pt(mp.x, mp.y)));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // ── Mouse middle-drag viewport pan: always allowed ──
+        // Same reasoning as the keyboard scroll/zoom block above —
+        // ViewportPan is pure host-side viewport state.  Apply it here
+        // before `handle_mouse_input` (which is gated by replay state)
+        // can swallow it.
+        if pause_menu.is_none() && !pause_closed_this_frame && !manager.engine.user_locked() {
+            for event in &events {
+                if let GameEvent::ViewportPan { xrel, yrel } = *event {
+                    host.viewport
+                        .scroll_by(geo2d::pt(-(xrel as f32), -(yrel as f32)));
+                    host.input.cancel_multi_selection();
+                }
+            }
+        }
+
         // ── Skip all sim-affecting input during replay / rewind ──
         // Recorded commands are injected at the tick boundary instead
         // (replay), or suppressed entirely (rewind — live input
@@ -1970,7 +2039,6 @@ pub(crate) async fn run_mission(
                         // the game resumes.
                     }
                     _ => {
-                        use robin_engine::engine::ScrollDirection;
                         match action {
                             GameAction::SlowMotion => {
                                 // Toggle the slow-motion pacing flag.
@@ -1987,37 +2055,16 @@ pub(crate) async fn run_mission(
                                 // `SetOutlineDisplay` commands.
                                 host.input.draw_hidden = !host.input.draw_hidden;
                             }
-                            // Suppress edge-scrolling while dragging
-                            // the minimap.
-                            GameAction::ScrollUp if host.engine_display.minimap().drag_start() => {}
-                            GameAction::ScrollDown
-                                if host.engine_display.minimap().drag_start() => {}
-                            GameAction::ScrollLeft
-                                if host.engine_display.minimap().drag_start() => {}
-                            GameAction::ScrollRight
-                                if host.engine_display.minimap().drag_start() => {}
-                            GameAction::ScrollUp => {
-                                apply_local_viewport_scroll(&mut host, ScrollDirection::Up);
-                            }
-                            GameAction::ScrollDown => {
-                                apply_local_viewport_scroll(&mut host, ScrollDirection::Down);
-                            }
-                            GameAction::ScrollLeft => {
-                                apply_local_viewport_scroll(&mut host, ScrollDirection::Left);
-                            }
-                            GameAction::ScrollRight => {
-                                apply_local_viewport_scroll(&mut host, ScrollDirection::Right);
-                            }
-                            GameAction::ZoomIn => {
-                                let mp = threaded_input.position();
-                                host.viewport
-                                    .zoom_by(2.0, Some(robin_engine::geo2d::pt(mp.x, mp.y)));
-                            }
-                            GameAction::ZoomOut => {
-                                let mp = threaded_input.position();
-                                host.viewport
-                                    .zoom_by(0.5, Some(robin_engine::geo2d::pt(mp.x, mp.y)));
-                            }
+                            // Scroll{Up,Down,Left,Right} and Zoom{In,Out}
+                            // are handled by the always-on view-only
+                            // input pass at the top of the frame so
+                            // they work during replay/rewind.
+                            GameAction::ScrollUp
+                            | GameAction::ScrollDown
+                            | GameAction::ScrollLeft
+                            | GameAction::ScrollRight
+                            | GameAction::ZoomIn
+                            | GameAction::ZoomOut => {}
                             GameAction::SelectAll => {
                                 let cmd = PlayerCommand::SelectAllPcs;
                                 dispatch_local_command(
@@ -2835,6 +2882,7 @@ pub(crate) async fn run_mission(
             &mut rollback_checker,
             &mut replay_player,
             &mut manual_pause,
+            &mut active_modal,
         );
 
         // Publish replay-playback status for the script-RPC `state`
