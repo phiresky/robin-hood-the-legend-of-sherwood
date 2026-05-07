@@ -487,15 +487,13 @@ impl EngineInner {
         // boundaries are layer-flat in the shipped data).  We only
         // need the lines for the per-tick crossing dispatch — the
         // polygon containment scan still runs through `MaterialSectors`.
-        for (material_idx, ms) in assets.material_sectors.sectors.iter().enumerate() {
+        for ms in &assets.material_sectors.sectors {
             if ms.points.len() < 2 {
                 continue;
             }
-            let idx_u16 = u16::try_from(material_idx).ok();
             self.fast_grid.add_sector_lines_for_sound(
                 0, // layer 0
-                &ms.points, idx_u16,
-                true, // material polygons are always active in shipped levels
+                &ms.points, true, // material polygons are always active in shipped levels
             );
         }
         if !assets.material_sectors.sectors.is_empty() {
@@ -654,7 +652,6 @@ impl EngineInner {
                         layer: sec.layer,
                         sector_number: crate::sector::SectorNumber::new(-1), // script sectors don't have proto sector numbers
                         door_index: None,
-                        lift_motion_area: None,
                         lift_type: None,
                         lift_direction: 0,
                         force_crouched: false,
@@ -3969,7 +3966,6 @@ impl EngineInner {
                             layer: layer_idx as u16,
                             sector_number,
                             door_index: None,
-                            lift_motion_area: None,
                             lift_type: None,
                             lift_direction: 0,
                             force_crouched,
@@ -4010,7 +4006,6 @@ impl EngineInner {
                                 layer: layer_idx as u16,
                                 sector_number,
                                 door_index: None,
-                                lift_motion_area: None,
                                 lift_type: None,
                                 lift_direction: 0,
                                 force_crouched: false,
@@ -4126,7 +4121,6 @@ impl EngineInner {
                         layer: building_lift_layer,
                         sector_number: sn_wrapped,
                         door_index: None,
-                        lift_motion_area: None,
                         lift_type: None,
                         lift_direction: 0,
                         force_crouched: false,
@@ -4191,7 +4185,6 @@ impl EngineInner {
                         layer: raw.layer,
                         sector_number,
                         door_index: None,
-                        lift_motion_area: None,
                         lift_type: None,
                         lift_direction: 0,
                         force_crouched: false,
@@ -4580,7 +4573,6 @@ impl EngineInner {
                 layer: zone.layer,
                 sector_number: crate::sector::SectorNumber::new(-1),
                 door_index: None,
-                lift_motion_area: None,
                 lift_type: None,
                 lift_direction: 0,
                 force_crouched: false,
@@ -5025,7 +5017,6 @@ impl EngineInner {
                         layer,
                         sector_number: crate::sector::SectorNumber::new(-1), /* Doors don't have motion sector numbers */
                         door_index: Some(door_idx as u32),
-                        lift_motion_area: None,
                         lift_type: None,
                         lift_direction: 0,
                         force_crouched: false,
@@ -5185,7 +5176,6 @@ impl EngineInner {
                     layer,
                     sector_number: crate::sector::SectorNumber::new(-1), /* Patch sectors don't have motion sector numbers */
                     door_index: None,
-                    lift_motion_area: None,
                     lift_type: None,
                     lift_direction: 0,
                     force_crouched: false,

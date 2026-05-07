@@ -592,9 +592,6 @@ pub struct ActiveLiftClimb {
     /// they entered at the bottom going up. Used to flip the correct
     /// `lift_occupied_*` flag back off on exit.
     pub upwards: bool,
-    /// `true` if the actor is a PC — matches the `is_pc` flag
-    /// tracked in `set_occupied_*`, so we decrement both counters.
-    pub is_pc: bool,
 }
 
 /// Active push-flight state.
@@ -671,18 +668,6 @@ pub struct ActiveRiderCharge {
     pub initialized: bool,
 }
 
-/// Pending layer/sector swap during a door pass.
-///
-/// When the actor reaches the door's midpoint waypoint, swap the
-/// layer/sector to the other side of the door.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
-pub struct PendingDoorPass {
-    /// Trigger when `path_waypoint_index` reaches this value.
-    pub at_waypoint_index: usize,
-    pub target_layer: u16,
-    pub target_sector: Option<crate::position_interface::SectorHandle>,
-}
-
 /// One step in a door-pass sub-order chain.
 ///
 /// Built by `translate_pass_door_*`. Each door type produces a specific
@@ -731,8 +716,6 @@ pub enum DoorPassStep {
 /// - Walk steps set waypoints on the actor path
 /// - PassingDoor steps fire the layer/sector swap callback
 /// - Transition steps play animations in place
-///
-/// Replaces the simpler [`PendingDoorPass`] with full multi-step parity.
 #[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
 pub struct ActiveDoorPass {
     /// Door index in the global door table.
@@ -836,15 +819,6 @@ pub struct ActorData {
     /// Tracks the sequence element that initiated the current movement,
     /// so we can notify the sequence manager when movement completes.
     pub active_movement: ActiveMovement,
-
-    /// Pending layer/sector change to apply mid-walk during a door pass.
-    /// When set, the movement tick checks the actor's path waypoint index
-    /// against `at_waypoint_index` and applies the change when the actor
-    /// reaches that waypoint, firing the layer/sector update at the
-    /// door midpoint.
-    ///
-    /// Deprecated: prefer `active_door_pass` for new code.
-    pub pending_door_pass: Option<PendingDoorPass>,
 
     /// Multi-step door-pass state. When set, the movement tick processes
     /// steps one at a time: walk steps set waypoints, PassingDoor steps
@@ -971,7 +945,6 @@ impl Default for ActorData {
             script_class: String::new(),
             pathfinder_speed: PathFinderSpeed::default(),
             active_movement: ActiveMovement::none(),
-            pending_door_pass: None,
             active_door_pass: None,
             active_shot: ActiveShot::none(),
             active_melee: crate::movement::ActiveMelee::none(),

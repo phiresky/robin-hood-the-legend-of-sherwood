@@ -531,8 +531,6 @@ pub struct Order {
     pub lock_ai: bool,
     /// Play the animation in reverse.
     pub reverse: bool,
-    /// Whether the entity can fly / ignore terrain.
-    pub fly: bool,
     /// Whether this order has been completed.
     pub done: bool,
     /// Movement flags propagated from AI GotoFlags.
@@ -586,7 +584,6 @@ impl Order {
             tolerance: 0.0,
             lock_ai: false,
             reverse: false,
-            fly: false,
             done: false,
             move_flags: 0,
             no_halt: false,
@@ -695,7 +692,6 @@ pub struct AiOrderIntent {
     pub tolerance: f32,
     pub lock_ai: bool,
     pub reverse: bool,
-    pub fly: bool,
     pub done: bool,
     pub move_flags: u16,
     /// Movement speed multiplier copied onto generated movement sequence elements.
@@ -737,7 +733,6 @@ impl AiOrderIntent {
             tolerance: 0.0,
             lock_ai: false,
             reverse: false,
-            fly: false,
             done: false,
             move_flags: 0,
             speed_factor: 1.0,
@@ -776,7 +771,6 @@ impl AiOrderIntent {
             tolerance: self.tolerance,
             lock_ai: self.lock_ai,
             reverse: self.reverse,
-            fly: self.fly,
             done: self.done,
             move_flags: self.move_flags,
             no_halt: self.no_halt,

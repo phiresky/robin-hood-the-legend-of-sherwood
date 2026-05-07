@@ -100,9 +100,6 @@ impl EngineInner {
             {
                 let st = self.fast_grid.lift_state_mut(grid_idx as u32);
                 st.occupants = st.occupants.saturating_sub(1);
-                if lift.is_pc {
-                    st.occupants_pc = st.occupants_pc.saturating_sub(1);
-                }
                 if st.occupants == 0 {
                     st.occupied_upwards = false;
                     st.occupied_downwards = false;

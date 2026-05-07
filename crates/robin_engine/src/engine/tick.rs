@@ -1841,8 +1841,6 @@ impl EngineInner {
                                                     ActiveMovement::new(seq_id, elem_idx);
                                                 actor.passing_door_directly = direct;
                                                 actor.active_door_pass = Some(dp);
-                                                // Clear any legacy pending pass
-                                                actor.pending_door_pass = None;
                                             }
                                             self.apply_door_pass_continue_state(owner, *action);
                                             tracing::debug!(
@@ -2046,14 +2044,12 @@ impl EngineInner {
                                 // and sets the wait_time cooldown
                                 // (100 for downwards, 80 for upwards).
                                 if let Some((sn, _)) = gate_info {
-                                    let is_pc =
-                                        self.get_entity(owner).map(|e| e.is_pc()).unwrap_or(false);
                                     if let Some(idx) = grid_idx {
                                         let lift = self.fast_grid.lift_state_mut(idx as u32);
                                         if is_high {
-                                            lift.set_occupied_downwards(is_pc, true);
+                                            lift.set_occupied_downwards(true);
                                         } else {
-                                            lift.set_occupied_upwards(is_pc, true);
+                                            lift.set_occupied_upwards(true);
                                         }
                                     }
                                     // Record the climb on the actor so
@@ -2068,7 +2064,6 @@ impl EngineInner {
                                         actor.active_lift = Some(crate::element::ActiveLiftClimb {
                                             sector_number: u16::from(sn),
                                             upwards: !is_high,
-                                            is_pc,
                                         });
                                     }
                                 }
