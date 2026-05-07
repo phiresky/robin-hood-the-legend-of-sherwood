@@ -2,6 +2,7 @@
 //! hooks, command drain + replay/rewind step, and dismiss helpers
 //! for pending modals.
 
+use super::modal_state::ActiveModal;
 use crate::Host;
 use crate::game::Game;
 use crate::game_render::clear_status_bar_flags;
@@ -144,6 +145,7 @@ pub(super) fn drain_steps(
     rollback_checker: &mut Option<crate::rollback_checker::RollbackChecker>,
     replay_player: &mut Option<crate::replay::ReplayPlayer>,
     manual_pause: &mut bool,
+    active_modal: &mut Option<ActiveModal>,
 ) {
     let steps = crate::http_server::take_pending_steps();
     if steps.is_empty() {
@@ -152,11 +154,15 @@ pub(super) fn drain_steps(
 
     for step in steps {
         let mut modals_dismissed = dismiss_pending_modals(host);
+        if active_modal.take().is_some() {
+            modals_dismissed += 1;
+            tracing::debug!("HTTP step: dismissed pre-existing active modal");
+        }
 
         match step.kind {
             crate::http_server::StepKind::Forward { n } => {
                 let start = manager.sim_frame;
-                let advanced = run_forward_ticks(
+                let (advanced, dismissed_during) = run_forward_ticks(
                     manager,
                     host,
                     assets,
@@ -167,6 +173,7 @@ pub(super) fn drain_steps(
                     replay_player,
                     n,
                 );
+                modals_dismissed += dismissed_during;
                 // Stepping bypasses the checker's begin_frame/end_frame
                 // pairing, so its ring buffer is now stale relative to
                 // the advanced engine.  Clear it — the checker resumes
@@ -207,7 +214,7 @@ pub(super) fn drain_steps(
                     Ordering::Equal => Ok("noop"),
                     Ordering::Greater => {
                         let delta = target - from;
-                        let advanced = run_forward_ticks(
+                        let (advanced, dismissed_during) = run_forward_ticks(
                             manager,
                             host,
                             assets,
@@ -218,10 +225,10 @@ pub(super) fn drain_steps(
                             replay_player,
                             delta,
                         );
+                        modals_dismissed += dismissed_during;
                         if advanced < delta {
-                            // Forward run stopped early (modal blocked).
                             Err(format!(
-                                "advanced {advanced} of {delta} frames before a modal blocked further stepping"
+                                "advanced {advanced} of {delta} frames before stepping stopped"
                             ))
                         } else {
                             Ok("forward")
@@ -243,6 +250,9 @@ pub(super) fn drain_steps(
                 // policy so the next drain_steps call (or normal
                 // tick) doesn't hit a blocking UI.
                 modals_dismissed += dismiss_pending_modals(host);
+                if active_modal.take().is_some() {
+                    modals_dismissed += 1;
+                }
                 match result {
                     Ok(kind) => step.respond_ok(serde_json::json!({
                         "direction": "go-to-frame",
@@ -266,13 +276,17 @@ pub(super) fn drain_steps(
 }
 
 /// Run up to `n` forward ticks, applying the next recorded commands
-/// on each tick when a replay is active.  Returns how many frames
-/// actually ran — may stop early if a modal dialog or debriefing
-/// gets queued mid-sequence.
+/// on each tick when a replay is active.  Returns the number of
+/// frames advanced and the count of modals silently dismissed
+/// mid-sequence.
 ///
-/// This mirrors the keyboard step-forward path in `run_mission` so
-/// `/step-forward` + `/go-to-frame` behave the same way during
-/// replay playback as holding `.` does.
+/// Any modal that becomes pending during the run (dialog,
+/// popup-scroll, debriefing, sherwood report, mission-state popup)
+/// is dismissed in place and the loop keeps going — the whole point
+/// of HTTP stepping is to drive past these without an interactive
+/// click.  The keyboard step path in `run_mission` instead refuses
+/// to step while a modal is pending; that's a deliberate
+/// interactive-vs-scripted divergence.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_forward_ticks(
     manager: &mut robin_engine::engine_manager::EngineManager,
@@ -284,10 +298,11 @@ pub(super) fn run_forward_ticks(
     rollback_checker: &mut Option<crate::rollback_checker::RollbackChecker>,
     replay_player: &mut Option<crate::replay::ReplayPlayer>,
     n: u32,
-) -> u32 {
+) -> (u32, usize) {
     let engine = &mut manager.engine;
     let sim_frame = &mut manager.sim_frame;
     let start = *sim_frame;
+    let mut dismissed = 0usize;
     for _ in 0..n {
         let mut frame_cmds: Vec<PlayerInput> = Vec::new();
         if let Some(player) = replay_player.as_mut()
@@ -323,14 +338,16 @@ pub(super) fn run_forward_ticks(
         rewind_buffer.end_frame(frame_cmds);
         *sim_frame += 1;
 
-        // If the tick queued any modal, stop here — the rest of the
-        // step would skip past it.  The caller's next step request
-        // (after dismissing the modal) picks up where we left off.
+        // If the tick queued any modal, drop it silently and keep
+        // going.  Without this the caller's `step N` would stop at
+        // the first dialog and the next step request would do the
+        // same dance — making `step 1000` advance only as far as
+        // the first scripted dialog.
         if modal_state_pending(host) {
-            break;
+            dismissed += dismiss_pending_modals(host);
         }
     }
-    *sim_frame - start
+    (*sim_frame - start, dismissed)
 }
 
 /// Rewind to `target`, restoring rollback state from the rewind
@@ -395,21 +412,24 @@ pub(super) fn dismiss_pending_modals(host: &mut Host) -> usize {
     let n = host.pending_dialogues.len()
         + host.pending_popup_texts.len()
         + host.pending_debriefings.len()
-        + host.pending_sherwood_report as usize;
+        + host.pending_sherwood_report as usize
+        + host.pending_mission_state_popup as usize;
     if n > 0 {
         tracing::debug!(
             "HTTP step: dismissing {} pending modal(s) \
-             (dialogues={}, popups={}, debriefings={}, sherwood_report={})",
+             (dialogues={}, popups={}, debriefings={}, sherwood_report={}, mission_state={})",
             n,
             host.pending_dialogues.len(),
             host.pending_popup_texts.len(),
             host.pending_debriefings.len(),
             host.pending_sherwood_report,
+            host.pending_mission_state_popup,
         );
     }
     host.pending_dialogues.clear();
     host.pending_popup_texts.clear();
     host.pending_debriefings.clear();
     host.pending_sherwood_report = false;
+    host.pending_mission_state_popup = false;
     n
 }

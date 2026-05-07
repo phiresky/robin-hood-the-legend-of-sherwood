@@ -92,11 +92,10 @@ pub(super) fn handle_mouse_input(
                 continue;
             }
             match *event {
-                GameEvent::ViewportPan { xrel, yrel } => {
-                    host.viewport
-                        .scroll_by(geo2d::pt(-(xrel as f32), -(yrel as f32)));
-                    host.input.cancel_multi_selection();
-                }
+                // ViewportPan is applied unconditionally in
+                // `run_mission`'s always-on view-input pass so middle-
+                // drag panning works during replay; nothing to do here.
+                GameEvent::ViewportPan { .. } => {}
                 // ── Left mouse down ──
                 // LEFTDOWN starts a multi-selection drag.
                 GameEvent::MouseDown(mx, my, 1, clicks) => {
