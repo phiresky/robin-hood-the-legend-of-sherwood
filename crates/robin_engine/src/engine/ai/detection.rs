@@ -8,7 +8,7 @@ use super::snapshots::{Detection, HumanTarget, ObjectTarget, PcSnapshot, Soldier
 use super::*;
 use crate::ai::AiPerTickData;
 use crate::ai_vision;
-use crate::element::{Camp, Detectable, DetectableType, Entity, EntityId};
+use crate::element::{Camp, Detectable, DetectableType, Entity, EntityId, Posture};
 use crate::geo2d::{self};
 
 /// Royalist-detection scratch type: snapshot of one Lacklandist NPC as a
@@ -34,6 +34,97 @@ struct NpcTarget {
     /// The projection obstacle this NPC target is currently standing
     /// on.  Used by the per-target `compute_view_radius` re-call.
     obstacle_idx: Option<crate::position_interface::ObstacleHandle>,
+}
+
+fn human_eye_point_for_visibility(entity: &Entity) -> (geo2d::Point2D, f32) {
+    let Some(eye) = entity.compute_eyes_point(None) else {
+        let position = entity.element_data().position();
+        let position_map = entity.element_data().position_map();
+        return (crate::geo2d::pt(position_map.x, position_map.y), position.z);
+    };
+    let ground_z = entity.element_data().position().z;
+    // `compute_eyes_point` returns the engine's render-space 3D point,
+    // where `y = map_y + elevation`. C++ `ComputeVisibility` compares
+    // map-space XY and keeps Z separate, so remove only the feet
+    // elevation here. Posture XY offsets such as LeaningOut remain.
+    (crate::geo2d::pt(eye.x, eye.y - ground_z), eye.z)
+}
+
+struct SoldierSightContext {
+    eye: geo2d::Point2D,
+    eye_z: f32,
+    dir: i16,
+    layer: u16,
+    view_radius: u16,
+    eye_status: crate::element::EyeStatus,
+    current_state: crate::ai::AiState,
+    current_substate: crate::ai::Substate,
+    ai_locked: bool,
+    view_forward: (f32, f32),
+    real_half_aperture: f32,
+    posture: crate::element::Posture,
+    action_state: crate::element::ActionState,
+    sector: Option<crate::position_interface::SectorHandle>,
+    alert_status: crate::ai::AlertLevel,
+    blipped: bool,
+    position_map: geo2d::Point2D,
+    camp: Camp,
+    is_rider: bool,
+    ignore_bodies: bool,
+}
+
+impl SoldierSightContext {
+    fn from_viewer(entity: &Entity, required_camp: Camp) -> Option<Self> {
+        let Entity::Soldier(soldier) = entity else {
+            return None;
+        };
+        if !entity.is_active()
+            || entity.is_dead()
+            || soldier.soldier.cached_camp != required_camp
+            || soldier.human.unconscious
+            || soldier.element.posture == crate::element::Posture::Tied
+        {
+            return None;
+        }
+
+        let ai = soldier.npc.ai_brain.base();
+        let current_substate = ai
+            .map(|a| a.current_substate)
+            .unwrap_or(crate::ai::Substate::DefaultOnPost);
+        let ignore_bodies = matches!(
+            current_substate,
+            crate::ai::Substate::SeekingOfficerWaitForAlertingSoldier
+                | crate::ai::Substate::SeekingOfficerGetAlertingReportFromSoldier
+        );
+        let view_direction = soldier.npc.view_direction;
+        let position_map = soldier.element.position_map();
+        let (eye, eye_z) = human_eye_point_for_visibility(entity);
+
+        Some(Self {
+            eye,
+            eye_z,
+            dir: soldier.element.direction(),
+            layer: soldier.element.layer(),
+            view_radius: soldier.npc.view_radius,
+            eye_status: soldier.npc.eye_status,
+            current_state: soldier.npc.ai_state(),
+            current_substate,
+            ai_locked: ai.map(|a| a.ai_is_locked()).unwrap_or(false),
+            view_forward: (view_direction[0], view_direction[1]),
+            real_half_aperture: soldier.npc.real_half_aperture,
+            posture: soldier.element.posture,
+            action_state: soldier.actor.action_state,
+            sector: soldier.element.sector(),
+            alert_status: ai
+                .map(|a| a.current_music_alert_status)
+                .unwrap_or(crate::ai::AlertLevel::Green),
+            blipped: soldier.element.blipped,
+            position_map: crate::geo2d::pt(position_map.x, position_map.y),
+            camp: soldier.soldier.cached_camp,
+            is_rider: soldier.soldier.rider,
+            ignore_bodies,
+        })
+    }
 }
 
 impl EngineInner {
@@ -224,21 +315,11 @@ impl EngineInner {
 
             let blip_pos = elem.position_map().to_geo_point();
             let blip_layer = elem.layer();
-            // NPC eye-Z — posture-based offsets above the ground.
-            let blip_eye_z = elem.position().z
-                + match elem.posture {
-                    Posture::OnShoulders => 85.0,
-                    Posture::Crouched
-                    | Posture::Sitting
-                    | Posture::SimulatingBeggar
-                    | Posture::Tree => 25.0,
-                    Posture::Lying
-                    | Posture::Dead
-                    | Posture::DeadBack
-                    | Posture::StuckUnderNet
-                    | Posture::Tied => 5.0,
-                    _ => 45.0,
-                };
+            let (blip_eye_xy, blip_eye_z) = if entity.is_human() {
+                human_eye_point_for_visibility(entity)
+            } else {
+                (blip_pos, elem.position().z)
+            };
 
             let mut revealed = false;
 
@@ -248,8 +329,8 @@ impl EngineInner {
                     if pc.layer != blip_layer {
                         continue;
                     }
-                    let dx = blip_pos.x - pc.position.x;
-                    let dy = (blip_pos.y - pc.position.y)
+                    let dx = blip_eye_xy.x - pc.position.x;
+                    let dy = (blip_eye_xy.y - pc.position.y)
                         * crate::position_interface::INVERSE_ASPECT_RATIO;
                     let dz = blip_eye_z - pc.eye_z;
 
@@ -271,12 +352,11 @@ impl EngineInner {
                     };
 
                     if in_range
-                        && ai_vision::los_clear_spatial(
-                            pc.position,
-                            blip_pos,
-                            blip_layer,
+                        && crate::sight_obstacle::is_reachable_3d(
                             sight_obstacles,
-                            &self.fast_grid,
+                            [pc.position.x, pc.position.y, pc.eye_z],
+                            [blip_eye_xy.x, blip_eye_xy.y, blip_eye_z],
+                            crate::sight_obstacle::SIGHTOBSTACLE_OPAQUE,
                         )
                     {
                         revealed = true;
@@ -341,10 +421,10 @@ impl EngineInner {
                     if pc.layer != blip_layer {
                         continue;
                     }
-                    let dx = blip_pos.x - pc.position.x;
-                    let dy = (blip_pos.y - pc.position.y)
+                    let dx = blip_eye_xy.x - pc.position.x;
+                    let dy = (blip_eye_xy.y - pc.position.y)
                         * crate::position_interface::INVERSE_ASPECT_RATIO;
-                    let dz = elem.position().z - pc.eye_z;
+                    let dz = blip_eye_z - pc.eye_z;
                     let dist_3d_sq = dx * dx + dy * dy + dz * dz;
                     let super_det = if pc.posture == Posture::OnShoulders {
                         ON_SHOULDERS_DET
@@ -352,12 +432,11 @@ impl EngineInner {
                         DEFAULT_DET
                     };
                     if dist_3d_sq < super_det * svr * svr
-                        && ai_vision::los_clear_spatial(
-                            pc.position,
-                            blip_pos,
-                            blip_layer,
+                        && crate::sight_obstacle::is_reachable_3d(
                             sight_obstacles,
-                            &self.fast_grid,
+                            [pc.position.x, pc.position.y, pc.eye_z],
+                            [blip_eye_xy.x, blip_eye_xy.y, blip_eye_z],
+                            crate::sight_obstacle::SIGHTOBSTACLE_OPAQUE,
                         )
                     {
                         revealed = true;
@@ -740,91 +819,32 @@ impl EngineInner {
         use crate::element::{ActionState, Posture};
 
         // -- Read enemy state in a scoped borrow --
-        let (
-            eye,
-            eye_z,
-            dir,
-            layer,
-            view_radius,
-            eye_status,
-            current_state,
-            ai_locked,
-            view_forward,
-            real_half_aperture,
-            npc_posture,
-            _action_state,
-            entity_sector,
-            alert_status,
-            viewer_blipped,
-            me_pos_map,
-        ) = {
+        let viewer = {
             let Some(Some(entity)) = self.entities.get(npc_id.0 as usize) else {
                 return;
             };
-            if !entity.is_active() || entity.is_dead() {
-                return;
-            }
-            let Entity::Soldier(soldier) = entity else {
+            let Some(viewer) = SoldierSightContext::from_viewer(entity, Camp::Lacklandists) else {
                 return;
             };
-            if soldier.soldier.cached_camp != Camp::Lacklandists {
-                // Royalist soldiers (allies) don't hunt PCs here;
-                // their detection (detecting Lacklandist NPCs for
-                // blip reveal) is handled in section 3b below.
-                return;
-            }
-            if soldier.human.unconscious {
-                return;
-            }
-            // Dead, unconscious, and tied NPCs short-circuit the
-            // per-NPC detection loop.  Dead and unconscious are
-            // filtered above; the Tied posture skip stops bound
-            // Lacklandist NPCs from scanning.
-            if soldier.element.posture == Posture::Tied {
-                return;
-            }
-            let ai_locked = soldier
-                .npc
-                .ai_brain
-                .base()
-                .map(|ai| ai.ai_is_locked())
-                .unwrap_or(false);
-            let vd = soldier.npc.view_direction;
-            // Use the 3D eye position so leaning-out soldiers get
-            // the 40-unit forward offset and the Z height feeds into
-            // the view-radius computation.
-            let eye_3d = entity
-                .compute_eyes_point(None)
-                .unwrap_or(soldier.element.position());
-            let alert_level = soldier
-                .npc
-                .ai_brain
-                .base()
-                .map(|ai| ai.current_music_alert_status)
-                .unwrap_or(crate::ai::AlertLevel::Green);
-            let pos_map = soldier.element.position_map();
-            (
-                crate::geo2d::pt(eye_3d.x, eye_3d.y),
-                eye_3d.z,
-                soldier.element.direction(),
-                soldier.element.layer(),
-                soldier.npc.view_radius,
-                soldier.npc.eye_status,
-                soldier.npc.ai_state(),
-                ai_locked,
-                (vd[0], vd[1]),
-                soldier.npc.real_half_aperture,
-                soldier.element.posture,
-                soldier.actor.action_state,
-                soldier.element.sector(),
-                alert_level,
-                soldier.element.blipped,
-                crate::geo2d::pt(pos_map.x, pos_map.y),
-            )
+            viewer
         };
-        if ai_locked {
+        if viewer.ai_locked {
             return;
         }
+        let eye = viewer.eye;
+        let eye_z = viewer.eye_z;
+        let dir = viewer.dir;
+        let layer = viewer.layer;
+        let view_radius = viewer.view_radius;
+        let eye_status = viewer.eye_status;
+        let current_state = viewer.current_state;
+        let view_forward = viewer.view_forward;
+        let real_half_aperture = viewer.real_half_aperture;
+        let npc_posture = viewer.posture;
+        let entity_sector = viewer.sector;
+        let alert_status = viewer.alert_status;
+        let viewer_blipped = viewer.blipped;
+        let me_pos_map = viewer.position_map;
         // Silence the "unused" warning on the `_action_state` slot
         // we keep for readability of the destructure pattern.
         let _ = ActionState::Waiting;
@@ -2484,85 +2504,32 @@ impl EngineInner {
         to_reveal: &mut Vec<EntityId>,
         royalist_alert_calls: &mut Vec<(EntityId, geo2d::Point2D)>,
     ) {
-        use crate::element::Posture;
-
         // -- Read royalist soldier viewer state --
-        let (
-            eye,
-            eye_z,
-            dir,
-            layer,
-            view_radius,
-            eye_status,
-            current_state,
-            ai_locked,
-            view_forward,
-            real_half_aperture,
-            npc_posture,
-            entity_sector,
-            is_rider_npc,
-            alert_status,
-        ) = {
+        let viewer = {
             let Some(Some(entity)) = self.entities.get(npc_id.0 as usize) else {
                 return;
             };
-            if !entity.is_active() || entity.is_dead() {
-                return;
-            }
-            let Entity::Soldier(soldier) = entity else {
+            let Some(viewer) = SoldierSightContext::from_viewer(entity, Camp::Royalists) else {
                 return;
             };
-            if soldier.soldier.cached_camp != Camp::Royalists {
-                return;
-            }
-            if soldier.human.unconscious {
-                return;
-            }
-            // Tied soldiers short-circuit the Royalist per-NPC
-            // detection loop just like Lacklandist above.
-            if soldier.element.posture == Posture::Tied {
-                return;
-            }
-            let ai_locked = soldier
-                .npc
-                .ai_brain
-                .base()
-                .map(|ai| ai.ai_is_locked())
-                .unwrap_or(false);
-            let vd = soldier.npc.view_direction;
-            // 3D eye point — feeds the view-radius computation and
-            // the leaning-out forward offset (matches the
-            // Lacklandist loop above).
-            let eye_3d = entity
-                .compute_eyes_point(None)
-                .unwrap_or(soldier.element.position());
-            let is_rider = soldier.soldier.rider;
-            let alert_level = soldier
-                .npc
-                .ai_brain
-                .base()
-                .map(|ai| ai.current_music_alert_status)
-                .unwrap_or(crate::ai::AlertLevel::Green);
-            (
-                crate::geo2d::pt(eye_3d.x, eye_3d.y),
-                eye_3d.z,
-                soldier.element.direction(),
-                soldier.element.layer(),
-                soldier.npc.view_radius,
-                soldier.npc.eye_status,
-                soldier.npc.ai_state(),
-                ai_locked,
-                (vd[0], vd[1]),
-                soldier.npc.real_half_aperture,
-                soldier.element.posture,
-                soldier.element.sector(),
-                is_rider,
-                alert_level,
-            )
+            viewer
         };
-        if ai_locked {
+        if viewer.ai_locked {
             return;
         }
+        let eye = viewer.eye;
+        let eye_z = viewer.eye_z;
+        let dir = viewer.dir;
+        let layer = viewer.layer;
+        let view_radius = viewer.view_radius;
+        let eye_status = viewer.eye_status;
+        let current_state = viewer.current_state;
+        let view_forward = viewer.view_forward;
+        let real_half_aperture = viewer.real_half_aperture;
+        let npc_posture = viewer.posture;
+        let entity_sector = viewer.sector;
+        let is_rider_npc = viewer.is_rider;
+        let alert_status = viewer.alert_status;
 
         let viewer_building_sector = self.entity_building_sector(entity_sector);
 
@@ -2943,35 +2910,10 @@ impl EngineInner {
         golden_eye: bool,
     ) {
         use crate::ai::AiState;
-        use crate::element::Posture;
 
         // -- Read NPC view-state in a scoped read borrow --
-        let (
-            eye,
-            eye_z,
-            dir,
-            layer,
-            view_radius,
-            eye_status,
-            current_state,
-            current_substate,
-            ai_locked,
-            view_forward,
-            real_half_aperture,
-            npc_posture,
-            entity_sector,
-            alert_status,
-            viewer_blipped,
-            ignore_bodies,
-            camp,
-        ) = {
+        let viewer = {
             let Some(Some(entity)) = self.entities.get(npc_id.0 as usize) else {
-                return;
-            };
-            if !entity.is_active() || entity.is_dead() {
-                return;
-            }
-            let Entity::Soldier(soldier) = entity else {
                 return;
             };
             // RefreshDetection runs the per-type loop for both
@@ -2979,61 +2921,35 @@ impl EngineInner {
             // notes Royalist body/object reactions have no consumer
             // wired in the Rust AI layer yet, and exposing the loop
             // there would create dead stimuli with no handlers.
-            if soldier.soldier.cached_camp != Camp::Lacklandists {
+            let Some(viewer) = SoldierSightContext::from_viewer(entity, Camp::Lacklandists) else {
                 return;
-            }
-            if soldier.human.unconscious {
-                return;
-            }
-            // Tied NPCs short-circuit.
-            if soldier.element.posture == Posture::Tied {
-                return;
-            }
-            let ai = soldier.npc.ai_brain.base();
-            let ai_locked = ai.map(|a| a.ai_is_locked()).unwrap_or(false);
-            let current_substate = ai
-                .map(|a| a.current_substate)
-                .unwrap_or(crate::ai::Substate::DefaultOnPost);
-            // `IgnoreBodies()` returns true only in the two
-            // seek-officer report-handoff substates, where the
-            // soldier is busy delivering the report and
-            // intentionally tunes out new bodies.
-            let ignore_bodies = matches!(
-                current_substate,
-                crate::ai::Substate::SeekingOfficerWaitForAlertingSoldier
-                    | crate::ai::Substate::SeekingOfficerGetAlertingReportFromSoldier
-            );
-            let vd = soldier.npc.view_direction;
-            let eye_3d = entity
-                .compute_eyes_point(None)
-                .unwrap_or(soldier.element.position());
-            (
-                crate::geo2d::pt(eye_3d.x, eye_3d.y),
-                eye_3d.z,
-                soldier.element.direction(),
-                soldier.element.layer(),
-                soldier.npc.view_radius,
-                soldier.npc.eye_status,
-                soldier.npc.ai_state(),
-                current_substate,
-                ai_locked,
-                (vd[0], vd[1]),
-                soldier.npc.real_half_aperture,
-                soldier.element.posture,
-                soldier.element.sector(),
-                ai.map(|a| a.current_music_alert_status)
-                    .unwrap_or(crate::ai::AlertLevel::Green),
-                soldier.element.blipped,
-                ignore_bodies,
-                soldier.soldier.cached_camp,
-            )
+            };
+            viewer
         };
-        if ai_locked {
+        if viewer.ai_locked {
             return;
         }
-        let _ = (current_substate, alert_status, viewer_blipped, camp); // suppress unused-warning when individual gates not consulted
+        let eye = viewer.eye;
+        let eye_z = viewer.eye_z;
+        let dir = viewer.dir;
+        let layer = viewer.layer;
+        let view_radius = viewer.view_radius;
+        let eye_status = viewer.eye_status;
+        let current_state = viewer.current_state;
+        let view_forward = viewer.view_forward;
+        let real_half_aperture = viewer.real_half_aperture;
+        let npc_posture = viewer.posture;
+        let current_substate = viewer.current_substate;
+        let alert_status = viewer.alert_status;
+        let ignore_bodies = viewer.ignore_bodies;
+        let _ = (
+            current_substate,
+            viewer.blipped,
+            viewer.camp,
+            viewer.action_state,
+        ); // suppress unused-warning when individual gates not consulted
 
-        let viewer_building_sector = self.entity_building_sector(entity_sector);
+        let viewer_building_sector = self.entity_building_sector(viewer.sector);
         let viewer_in_building = viewer_building_sector.is_some();
 
         let is_night_or_fog = matches!(

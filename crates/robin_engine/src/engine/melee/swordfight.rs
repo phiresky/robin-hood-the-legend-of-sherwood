@@ -653,18 +653,15 @@ impl EngineInner {
             }
 
             // LOS check: verify line of sight between combatants
-            // (2D proxy for the 3D eye-point reachability check).
+            // between upright eye points, matching C++
+            // `ComputeEyesPoint(..., RHPOSTURE_UPRIGHT)`.
             {
-                // 3D opaque-sight reachability between the two
-                // entities' eye points (`position()` includes z).
-                let eye_a = self.get_entity(initiator).map(|e| {
-                    let pos = e.element_data().position();
-                    [pos.x, pos.y, pos.z]
-                });
-                let eye_b = self.get_entity(opponent).map(|e| {
-                    let pos = e.element_data().position();
-                    [pos.x, pos.y, pos.z]
-                });
+                let eye_a = self
+                    .get_entity(initiator)
+                    .map(compute_upright_eye_point_map_space);
+                let eye_b = self
+                    .get_entity(opponent)
+                    .map(compute_upright_eye_point_map_space);
                 if let (Some(a), Some(b)) = (eye_a, eye_b)
                     && !crate::sight_obstacle::is_reachable_3d(
                         self.sight_obstacles(assets),
