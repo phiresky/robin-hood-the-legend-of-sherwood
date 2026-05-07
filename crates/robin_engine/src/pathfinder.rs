@@ -313,12 +313,6 @@ pub struct MotionArea {
     /// determine which motion area a click falls in.
     pub polygon: Vec<Point2D>,
 
-    /// Sector number of the walkable polygon (for `convert_sector`).
-    pub polygon_sector_number: u16,
-
-    /// Area index (set during initialization).
-    pub area_index: u16,
-
     /// Motion obstacles within this area. The total length is fixed at
     /// level load; state transitions flip the `active` flag per entry.
     ///
@@ -2352,8 +2346,6 @@ mod tests {
             .push(vec![MotionArea {
                 polygon: Vec::new(),
                 skeleton: Vec::new(),
-                polygon_sector_number: 0,
-                area_index: 0,
                 motion_obstacles: Vec::new(),
             }]);
         runtime.current_motion_area = (0, 0);
@@ -2372,8 +2364,6 @@ mod tests {
             .push(vec![MotionArea {
                 polygon: Vec::new(),
                 skeleton: vec![geo2d::segment(pt(0.0, 50.0), pt(200.0, 50.0))],
-                polygon_sector_number: 0,
-                area_index: 0,
                 motion_obstacles: Vec::new(),
             }]);
         runtime.current_motion_area = (0, 0);
@@ -2441,7 +2431,7 @@ mod tests {
 
         // One layer, three areas. Obstacle counts per area: 2, 1, 0.
         // `build_sector_conversion` walks areas in order and emits
-        // `(sector = cumulative count, area = area_index)`:
+        // `(sector = cumulative count, area = vec position)`:
         //   area 0 → sector 0 (count += 2 + 1 = 3)
         //   area 1 → sector 3 (count += 1 + 1 = 5)
         //   area 2 → sector 5
@@ -2453,19 +2443,16 @@ mod tests {
             polygon: Vec::new(),
             grid_line_indices: Vec::new(),
         };
-        let make_area = |polygon_sector_number, area_index, n_obstacles: usize| MotionArea {
+        let make_area = |n_obstacles: usize| MotionArea {
             polygon: Vec::new(),
             skeleton: Vec::new(),
-            polygon_sector_number,
-            area_index,
             motion_obstacles: (0..n_obstacles).map(|_| make_obstacle()).collect(),
         };
 
-        graph.static_mut().move_layers.push(vec![
-            make_area(0, 0, 2),
-            make_area(3, 1, 1),
-            make_area(5, 2, 0),
-        ]);
+        graph
+            .static_mut()
+            .move_layers
+            .push(vec![make_area(2), make_area(1), make_area(0)]);
 
         graph.build_sector_conversion();
 
@@ -2589,8 +2576,6 @@ mod tests {
             .push(vec![MotionArea {
                 polygon: Vec::new(),
                 skeleton: Vec::new(),
-                polygon_sector_number: 0,
-                area_index: 0,
                 motion_obstacles: Vec::new(),
             }]);
 

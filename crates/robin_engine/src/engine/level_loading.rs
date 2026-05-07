@@ -3897,15 +3897,11 @@ impl EngineInner {
                 move_areas.push(crate::pathfinder::MotionArea {
                     skeleton,
                     polygon: polygon_pts,
-                    polygon_sector_number: 0, // assigned by sector conversion
-                    area_index: 0,            // assigned after conversion table is built
                     motion_obstacles: obstacles,
                 });
                 alt_move_areas.push(crate::pathfinder::MotionArea {
                     skeleton: Vec::new(),
                     polygon: Vec::new(),
-                    polygon_sector_number: 0,
-                    area_index: 0,
                     motion_obstacles: Vec::new(),
                 });
             }
