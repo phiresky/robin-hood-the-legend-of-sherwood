@@ -1,7 +1,7 @@
 //! Post-detection orchestration phases for `tick_enemy_ai`:
-//! P4 (alert allies / log), P4b (out-of-view dispatch), P5 (roll up
-//! `in_combat`), P6 (pursuit / approach / combat-stance), P6c (drain
-//! pending swordfight requests), P6d (replay deferred stimuli).
+//! P4 (alert allies / log), P4b (out-of-view dispatch), P6 (pursuit
+//! / approach / combat-stance), P6c (drain pending swordfight
+//! requests), P6d (replay deferred stimuli).
 
 use super::snapshots::{Detection, PcSnapshot};
 use super::*;
@@ -97,33 +97,6 @@ impl EngineInner {
                     // transitions correctly from its own state.
                     enemy_ai.base.pending_stimuli.push(stimulus);
                 }
-            }
-        }
-    }
-
-    /// P5 — set `in_combat = true` on every PC currently pursued by an
-    /// alerted enemy.  Covers both newly-committed detections and
-    /// previously alerted enemies whose LOS dropped for a frame but who
-    /// are still pursuing a target.
-    pub(super) fn tick_enemy_ai_roll_up_in_combat(&mut self) {
-        let alerted_targets: Vec<EntityId> = self
-            .npc_ids
-            .iter()
-            .filter_map(|&npc_id| {
-                let Some(Some(Entity::Soldier(soldier))) = self.entities.get(npc_id.0 as usize)
-                else {
-                    return None;
-                };
-                if !soldier.npc.alerted {
-                    return None;
-                }
-                let ai = soldier.npc.ai_brain.base()?;
-                Some(EntityId(ai.primary_target))
-            })
-            .collect();
-        for target in alerted_targets {
-            if let Some(Some(Entity::Pc(pc))) = self.entities.get_mut(target.0 as usize) {
-                pc.pc.in_combat = true;
             }
         }
     }

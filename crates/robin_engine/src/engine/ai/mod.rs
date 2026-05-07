@@ -2703,9 +2703,7 @@ impl EngineInner {
     /// High-level flow:
     ///
     ///  1. Build a snapshot of all alive / playable PCs.
-    ///  2. Clear every PC's `in_combat` flag so we can rebuild it
-    ///     from this frame's set of alerted enemies.
-    ///  3. For each alive non-locked hostile soldier:
+    ///  2. For each alive non-locked hostile soldier:
     ///     a. Compute the per-NPC `uwModifiedFrameCounter` phase.
     ///     b. If the `DETECTION_FREQUENCY_ENEMY_PC` gate is open,
     ///     call `compute_visibility` against each PC and multiply
@@ -2719,12 +2717,9 @@ impl EngineInner {
     ///        `instant_detection(type) && sum > 0`.
     ///     f. If nothing is visible this frame, decay suspects on a
     ///        `UNSUSPECT_FREQUENCY` cadence.
-    ///  4. On commit: flip the NPC's `AiState` to `Attacking`, store
+    ///  3. On commit: flip the NPC's `AiState` to `Attacking`, store
     ///     the target on `ai_controller.primary_target`, mark the
     ///     NPC `alerted`, and dispatch a pursuit path.
-    ///  5. Roll the combat flag up from every currently alerted
-    ///     enemy's target onto the PC's `in_combat` field so the
-    ///     selection-circle renderer can switch color.
     ///
     /// # What is deferred
     ///
@@ -2987,24 +2982,20 @@ impl EngineInner {
     }
 
     /// Iterates every NPC except the body itself and registers the
-    /// body under DETECTABLE_BODY.  Also resets `body_visitors` to
-    /// zero and sets the `has_already_been_detectable_body` flag on
-    /// the body.
+    /// body under DETECTABLE_BODY.  Also sets the
+    /// `has_already_been_detectable_body` flag on the body.
     #[tracing::instrument(level = "trace", skip_all, fields(body = body_id.0))]
     pub(super) fn broadcast_body_detectable(&mut self, body_id: EntityId) {
         use crate::element::DetectableType;
 
-        // Reset body_visitors + mark body as globally detectable; snapshot
-        // the body's position + `knocked_out_in_money_fight` flag for the
-        // per-friend radius check below.
+        // Mark body as globally detectable; snapshot the body's position +
+        // `knocked_out_in_money_fight` flag for the per-friend radius check
+        // below.
         let (body_pos, body_knocked_out_in_money_fight, body_is_soldier) = {
             let Some(Some(entity)) = self.entities.get_mut(body_id.0 as usize) else {
                 return;
             };
             let is_soldier = matches!(entity, Entity::Soldier(_));
-            if let Some(npc) = entity.npc_data_mut() {
-                npc.body_visitors = 0;
-            }
             if let Some(human) = entity.human_data_mut() {
                 human.has_already_been_detectable_body = true;
             }
@@ -3713,16 +3704,13 @@ impl EngineInner {
         // ── Phase 3: drain finished exclamations ────────────────
         // `sound_is_finished` callback: clear current_remark and fire
         // the MYTALK event (`inform_ai_on_finished_remark`).
-        for &(actor_id, excl_id) in &self.sound_sim.finished_exclamations {
+        for &(actor_id, _excl_id) in &self.sound_sim.finished_exclamations {
             if let Some(Some(entity)) = self.entities.get_mut(actor_id as usize) {
-                // PCs: `sound_is_finished` resets `current_expression`
-                // to NO_EXPRESSION so subsequent non-emergency
-                // `hero_speaking` calls aren't blocked by the "already
-                // speaking" guard in `hero_speaking_ex`.
-                if let crate::element::Entity::Pc(pc) = entity {
-                    if pc.pc.current_expression == excl_id as u16 {
-                        pc.pc.current_expression = 0xFFFF;
-                    }
+                // PC branch: nothing to do here — the C++ "currently
+                // speaking" suppression that consumed sound-finished
+                // events was already dead in legacy and has been
+                // dropped from the Rust port.
+                if matches!(entity, crate::element::Entity::Pc(_)) {
                     continue;
                 }
                 let npc = match entity {
@@ -3907,9 +3895,6 @@ impl EngineInner {
         // ── 1b. Pre-compute destination forecasts for all PCs. ───
         let pc_forecasts = self.tick_enemy_ai_build_pc_forecasts();
 
-        // ── 2. Clear in-combat flags. ────────────────────────────
-        self.tick_enemy_ai_clear_pc_in_combat();
-
         if pc_snapshots.is_empty() {
             return;
         }
@@ -3964,9 +3949,6 @@ impl EngineInner {
 
         // ── 4b. Lost-sight EVENT_OUTOFVIEW dispatch. ───────────────
         self.tick_enemy_ai_dispatch_out_of_view(out_of_view_dispatches, &pc_snapshots);
-
-        // ── 5. Roll up in-combat from every currently-alerted enemy.
-        self.tick_enemy_ai_roll_up_in_combat();
 
         // ── 6. Pursuit / approach / combat stance ────────────────
         self.tick_enemy_ai_pursuit_approach(assets, transitions);

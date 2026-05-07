@@ -197,7 +197,6 @@ impl EngineInner {
             actor: ActorData::default(),
             human: HumanData {
                 time_hulk: HULK_LENGTH,
-                speed_hulk: 1.0,
                 ..Default::default()
             },
             pc: PcData {

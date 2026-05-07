@@ -1191,7 +1191,6 @@ impl EngineInner {
                     };
                 } else {
                     pc.human.hulk_direction = true;
-                    pc.human.speed_hulk = 1.0;
                 }
             } else {
                 pc.pc.already_selected = false;

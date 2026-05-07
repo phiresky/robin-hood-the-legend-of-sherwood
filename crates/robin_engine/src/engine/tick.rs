@@ -3230,6 +3230,20 @@ impl EngineInner {
                             // in one step — the observable result is
                             // the same: ammo goes down, a bonus
                             // appears.
+                            //
+                            // Merge gate: when the PC hasn't moved or
+                            // turned since its last drop AND the
+                            // previous bonus is still active AND same
+                            // action AND combined quantity ≤
+                            // `MAX_AMMO_PER_PILE`, the existing pile's
+                            // quantity is bumped; otherwise a fresh
+                            // bonus spawns. When the previous bonus is
+                            // still active but the merge cap is reached
+                            // (or it's a different action), the PC's
+                            // facing rotates +1 sector so the next
+                            // drop's "same direction" check fails and a
+                            // fresh pile spawns again.
+                            const MAX_AMMO_PER_PILE: u16 = 5;
                             let (action_id, amount) = match &elem.data {
                                 crate::sequence::SequenceElementData::Generic { properties } => {
                                     let a = properties
@@ -3329,67 +3343,159 @@ impl EngineInner {
                             if now_empty {
                                 self.disable_pc_action(assets, owner, action);
                             }
-                            // Spawn a bonus at the PC's position,
-                            // refined via `find_authorized_position`
-                            // to nudge it onto a walkable cell:
-                            // build a zero-size box at the bonus's
-                            // spawn point, call
-                            // `find_authorized_position_toward(box,
-                            // pc_pos, layer)`, then use the centre on
-                            // success or fall back to the PC
-                            // position.
-                            let spawn_pos = {
-                                let pos_geo = crate::geo2d::pt(pos.x, pos.y);
-                                let mut b = crate::geo2d::BBox2D::new();
-                                b.expand_point(pos_geo);
-                                if self
-                                    .fast_grid
-                                    .find_authorized_position_toward(&mut b, pos_geo, layer)
-                                {
-                                    crate::element::Point2D::from(b.center())
-                                } else {
-                                    pos
-                                }
-                            };
-                            let object_type = crate::inventory::action_to_object_type(action);
-                            let mut bonus_element = crate::element::ElementData {
-                                kind: crate::element::ElementKind::ObjectBonus,
-                                active: true,
-                                // Bonus default: blipped iff this
-                                // isn't a forest level.
-                                blipped: !self.weather.is_forest_level,
-                                ..Default::default()
-                            };
-                            bonus_element.sprite.apply_placement(
-                                spawn_pos,
-                                layer,
-                                sector,
-                                direction,
-                                material,
-                                obstacle,
-                                crate::position_interface::PlaneZCoeffs::resolve_for_obstacle(
-                                    obstacle,
-                                    assets.static_sight_obstacles.as_slice(),
-                                ),
-                            );
-                            let bonus =
-                                crate::element::Entity::Bonus(crate::element::ElementBonus {
-                                    element: bonus_element,
-                                    object: crate::element::ObjectData {
-                                        quantity: dropped,
-                                        object_type,
-                                        associated_action: action,
-                                        ..Default::default()
-                                    },
+
+                            // Merge into the previously-dropped pile if
+                            // PC hasn't moved/turned and the previous
+                            // bonus is still alive and accepts more.
+                            let prev = self.get_entity(owner).and_then(|e| match e {
+                                crate::element::Entity::Pc(pc) => Some((
+                                    pc.pc.last_dropped_ammo,
+                                    pc.pc.last_ammo_dropping_position,
+                                    pc.pc.last_dropping_direction,
+                                )),
+                                _ => None,
+                            });
+                            let same_position_and_direction = prev
+                                .map(|(_, last_pos, last_dir)| {
+                                    last_pos.x == pos.x
+                                        && last_pos.y == pos.y
+                                        && last_dir as i16 == direction
+                                })
+                                .unwrap_or(false);
+                            // `prev_bonus_state`: Some((id, current_quantity, action))
+                            // if a previous pile is still active.
+                            let prev_bonus_state =
+                                prev.and_then(|(last, _, _)| last).and_then(|last_id| {
+                                    self.get_entity(last_id).and_then(|e| match e {
+                                        crate::element::Entity::Bonus(b) if b.element.active => {
+                                            Some((
+                                                last_id,
+                                                b.object.quantity,
+                                                b.object.associated_action,
+                                            ))
+                                        }
+                                        _ => None,
+                                    })
                                 });
-                            let bonus_id = self.add_entity(bonus);
-                            tracing::debug!(
-                                pc = ?owner,
-                                ?action,
-                                dropped,
-                                ?bonus_id,
-                                "DropAmmo: decremented PC ammo and spawned bonus"
-                            );
+                            let merged = if same_position_and_direction
+                                && let Some((last_id, prev_qty, prev_action)) = prev_bonus_state
+                                && prev_action == action
+                                && prev_qty + dropped <= MAX_AMMO_PER_PILE
+                            {
+                                if let Some(Some(crate::element::Entity::Bonus(b))) =
+                                    self.entities.get_mut(last_id.0 as usize)
+                                {
+                                    b.object.quantity = prev_qty + dropped;
+                                }
+                                tracing::debug!(
+                                    pc = ?owner,
+                                    ?action,
+                                    dropped,
+                                    bonus = ?last_id,
+                                    new_qty = prev_qty + dropped,
+                                    "DropAmmo: merged into previous bonus"
+                                );
+                                true
+                            } else {
+                                false
+                            };
+
+                            // When the previous bonus is still alive
+                            // but we couldn't merge into it (cap reached
+                            // or different action), rotate the PC by
+                            // +1 sector so the next drop spawns fresh.
+                            // Only fires if the PC hadn't moved/turned
+                            // — otherwise the merge gate would already
+                            // have rejected next time.
+                            let bumped_direction = if !merged
+                                && same_position_and_direction
+                                && prev_bonus_state.is_some()
+                            {
+                                let new_dir = (direction + 1).rem_euclid(16);
+                                if let Some(Some(entity)) = self.entities.get_mut(owner.0 as usize)
+                                {
+                                    entity.element_data_mut().set_direction_instantly(new_dir);
+                                }
+                                new_dir
+                            } else {
+                                direction
+                            };
+
+                            let spawned_id = if !merged {
+                                // Spawn a fresh bonus at the PC's
+                                // position, refined via
+                                // `find_authorized_position` to nudge
+                                // it onto a walkable cell.
+                                let spawn_pos = {
+                                    let pos_geo = crate::geo2d::pt(pos.x, pos.y);
+                                    let mut b = crate::geo2d::BBox2D::new();
+                                    b.expand_point(pos_geo);
+                                    if self
+                                        .fast_grid
+                                        .find_authorized_position_toward(&mut b, pos_geo, layer)
+                                    {
+                                        crate::element::Point2D::from(b.center())
+                                    } else {
+                                        pos
+                                    }
+                                };
+                                let object_type = crate::inventory::action_to_object_type(action);
+                                let mut bonus_element = crate::element::ElementData {
+                                    kind: crate::element::ElementKind::ObjectBonus,
+                                    active: true,
+                                    // Bonus default: blipped iff this
+                                    // isn't a forest level.
+                                    blipped: !self.weather.is_forest_level,
+                                    ..Default::default()
+                                };
+                                bonus_element.sprite.apply_placement(
+                                    spawn_pos,
+                                    layer,
+                                    sector,
+                                    bumped_direction,
+                                    material,
+                                    obstacle,
+                                    crate::position_interface::PlaneZCoeffs::resolve_for_obstacle(
+                                        obstacle,
+                                        assets.static_sight_obstacles.as_slice(),
+                                    ),
+                                );
+                                let bonus =
+                                    crate::element::Entity::Bonus(crate::element::ElementBonus {
+                                        element: bonus_element,
+                                        object: crate::element::ObjectData {
+                                            quantity: dropped,
+                                            object_type,
+                                            associated_action: action,
+                                            ..Default::default()
+                                        },
+                                    });
+                                let bonus_id = self.add_entity(bonus);
+                                tracing::debug!(
+                                    pc = ?owner,
+                                    ?action,
+                                    dropped,
+                                    ?bonus_id,
+                                    "DropAmmo: decremented PC ammo and spawned bonus"
+                                );
+                                Some(bonus_id)
+                            } else {
+                                None
+                            };
+
+                            // Stamp the per-PC drop trackers so the
+                            // next drop's merge gate evaluates against
+                            // this drop.
+                            if let Some(Some(crate::element::Entity::Pc(pc))) =
+                                self.entities.get_mut(owner.0 as usize)
+                            {
+                                pc.pc.last_ammo_dropping_position = pos;
+                                pc.pc.last_dropping_direction = bumped_direction as u8;
+                                if let Some(new_id) = spawned_id {
+                                    pc.pc.last_dropped_ammo = Some(new_id);
+                                }
+                            }
+
                             self.sequence_manager.element_terminated(seq_id, elem_idx);
                         }
                         // ── Drop ale bottle ───────────────────────

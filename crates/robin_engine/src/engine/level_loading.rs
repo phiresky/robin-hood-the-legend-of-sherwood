@@ -1737,7 +1737,6 @@ impl EngineInner {
                 },
                 human: crate::element::HumanData {
                     time_hulk: crate::element::HULK_LENGTH,
-                    speed_hulk: 1.0,
                     ..Default::default()
                 },
                 pc: crate::element::PcData {
@@ -3090,7 +3089,6 @@ impl EngineInner {
                     },
                     human: crate::element::HumanData {
                         time_hulk: crate::element::HULK_LENGTH,
-                        speed_hulk: 1.0,
                         ..Default::default()
                     },
                     pc: crate::element::PcData {
