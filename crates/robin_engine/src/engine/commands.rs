@@ -3027,55 +3027,27 @@ impl EngineInner {
         self.launch_sequence(sequence);
     }
 
-    /// Maintain the bidirectional shield-protection link between two PCs.
+    /// Set the protector's `shield_protected` forward pointer.
     ///
-    /// Details:
-    /// the protector's `shield_protected` points at the protectee,
-    /// and the protectee's `shield_protector` points back.  Passing
-    /// `protectee = None` unlinks: the previous protectee (if any)
-    /// has its `shield_protector` cleared and the protector's
-    /// `shield_danger_point` is zeroed.  When assigning a new
-    /// protectee, `shield_danger_point` is left untouched — the
-    /// shield-raise pipeline fills it (see `dispatch_raise_shield`).
+    /// Passing `protectee = None` unlinks and zeroes the protector's
+    /// `shield_danger_point`; when assigning a new protectee the danger
+    /// point is left untouched — the shield-raise pipeline fills it (see
+    /// `dispatch_raise_shield`).
     ///
-    /// Silently no-ops when either entity is not a PC; non-PC entries
+    /// Silently no-ops when the protector is not a PC; non-PC entries
     /// cannot carry the shield-protection fields.
     pub(crate) fn set_shield_protected(
         &mut self,
         protector_id: EntityId,
         protectee: Option<EntityId>,
     ) {
-        let previous = self
-            .get_entity(protector_id)
-            .and_then(|e| e.pc_data())
-            .and_then(|pc| pc.shield_protected);
-
-        if protectee.is_none() {
-            // Unlink: clear previous protectee's back-pointer and
-            // zero the danger point.
-            if let Some(prev_id) = previous
-                && let Some(Some(prev_entity)) = self.entities.get_mut(prev_id.0 as usize)
-                && let Some(prev_pc) = prev_entity.pc_data_mut()
-            {
-                prev_pc.shield_protector = None;
-            }
-            if let Some(Some(me)) = self.entities.get_mut(protector_id.0 as usize)
-                && let Some(pc) = me.pc_data_mut()
-            {
-                pc.shield_danger_point = crate::element::Point3D::default();
-            }
-        } else if let Some(new_id) = protectee {
-            // Set the new protectee's back-pointer to this protector.
-            // Note: the old protectee's back-pointer is intentionally
-            // not cleared on an A→B switch.
-            if let Some(Some(new_entity)) = self.entities.get_mut(new_id.0 as usize)
-                && let Some(new_pc) = new_entity.pc_data_mut()
-            {
-                new_pc.shield_protector = Some(protector_id);
-            }
+        if protectee.is_none()
+            && let Some(Some(me)) = self.entities.get_mut(protector_id.0 as usize)
+            && let Some(pc) = me.pc_data_mut()
+        {
+            pc.shield_danger_point = crate::element::Point3D::default();
         }
 
-        // Update the protector's forward pointer (in both branches).
         if let Some(Some(me)) = self.entities.get_mut(protector_id.0 as usize)
             && let Some(pc) = me.pc_data_mut()
         {

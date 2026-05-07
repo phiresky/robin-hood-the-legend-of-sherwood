@@ -524,17 +524,6 @@ impl EngineInner {
         forecasts
     }
 
-    /// P2 — clear the `in_combat` flag on every PC.  Re-set later in
-    /// section 5 for any PC that's still actively pursued by an alerted
-    /// enemy.
-    pub(super) fn tick_enemy_ai_clear_pc_in_combat(&mut self) {
-        for &pc_id in &self.pc_ids {
-            if let Some(Some(Entity::Pc(pc))) = self.entities.get_mut(pc_id.0 as usize) {
-                pc.pc.in_combat = false;
-            }
-        }
-    }
-
     /// P2b — count, per PC, how many enemy soldiers in a swordfight
     /// substate already have it as `primary_target`.  Used later by
     /// primary-target selection to penalize "ganging up" — soldiers

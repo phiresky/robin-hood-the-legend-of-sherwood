@@ -251,7 +251,6 @@ impl EngineInner {
     /// Respects:
     /// - SoundConfig.amount_of_speaking (0-8) filtering by expression category
     /// - CanHeroSay (chorus timer + forbidden expression list)
-    /// - current_expression suppression (unless emergency)
     /// - Adds the expression to the forbidden list on playback
     pub(crate) fn hero_speaking(&mut self, assets: &LevelAssets, pc_id: EntityId, expression: u16) {
         self.hero_speaking_ex_with_variant(assets, pc_id, expression, SPEECH_NORMAL, None);
@@ -321,8 +320,8 @@ impl EngineInner {
             return;
         }
 
-        // Check forbidden list + current_expression on PC
-        let (profile_id, position, is_forbidden, has_current, is_emergency) = {
+        // Check forbidden list on PC
+        let (profile_id, position, is_forbidden) = {
             let entity = match self.get_entity(pc_id) {
                 Some(e) => e,
                 None => return,
@@ -344,13 +343,10 @@ impl EngineInner {
                         .forbidden_expressions
                         .iter()
                         .any(|(e, _)| *e == expression);
-                    let current = pc.pc.current_expression != 0xFFFF;
                     (
                         profile.exclamation_id,
                         crate::geo2d::pt(pos.x, pos.y),
                         forbidden,
-                        current,
-                        (priority & SPEECH_EMERGENCY) != 0,
                     )
                 }
                 _ => return,
@@ -359,20 +355,6 @@ impl EngineInner {
 
         if is_forbidden && (priority & SPEECH_ALWAYS) == 0 {
             return;
-        }
-
-        // Already playing an expression?
-        if has_current {
-            if is_emergency {
-                self.pending_side_effects
-                    .sounds
-                    .push(super::SoundCommand::StopExclamation { actor_id: pc_id });
-                self.sound_sim
-                    .playing_exclamations
-                    .retain(|p| p.actor_id != pc_id.0);
-            } else {
-                return;
-            }
         }
 
         // Queue the expression (drained after tick)
@@ -406,13 +388,6 @@ impl EngineInner {
         };
         if let Some(Some(Entity::Pc(pc))) = self.entities.get_mut(pc_id.0 as usize) {
             pc.pc.forbidden_expressions.push((expression, forbid_timer));
-            // The reference comments out the equivalent assignment
-            // here, so `current_expression` is only ever cleared by
-            // sound-finished and the guard above is permanently dead.
-            // Don't write the field — the previous active write made
-            // the guard live and suppressed normal hero speech while
-            // another expression was still playing.
-            // pc.pc.current_expression = expression;
         }
         self.chorus_timer = DEFAULT_ANTI_CHORUS_TIMER;
     }

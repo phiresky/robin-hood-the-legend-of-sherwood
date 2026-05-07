@@ -2619,9 +2619,11 @@ impl GameHost {
             if let Some(pc) = entity.pc_data_mut() {
                 pc.fried_psykokwack = freeze;
             }
-        } else if let Some(npc) = entity.npc_data_mut() {
-            npc.fried_pikachu = freeze;
         }
+        // NPC branch intentionally empty: the C++ NPC freeze flag
+        // (`mbFriedPikachu`) is stored on assignment and never consulted —
+        // freezing an NPC via this native is a no-op in the original
+        // engine.
     }
 }
 

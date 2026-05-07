@@ -876,11 +876,6 @@ pub struct ActorData {
     pub active_lift: Option<ActiveLiftClimb>,
 
     // -- Rider charge state --
-    /// Movement flags for the current path (from `MoveFlags` bits).
-    /// Set when path is dispatched from pathfinder; cleared when path ends.
-    /// Used to detect `RIDER_CHARGE` for firing `EventGaloppLoopEnd`.
-    pub rider_move_flags: u16,
-
     /// Active rider charge state.  When `Some`, the rider is executing
     /// `ExecuteRiderCharge` — moving along a path while checking a
     /// polygon hit zone each frame.
@@ -960,7 +955,6 @@ impl Default for ActorData {
             jump_z_offset: 0.0,
             active_flight: None,
             active_lift: None,
-            rider_move_flags: 0,
             active_rider_charge: None,
             shield_obstacle: None,
             last_noise_volume: 0,
@@ -1012,10 +1006,6 @@ pub struct HumanData {
     pub unconscious: bool,
 
     // Sword strikes
-    pub sword_strike_victims: Vec<EntityId>,
-    pub initial_strike_angle: f32,
-    pub current_strike_angle: f32,
-    pub final_strike_angle: f32,
     pub sword_strike_boredom: Vec<u16>,
 
     // Nets
@@ -1059,7 +1049,6 @@ pub struct HumanData {
     pub last_is_lying_for_corpse_intersection: Option<bool>,
     pub killed_by_accident: bool,
     pub parry_counter: u16,
-    pub detectable_list_index: u16,
     pub invulnerable: bool,
     pub last_motion_was_step_back_in_combat: bool,
 
@@ -1068,7 +1057,6 @@ pub struct HumanData {
     pub time_hulk: u32,
     pub hulk_level: u16,
     pub hulk_direction: bool,
-    pub speed_hulk: f32,
 }
 
 impl Default for HumanData {
@@ -1079,10 +1067,6 @@ impl Default for HumanData {
             concussion_healing_timeout: 0,
             tiredness: 0,
             unconscious: false,
-            sword_strike_victims: Vec::new(),
-            initial_strike_angle: 0.0,
-            current_strike_angle: 0.0,
-            final_strike_angle: 0.0,
             sword_strike_boredom: Vec::new(),
             stuck_under_nets_counter: 0,
             hollow_man: false,
@@ -1098,14 +1082,12 @@ impl Default for HumanData {
             last_is_lying_for_corpse_intersection: None,
             killed_by_accident: false,
             parry_counter: 0,
-            detectable_list_index: 0,
             invulnerable: false,
             last_motion_was_step_back_in_combat: false,
             running_hulk: 0,
             time_hulk: 0,
             hulk_level: 0,
             hulk_direction: false,
-            speed_hulk: 0.0,
         }
     }
 }
@@ -1132,14 +1114,12 @@ impl HumanData {
         } else {
             // Animation finished — reset to fade-out for next time
             self.hulk_direction = true;
-            self.speed_hulk = 1.0;
         }
     }
 
     /// Start the hulk outline glow animation.
     pub fn start_hulk(&mut self, fade_out: bool, speed: f32) {
         self.hulk_direction = fade_out;
-        self.speed_hulk = speed;
         self.time_hulk = (speed * HULK_LENGTH as f32) as u32;
         self.running_hulk = self.time_hulk;
     }
@@ -1204,7 +1184,6 @@ pub struct PcData {
     // Shield
     pub shield_danger_point: Point3D,
     pub shield_protected: Option<EntityId>,
-    pub shield_protector: Option<EntityId>,
 
     // Guard
     pub guard: Option<EntityId>,
@@ -1218,7 +1197,6 @@ pub struct PcData {
     // Ammo dropping
     pub last_ammo_dropping_position: Point2D,
     pub last_dropped_ammo: Option<EntityId>,
-    pub update_last_dropped_ammo: bool,
     pub last_dropping_direction: u8,
 
     /// References character profile.
@@ -1244,12 +1222,6 @@ pub struct PcData {
     /// is still available in the gang to replace the killed PC.
     pub trumpet_enabled: bool,
 
-    /// `true` when at least one hostile NPC currently has this PC as an
-    /// attack/pursuit target.  Rebuilt every frame by the AI vision tick
-    /// (see `EngineInner::tick_enemy_ai`).  Read by the selection-circle
-    /// renderer so it can turn red while the PC is being hunted.
-    pub in_combat: bool,
-
     /// The PC's current melee target (sword opponent).
     ///
     /// Set when the PC enters a swordfight, cleared when the fight
@@ -1266,11 +1238,6 @@ pub struct PcData {
     /// Each entry counts down each frame and is removed at 0, preventing
     /// the same expression from repeating too quickly.
     pub forbidden_expressions: Vec<(u16, u16)>,
-
-    /// The currently-playing expression (NO_EXPRESSION = 0xFFFF when
-    /// none).  Used by HeroSpeaking to suppress overlapping speech
-    /// unless priority is emergency.
-    pub current_expression: u16,
 
     /// Last `combat_anim` id observed by the speech-trigger tick — used
     /// to detect the START of a new animation and the DONE transition
@@ -1307,13 +1274,11 @@ impl Default for PcData {
             carried_posture: Posture::Undefined,
             shield_danger_point: Point3D::default(),
             shield_protected: None,
-            shield_protector: None,
             guard: None,
             time_till_reinforcement: 0xFFFF_FFFF,
             work_icon: WorkIcon::default(),
             last_ammo_dropping_position: Point2D::default(),
             last_dropped_ammo: None,
-            update_last_dropped_ammo: false,
             last_dropping_direction: 0,
             profile_index: CharacterProfileIdx(0),
             kind: None,
@@ -1322,11 +1287,9 @@ impl Default for PcData {
             has_jump: false,
             beam_me_index: -1,
             trumpet_enabled: false,
-            in_combat: false,
             melee_target: None,
             initial_action: 0,
             forbidden_expressions: Vec::new(),
-            current_expression: 0xFFFF, // NO_EXPRESSION
             prev_combat_anim_id: 0,
             prev_combat_anim_ot: None,
         }
@@ -1508,7 +1471,6 @@ pub struct NpcData {
     pub money: u32,
     pub wasp_victim: bool,
 
-    pub body_visitors: u16,
     pub old_cover_noise_deafness: u16,
     pub old_cover_noise_deafness_frame_counter: u32,
 
@@ -1534,7 +1496,6 @@ pub struct NpcData {
 
     pub custom_values: [i32; NpcCustomValue::COUNT],
 
-    pub fried_pikachu: bool,
     pub display_double_status_bar: bool,
 
     // -- Cross-module reference: AI controller --
@@ -1688,7 +1649,6 @@ impl Default for NpcData {
             inform_my_friends: false,
             money: 0,
             wasp_victim: false,
-            body_visitors: 0,
             old_cover_noise_deafness: 0,
             old_cover_noise_deafness_frame_counter: 0,
             stuck_on_ladder_emergency_counter: 0,
@@ -1699,7 +1659,6 @@ impl Default for NpcData {
             worst_detected_type: DetectableType::None,
             has_given_money_to_beggar: false,
             custom_values: [0; NpcCustomValue::COUNT],
-            fried_pikachu: false,
             display_double_status_bar: false,
             ai_brain: AiBrain::None,
             alerted: false,
