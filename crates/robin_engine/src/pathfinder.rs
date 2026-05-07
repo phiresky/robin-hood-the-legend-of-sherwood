@@ -894,9 +894,6 @@ pub struct PathFinderRuntime {
 
     /// Current path graph area indices (layer, area).
     current_graph_area: (usize, usize),
-
-    /// Flag to cancel the current search.
-    ignore_next_path: bool,
 }
 
 /// Serializable pathfinder simulation state.
@@ -1042,7 +1039,6 @@ impl PathFinderRuntime {
             current_half_diagonal: pt(0.0, 0.0),
             current_motion_area: (0, 0),
             current_graph_area: (0, 0),
-            ignore_next_path: false,
         }
     }
 
@@ -1200,10 +1196,6 @@ impl PathFinderRuntime {
         let mut attempts_left = self.number_of_attempts;
 
         while !self.open_nodes.is_empty() {
-            if self.ignore_next_path {
-                return None;
-            }
-
             // Pop the node with the lowest score
             let current_idx = self.open_nodes.remove(0);
             let current_pos = self.graph.nodes[current_idx.0 as usize].position;

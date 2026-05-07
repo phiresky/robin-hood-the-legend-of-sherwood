@@ -4807,7 +4807,7 @@ impl EngineInner {
         // order rewrites before the order_pops drain — the rewrite
         // operates on the current front order plus any orders behind
         // it, so it must run before `do_next_order` pops the front.
-        // Three outcomes per entry:
+        // Two outcomes per entry:
         //   1. First following order with `order_type !=
         //      current.order_type && (target_x, target_y) != (0, 0)`
         //      found at index `k`: insert a clone of the current
@@ -4816,12 +4816,12 @@ impl EngineInner {
         //      preserves the order's unique id so the sprite pipeline
         //      keeps treating the new front as a continuation after
         //      the front pop.
-        //   2. The first following order is a flight (`target_z !=
-        //      0`) *and* shares the current order's action (so the
-        //      scan doesn't pick a different-action target): leave
-        //      the queue untouched, just terminate.
-        //   3. No different-action order found: drop every following
+        //   2. No different-action order found: drop every following
         //      order so only the current front remains.
+        // (The C++ also had a flight-order early-terminate branch
+        // here, but Rust re-architected jumps and projectiles onto
+        // ActiveJump / ActiveFlight state machines, so Order is
+        // 2D-only and the branch is unreachable.)
         for rewrite in till_last_frame_rewrites {
             let Some(elem) = self
                 .sequence_manager
@@ -4834,7 +4834,6 @@ impl EngineInner {
             };
             let mut animation_new: Option<crate::order::OrderType> = None;
             let mut insertion_idx: Option<usize> = None;
-            let mut early_terminate = false;
             for k in 1..elem.orders.len() {
                 let nxt = &elem.orders[k];
                 let dest_2d_zero = nxt.target_x == 0.0 && nxt.target_y == 0.0;
@@ -4842,13 +4841,7 @@ impl EngineInner {
                     animation_new = Some(nxt.order_type);
                     insertion_idx = Some(k);
                     break;
-                } else if k == 1 && nxt.target_z != 0.0 {
-                    early_terminate = true;
-                    break;
                 }
-            }
-            if early_terminate {
-                continue;
             }
             match (animation_new, insertion_idx) {
                 (Some(new_action), Some(idx)) => {

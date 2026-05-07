@@ -473,9 +473,6 @@ pub struct GridSector {
     /// is largest (screen coords, Y grows downward). Used by
     /// `translate_ladder_wall_fall` to locate the ground entry point.
     pub lowest_door_index: Option<u32>,
-    /// Index into `GameHost::doors` of the door at the top of this
-    /// lift (smallest `point_in.Y`).
-    pub highest_door_index: Option<u32>,
 
     /// Indices into `FastFindGrid::jump_lines` of the jump lines that
     /// live in this sector. Each motion-area sector keeps a list of its
@@ -489,9 +486,6 @@ pub struct GridSector {
     /// `sector_in` / `sector_out`. Used by the motion-area cursor
     /// reachability check and for gate-connectivity queries.
     pub gate_indices: Vec<crate::gate::DoorIndex>,
-    /// Parallel to `gate_indices`: `true` if the gate's "in" side points
-    /// into this sector, `false` if the "out" side does.
-    pub gate_directions: Vec<bool>,
 
     /// For jump sectors (`SectorType::JUMP`): the index in
     /// `FastFindGrid::sectors` of the motion-area sector this jump
@@ -3656,10 +3650,8 @@ mod tests {
             low_exit_point: None,
             high_exit_point: None,
             lowest_door_index: None,
-            highest_door_index: None,
             jump_line_indices: Vec::new(),
             gate_indices: Vec::new(),
-            gate_directions: Vec::new(),
             underlying_sector: None,
             associated_sector_index: None,
         }

@@ -659,10 +659,8 @@ impl EngineInner {
                         low_exit_point: None,
                         high_exit_point: None,
                         lowest_door_index: None,
-                        highest_door_index: None,
                         jump_line_indices: Vec::new(),
                         gate_indices: Vec::new(),
-                        gate_directions: Vec::new(),
                         underlying_sector: None,
                         associated_sector_index: None,
                     },
@@ -3973,10 +3971,8 @@ impl EngineInner {
                             low_exit_point: None,
                             high_exit_point: None,
                             lowest_door_index: None,
-                            highest_door_index: None,
                             jump_line_indices: Vec::new(),
                             gate_indices: Vec::new(),
-                            gate_directions: Vec::new(),
                             underlying_sector: None,
                             associated_sector_index: None,
                         },
@@ -4013,10 +4009,8 @@ impl EngineInner {
                                 low_exit_point: None,
                                 high_exit_point: None,
                                 lowest_door_index: None,
-                                highest_door_index: None,
                                 jump_line_indices: Vec::new(),
                                 gate_indices: Vec::new(),
-                                gate_directions: Vec::new(),
                                 underlying_sector: None,
                                 associated_sector_index: None,
                             },
@@ -4128,10 +4122,8 @@ impl EngineInner {
                         low_exit_point: None,
                         high_exit_point: None,
                         lowest_door_index: None,
-                        highest_door_index: None,
                         jump_line_indices: Vec::new(),
                         gate_indices: Vec::new(),
-                        gate_directions: Vec::new(),
                         underlying_sector: None,
                         associated_sector_index: None,
                     },
@@ -4192,10 +4184,8 @@ impl EngineInner {
                         low_exit_point: None,
                         high_exit_point: None,
                         lowest_door_index: None,
-                        highest_door_index: None,
                         jump_line_indices: Vec::new(),
                         gate_indices: Vec::new(),
-                        gate_directions: Vec::new(),
                         underlying_sector: None,
                         associated_sector_index: None,
                     },
@@ -4580,10 +4570,8 @@ impl EngineInner {
                 low_exit_point: None,
                 high_exit_point: None,
                 lowest_door_index: None,
-                highest_door_index: None,
                 jump_line_indices: Vec::new(),
                 gate_indices: Vec::new(),
-                gate_directions: Vec::new(),
                 underlying_sector: zone_sector[zi]
                     .and_then(crate::fast_find_grid::SectorIndex::new),
                 associated_sector_index: None,
@@ -4731,7 +4719,7 @@ impl EngineInner {
 
         // Snapshot door endpoints so we can borrow `self.fast_grid` mutably
         // without also holding a reference into the script host.
-        let endpoints: Vec<(u32, crate::sector::SectorNumber, bool)> = {
+        let endpoints: Vec<(u32, crate::sector::SectorNumber)> = {
             let game_host = self
                 .mission_script
                 .as_ref()
@@ -4742,17 +4730,14 @@ impl EngineInner {
                 .iter()
                 .enumerate()
                 .flat_map(|(idx, door)| {
-                    [
-                        (idx as u32, door.sector_out, true),
-                        (idx as u32, door.sector_in, false),
-                    ]
+                    [(idx as u32, door.sector_out), (idx as u32, door.sector_in)]
                 })
                 .collect()
         };
 
         let mut missing = 0u32;
         let mut missing_values: std::collections::BTreeSet<i16> = std::collections::BTreeSet::new();
-        for (door_idx, sector_number, direction) in &endpoints {
+        for (door_idx, sector_number) in &endpoints {
             let Some(&grid_idx) = self.fast_grid.level.sector_number_map.get(sector_number) else {
                 missing += 1;
                 missing_values.insert(i16::from(*sector_number));
@@ -4765,7 +4750,6 @@ impl EngineInner {
             {
                 gs.gate_indices
                     .push(crate::gate::DoorIndex::from(*door_idx));
-                gs.gate_directions.push(*direction);
             }
         }
         if missing > 0 {
@@ -5010,27 +4994,22 @@ impl EngineInner {
 
                 let door_active = door.active;
                 let idx = self.fast_grid.add_sector(
-                    crate::fast_find_grid::GridSector {
-                        points: pts,
-                        bounding_box: bbox,
-                        sector_type: SectorType::DOOR | SectorType::MOUSE,
-                        layer,
-                        sector_number: crate::sector::SectorNumber::new(-1), /* Doors don't have motion sector numbers */
-                        door_index: Some(door_idx as u32),
-                        lift_type: None,
-                        lift_direction: 0,
-                        force_crouched: false,
-                        building_index: None,
-                        low_exit_point: None,
-                        high_exit_point: None,
-                        lowest_door_index: None,
-                        highest_door_index: None,
-                        jump_line_indices: Vec::new(),
-                        gate_indices: Vec::new(),
-                        gate_directions: Vec::new(),
-                        underlying_sector: None,
-                        associated_sector_index: None,
-                    },
+                    crate::fast_find_grid::GridSector { points: pts,
+                    bounding_box: bbox,
+                    sector_type: SectorType::DOOR | SectorType::MOUSE,
+                    layer,
+                    sector_number: crate::sector::SectorNumber::new(-1), /* Doors don't have motion sector numbers */
+                    door_index: Some(door_idx as u32),
+                    lift_type: None,
+                    lift_direction: 0,
+                    force_crouched: false,
+                    building_index: None,
+                    low_exit_point: None,
+                    high_exit_point: None,
+                    lowest_door_index: None, jump_line_indices: Vec::new(),
+                    gate_indices: Vec::new(),
+                    underlying_sector: None,
+                    associated_sector_index: None, },
                     layer,
                 );
                 self.fast_grid.set_sector_active(idx, door_active);
@@ -5056,7 +5035,6 @@ impl EngineInner {
                 gs.low_exit_point = None;
                 gs.high_exit_point = None;
                 gs.lowest_door_index = None;
-                gs.highest_door_index = None;
             }
         }
         let mut lift_endpoints_cached = 0usize;
@@ -5084,13 +5062,11 @@ impl EngineInner {
                     gs.lowest_door_index = Some(door_idx);
                 }
                 let highest = gs
-                    .highest_door_index
-                    .and_then(|prev| game_host.doors.get(prev as usize))
-                    .map(|prev| prev.point_in.1)
+                    .high_exit_point
+                    .map(|prev| prev.y)
                     .is_none_or(|prev_y| door.point_in.1 < prev_y);
                 if highest {
                     gs.high_exit_point = Some(crate::geo2d::pt(door.point_in.0, door.point_in.1));
-                    gs.highest_door_index = Some(door_idx);
                 }
             }
         }
@@ -5183,10 +5159,8 @@ impl EngineInner {
                     low_exit_point: None,
                     high_exit_point: None,
                     lowest_door_index: None,
-                    highest_door_index: None,
                     jump_line_indices: Vec::new(),
                     gate_indices: Vec::new(),
-                    gate_directions: Vec::new(),
                     underlying_sector: None,
                     associated_sector_index: None,
                 };
