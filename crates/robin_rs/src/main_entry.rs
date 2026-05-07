@@ -98,6 +98,12 @@ pub struct CliArgs {
     #[arg(long)]
     pub view_cones: bool,
 
+    /// Show the debug-surfaces overlay (walkable motion areas + selected
+    /// character's surface and committed path).  Toggle at runtime with
+    /// the `SURFACE` console command.
+    #[arg(long)]
+    pub debug_surfaces: bool,
+
     /// Record a replay to the given file path (must end in `.rhrec.jsonl`)
     #[arg(long, value_parser = parse_record_path)]
     pub record: Option<String>,
@@ -259,6 +265,7 @@ impl Default for CliArgs {
             record_default_key_config: false,
             check_sound_data: false,
             view_cones: false,
+            debug_surfaces: false,
             record: None,
             replay: None,
             replay_data: None,
@@ -292,6 +299,7 @@ fn install_global_options(args: &mut CliArgs) {
         highlander2: args.highlander2,
         bypass_fog_sprites_crash: args.no_fog,
         whatsup: args.whatsup,
+        debug_surfaces: args.debug_surfaces,
         golden_eye: args.goldeneye,
         ignore_default_loose: args.no_default_loose,
         record_default_key_config: args.record_default_key_config,
