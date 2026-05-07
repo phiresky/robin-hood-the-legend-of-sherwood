@@ -9,10 +9,11 @@ use crate::game::Game;
 use crate::game_render::{
     apply_ambiance_overlay, render_bg_animations_gpu, render_combat_status_bars,
     render_debug_animation_lines, render_debug_doors, render_debug_motion_graph,
-    render_debug_surfaces, render_debug_whatsup_overlay, render_door_overlays, render_entities_gpu,
-    render_ground_marks, render_listen_ping, render_minimap, render_noise_display,
-    render_ransom_amulet_overlay, render_selection_outlines_gpu,
-    render_shadow_polygon_sphere_debug, render_trajectory_preview, render_view_cone_overlay,
+    render_debug_surfaces_fill, render_debug_surfaces_outline, render_debug_whatsup_overlay,
+    render_door_overlays, render_entities_gpu, render_ground_marks, render_listen_ping,
+    render_minimap, render_noise_display, render_ransom_amulet_overlay,
+    render_selection_outlines_gpu, render_shadow_polygon_sphere_debug, render_trajectory_preview,
+    render_view_cone_overlay,
 };
 use crate::geo2d;
 use crate::host::PrintScreenRequest;
@@ -751,6 +752,12 @@ pub(super) fn render_frame(
     // of the entity pass so the per-human-entity interleave inside
     // `render_entities_gpu` starts at titbit 0 and walks
     // monotonically forward across the entity list.
+    // ── GPU phase: surface fill (under sprites) ──
+    // Translucent yellow tint for the selected character's `MotionArea`,
+    // drawn before sprites so characters / non-static obstacle sprites
+    // sit on top.  Outlines + path are drawn after sprites.
+    render_debug_surfaces_fill(host, engine, assets, dev, renderer);
+
     titbit_renderer.begin_frame();
     render_entities_gpu(host, engine, assets, renderer, titbit_renderer);
 
@@ -853,12 +860,13 @@ pub(super) fn render_frame(
     // at PC[0]'s pathfinder/half-diagonal index.
     render_debug_motion_graph(host, engine, assets, dev, renderer);
 
-    // ── GPU phase: surface debug overlay ──
-    // Toggle: console cheat `SURFACE` or `--debug-surfaces` CLI flag.
-    // Outlines every walkable `MotionArea` polygon, highlights the
-    // selected character's current surface, and draws their committed
-    // path waypoints colored by destination surface.
-    render_debug_surfaces(host, engine, assets, dev, renderer);
+    // ── GPU phase: surface debug outlines + path (above sprites) ──
+    // Companion to `render_debug_surfaces_fill` — outlines every
+    // `MotionArea`, draws active obstacle outlines, the bright outline
+    // on the selected character's surface, and the committed path
+    // polyline.  All on top of sprites; only the highlight tint is
+    // drawn beneath them.
+    render_debug_surfaces_outline(host, engine, assets, dev, renderer);
 
     // ── GPU phase: per-NPC "whatsup" debug overlay ──
     // Gated on `GlobalOptions::whatsup` so it is off by default.

@@ -1512,7 +1512,6 @@ mod tests {
             layer: 0,
             sector_number: crate::sector::SectorNumber::new(sn),
             door_index: None,
-            lift_motion_area: None,
             lift_type: None,
             lift_direction: 0,
             force_crouched: false,

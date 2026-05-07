@@ -365,16 +365,26 @@ pub(super) fn handle_mouse_input(
                         // where screen_to_map returns None so multi_selection never started).
                         host.input.cancel_multi_selection();
 
+                        // If a swordfight gesture drag was being recorded, the LMB-up
+                        // commits that gesture — skip portrait hit-testing so a release
+                        // over a portrait doesn't accidentally select that PC.
+                        let swordfight_drag = engine.is_seat_selection_swordfighting(local_seat)
+                            && !host.mouse_way.is_empty();
+
                         // Check portrait panel first (detailed sub-area hit-test).
-                        let portrait_hit = crate::ui_panel::hit_test_portrait_detailed(
-                            engine,
-                            local_seat,
-                            portrait_cache,
-                            renderer.screen_width(),
-                            renderer.screen_height(),
-                            mx as f32,
-                            my as f32,
-                        );
+                        let portrait_hit = if swordfight_drag {
+                            None
+                        } else {
+                            crate::ui_panel::hit_test_portrait_detailed(
+                                engine,
+                                local_seat,
+                                portrait_cache,
+                                renderer.screen_width(),
+                                renderer.screen_height(),
+                                mx as f32,
+                                my as f32,
+                            )
+                        };
 
                         if let Some(hit) = portrait_hit {
                             use crate::ui_panel::PortraitHitArea;

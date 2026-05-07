@@ -270,12 +270,6 @@ pub struct GridLine {
     /// `material` field from the new SECTOR_SOUND polygon containment
     /// (or falls back to the obstacle / default material).
     pub is_sound: bool,
-    /// For sound lines: index into
-    /// [`crate::material_sectors::MaterialSectors::sectors`] for the
-    /// owning material sector.  `None` when the line was created
-    /// without a back-pointer (currently unused; reserved for future
-    /// per-sector look-ups that need the line's source polygon).
-    pub sound_material_sector_idx: Option<u16>,
     /// Outward normal (for repulsive lines, used in `FindAutorizedPosition`).
     pub normal: Vec2D,
     /// Bounding box of the segment (pre-computed for fast rejection).
@@ -308,7 +302,6 @@ impl GridLine {
             is_script: false,
             script_zone_index: None,
             is_sound: false,
-            sound_material_sector_idx: None,
             left_obstacle_index: None,
             right_obstacle_index: None,
             normal,
@@ -374,17 +367,13 @@ impl GridLine {
     /// Built per SECTOR_SOUND polygon edge by
     /// [`FastFindGrid::add_sector_lines_for_sound`].  Not motion-blocking
     /// — purely a trigger surface that fires the actor-side material
-    /// refresh when crossed.  `material_sector_idx` is an optional
-    /// back-pointer to the owning [`crate::material_sectors::MaterialSector`]
-    /// for callers that want the source polygon; the per-tick
-    /// dispatch only uses it for diagnostics — the actual material
-    /// refresh re-queries `MaterialSectors::material_at(actor_pos)`
-    /// which combines the polygon containment test with the
-    /// obstacle/default fallback in one call.
-    pub fn new_sound(a: Point2D, b: Point2D, material_sector_idx: Option<u16>) -> Self {
+    /// refresh when crossed.  The actual material refresh re-queries
+    /// `MaterialSectors::material_at(actor_pos)` which combines the
+    /// polygon containment test with the obstacle/default fallback in
+    /// one call.
+    pub fn new_sound(a: Point2D, b: Point2D) -> Self {
         let mut line = Self::new(a, b, false);
         line.is_sound = true;
-        line.sound_material_sector_idx = material_sector_idx;
         line
     }
 
@@ -454,8 +443,6 @@ pub struct GridSector {
     pub sector_number: crate::sector::SectorNumber,
     /// For door sectors: index into the global door table (`GameHost::doors`).
     pub door_index: Option<u32>,
-    /// For lift sectors: the associated motion area index.
-    pub lift_motion_area: Option<u16>,
     /// For lift sectors: the sub-type (wall/stairs/ladder/normal).
     pub lift_type: Option<crate::sector::LiftType>,
     /// For lift sectors: the proto-loaded facing direction (0..15).
@@ -797,7 +784,6 @@ pub struct LevelGrid {
 )]
 pub struct LiftRuntimeState {
     pub occupants: u16,
-    pub occupants_pc: u16,
     pub occupied_upwards: bool,
     pub occupied_downwards: bool,
     pub wait_time: u32,
@@ -825,19 +811,13 @@ impl LiftRuntimeState {
     }
 
     /// Mark an actor as entering/leaving the lift going downwards.
-    pub fn set_occupied_downwards(&mut self, is_pc: bool, entering: bool) {
+    pub fn set_occupied_downwards(&mut self, entering: bool) {
         if entering {
             self.occupants += 1;
-            if is_pc {
-                self.occupants_pc += 1;
-            }
             self.occupied_downwards = true;
             self.wait_time = 100;
         } else {
             self.occupants = self.occupants.saturating_sub(1);
-            if is_pc {
-                self.occupants_pc = self.occupants_pc.saturating_sub(1);
-            }
             if self.occupants == 0 {
                 self.wait_time = 0;
                 self.occupied_downwards = false;
@@ -847,19 +827,13 @@ impl LiftRuntimeState {
     }
 
     /// Mark an actor as entering/leaving the lift going upwards.
-    pub fn set_occupied_upwards(&mut self, is_pc: bool, entering: bool) {
+    pub fn set_occupied_upwards(&mut self, entering: bool) {
         if entering {
             self.occupants += 1;
-            if is_pc {
-                self.occupants_pc += 1;
-            }
             self.occupied_upwards = true;
             self.wait_time = 80;
         } else {
             self.occupants = self.occupants.saturating_sub(1);
-            if is_pc {
-                self.occupants_pc = self.occupants_pc.saturating_sub(1);
-            }
             if self.occupants == 0 {
                 self.wait_time = 0;
                 self.occupied_downwards = false;
@@ -2496,7 +2470,6 @@ impl FastFindGrid {
         &mut self,
         layer: u16,
         points: &[Point2D],
-        material_sector_idx: Option<u16>,
         sector_active: bool,
     ) -> Vec<LineIndex> {
         if points.len() < 2 {
@@ -2505,7 +2478,7 @@ impl FastFindGrid {
         let mut indices = Vec::with_capacity(points.len());
         let mut last = points[points.len() - 1];
         for &current in points {
-            let line = GridLine::new_sound(last, current, material_sector_idx);
+            let line = GridLine::new_sound(last, current);
             let idx = self.add_line(line, layer);
             self.set_line_active(idx, sector_active);
             indices.push(idx);
@@ -3682,7 +3655,6 @@ mod tests {
             layer,
             sector_number: crate::sector::SectorNumber::new(sector_number),
             door_index: None,
-            lift_motion_area: None,
             lift_type: None,
             lift_direction: 0,
             force_crouched: false,

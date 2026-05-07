@@ -5,7 +5,8 @@
 /android/build/
 /android/app/build/
 /android/assets/Data/datadir.bin
-/original-code
+/original-code/
+/merge-claude-worktrees
 
 # Editor / IDE
 *.swp

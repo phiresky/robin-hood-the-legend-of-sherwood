@@ -838,8 +838,6 @@ pub struct LiftData {
     // ── Serialized (save-game state) ──
     /// Number of actors currently on the lift.
     pub occupants: u16,
-    /// Number of PC actors on the lift.
-    pub occupants_pc: u16,
     /// Whether a character is currently going upwards.
     pub occupied_upwards: bool,
     /// Whether a character is currently going downwards.
@@ -868,7 +866,6 @@ impl Default for LiftData {
             motion: MotionAreaData::default(),
             lift_type: LiftType::Normal,
             occupants: 0,
-            occupants_pc: 0,
             occupied_upwards: false,
             occupied_downwards: false,
             wait_time: 0,
@@ -888,10 +885,6 @@ impl LiftData {
 
     pub fn is_occupied(&self) -> bool {
         self.occupants != 0
-    }
-
-    pub fn is_occupied_by_pc(&self) -> bool {
-        self.occupants_pc != 0
     }
 
     /// Check if downward traversal is currently allowed.
@@ -915,21 +908,13 @@ impl LiftData {
     }
 
     /// Mark an actor as entering the lift going downwards.
-    ///
-    /// `is_pc` should be `true` if the actor is a player character.
-    pub fn set_occupied_downwards(&mut self, is_pc: bool, entering: bool) {
+    pub fn set_occupied_downwards(&mut self, entering: bool) {
         if entering {
             self.occupants += 1;
-            if is_pc {
-                self.occupants_pc += 1;
-            }
             self.occupied_downwards = true;
             self.wait_time = 100;
         } else {
             self.occupants = self.occupants.saturating_sub(1);
-            if is_pc {
-                self.occupants_pc = self.occupants_pc.saturating_sub(1);
-            }
             if self.occupants == 0 {
                 self.wait_time = 0;
                 self.occupied_downwards = false;
@@ -939,21 +924,13 @@ impl LiftData {
     }
 
     /// Mark an actor as entering the lift going upwards.
-    ///
-    /// `is_pc` should be `true` if the actor is a player character.
-    pub fn set_occupied_upwards(&mut self, is_pc: bool, entering: bool) {
+    pub fn set_occupied_upwards(&mut self, entering: bool) {
         if entering {
             self.occupants += 1;
-            if is_pc {
-                self.occupants_pc += 1;
-            }
             self.occupied_upwards = true;
             self.wait_time = 80;
         } else {
             self.occupants = self.occupants.saturating_sub(1);
-            if is_pc {
-                self.occupants_pc = self.occupants_pc.saturating_sub(1);
-            }
             if self.occupants == 0 {
                 self.wait_time = 0;
                 self.occupied_downwards = false;
@@ -1895,15 +1872,13 @@ mod tests {
         let mut lift = LiftData::new();
         assert!(!lift.is_occupied());
 
-        lift.set_occupied_downwards(true, true);
+        lift.set_occupied_downwards(true);
         assert!(lift.is_occupied());
-        assert!(lift.is_occupied_by_pc());
         assert_eq!(lift.occupants, 1);
-        assert_eq!(lift.occupants_pc, 1);
         assert!(lift.occupied_downwards);
         assert_eq!(lift.wait_time, 100);
 
-        lift.set_occupied_downwards(true, false);
+        lift.set_occupied_downwards(false);
         assert!(!lift.is_occupied());
         assert_eq!(lift.wait_time, 0);
         assert!(!lift.occupied_downwards);
@@ -1914,13 +1889,12 @@ mod tests {
     fn lift_upward_occupant_tracking() {
         let mut lift = LiftData::new();
 
-        lift.set_occupied_upwards(false, true);
+        lift.set_occupied_upwards(true);
         assert!(lift.is_occupied());
-        assert!(!lift.is_occupied_by_pc());
         assert!(lift.occupied_upwards);
         assert_eq!(lift.wait_time, 80);
 
-        lift.set_occupied_upwards(false, false);
+        lift.set_occupied_upwards(false);
         assert!(!lift.is_occupied());
     }
 
@@ -2153,7 +2127,6 @@ mod tests {
         // Set some serialized state
         if let SectorKind::Lift(ref mut lift) = sector.kind {
             lift.occupants = 3;
-            lift.occupants_pc = 1;
             lift.occupied_downwards = true;
             lift.wait_time = 50;
         }
@@ -2165,7 +2138,6 @@ mod tests {
         // covers level data alongside runtime state.
         let lift = deserialized.as_lift().unwrap();
         assert_eq!(lift.occupants, 3);
-        assert_eq!(lift.occupants_pc, 1);
         assert!(lift.occupied_downwards);
         assert_eq!(lift.wait_time, 50);
         assert_eq!(lift.lift_type, LiftType::Normal);

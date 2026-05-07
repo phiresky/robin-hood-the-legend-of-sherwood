@@ -459,11 +459,21 @@ impl EngineInner {
                 };
                 ConsoleResponse::Ok(format!("Zone\n{status}"))
             }
-            BigBrother => toggle_debug(
-                &mut dev.debug.actor_info_display,
-                "Actor infos displayed !",
-                "Actors infos hidden !",
-            ),
+            BigBrother => {
+                dev.debug.actor_info_display = !dev.debug.actor_info_display;
+                // TODO: Port the original actor-info text overlay. Until then,
+                // make BIG BROTHER drive the live numeric ID overlay that is
+                // already rendered by the host.
+                dev.debug.entity_ids = dev.debug.actor_info_display;
+                ConsoleResponse::Ok(
+                    if dev.debug.actor_info_display {
+                        "Actor infos displayed !"
+                    } else {
+                        "Actors infos hidden !"
+                    }
+                    .to_string(),
+                )
+            }
             LevelText { option } => match option.as_deref() {
                 Some("DG") => {
                     dev.debug.all_dialogues = true;
@@ -1358,6 +1368,27 @@ mod tests {
         let (mut engine, mut dev) = engine_with_campaign();
         let _ = engine.run_console_command(&assets(), &mut dev, &mut None, "NUKE");
         assert_eq!(dev.console.history.last().map(String::as_str), Some("NUKE"));
+    }
+
+    #[test]
+    fn big_brother_toggles_rendered_entity_ids() {
+        let (mut engine, mut dev) = engine_with_campaign();
+
+        let resp = engine.run_console_command(&assets(), &mut dev, &mut None, "BIG BROTHER");
+        assert_eq!(
+            resp,
+            ConsoleResponse::Ok("Actor infos displayed !".to_string())
+        );
+        assert!(dev.debug.actor_info_display);
+        assert!(dev.debug.entity_ids);
+
+        let resp = engine.run_console_command(&assets(), &mut dev, &mut None, "BIG BROTHER");
+        assert_eq!(
+            resp,
+            ConsoleResponse::Ok("Actors infos hidden !".to_string())
+        );
+        assert!(!dev.debug.actor_info_display);
+        assert!(!dev.debug.entity_ids);
     }
 
     #[test]

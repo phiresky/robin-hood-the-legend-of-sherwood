@@ -201,6 +201,34 @@ pub extern "system" fn Java_io_github_phiresky_robinhood_RobinHoodActivity_nativ
     }
 }
 
+/// Process-wide handle on the live winit [`Window`].  Populated when
+/// the OS window is created so the game thread can reach the window
+/// for fire-and-forget calls like [`Window::reset_dead_keys`] without
+/// round-tripping through the [`HostCmd`] queue.  The cmd queue is
+/// only drained at `about_to_wait`, which is too late for dead-key
+/// resets — by the time it runs, the next keypress has already been
+/// composed.
+static GAME_WINDOW: std::sync::OnceLock<std::sync::Mutex<Option<Arc<Window>>>> =
+    std::sync::OnceLock::new();
+
+fn game_window_slot() -> &'static std::sync::Mutex<Option<Arc<Window>>> {
+    GAME_WINDOW.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn set_game_window(window: Arc<Window>) {
+    *game_window_slot().lock().expect("game window poisoned") = Some(window);
+}
+
+fn with_game_window<F: FnOnce(&Window)>(f: F) {
+    if let Some(w) = game_window_slot()
+        .lock()
+        .expect("game window poisoned")
+        .as_ref()
+    {
+        f(w);
+    }
+}
+
 /// Commands flowing from the game out to the [`AppHandler`] / window.
 /// Picked up on the next `about_to_wait` / `new_events` callback.
 pub(crate) enum HostCmd {
@@ -790,6 +818,7 @@ impl ApplicationHandler for AppHandler {
         window.set_cursor_visible(false);
         let window = Arc::new(window);
         self.window = Some(window.clone());
+        set_game_window(window.clone());
 
         // Hand the bare window to the game future.  All wgpu init
         // (`request_adapter`, `request_device`) happens *async* on the
@@ -1304,10 +1333,20 @@ where
 // Text-input toggles (no-ops under winit).
 // ---------------------------------------------------------------------
 
-/// SDL-era IME helpers — no-ops under winit, which delivers
-/// `GameEvent::TextInput` events whether or not we've explicitly
-/// "started" it.
-pub fn start_text_input() {}
+/// SDL-era IME helpers — winit delivers `GameEvent::TextInput` events
+/// whether or not we've explicitly "started" it, so the start/stop
+/// pair is mostly bookkeeping.  `start_text_input` additionally clears
+/// any pending dead-key composition: when the player opens a text
+/// surface (e.g. the dev console) using a key bound to a dead key
+/// (`^`, `~`, etc.), the OS would otherwise compose that mark into
+/// the next typed character.  Called directly on the [`Window`]
+/// (rather than via the [`HostCmd`] queue) so the reset lands before
+/// the next [`WindowEvent::KeyboardInput`] is processed on the main
+/// thread.  On Linux winit's implementation is just an atomic-flag
+/// store, safe from any thread.
+pub fn start_text_input() {
+    with_game_window(|w| w.reset_dead_keys());
+}
 pub fn stop_text_input() {}
 
 // ---------------------------------------------------------------------
