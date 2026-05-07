@@ -191,6 +191,30 @@ pub(crate) fn render_door_overlays(
         .map(|i| engine.fast_grid().is_sector_active(i as u32))
         .unwrap_or(false);
 
+    if host.input.display_door
+        && let Some(door_idx) = host.input.hovered_door_idx
+        && let Some(door) = game_host.doors.get(door_idx as usize)
+    {
+        match door.door_type {
+            DoorType::Building | DoorType::BuildingTrap => {
+                let building_sector = sector_by_number(i16::from(door.sector_in))
+                    .filter(|s| s.sector_type.is_building())
+                    .or_else(|| {
+                        sector_by_number(i16::from(door.sector_out))
+                            .filter(|s| s.sector_type.is_building())
+                    });
+                if let Some(building) = building_sector {
+                    draw_sector_doors(renderer, building, false);
+                } else {
+                    draw_door(renderer, door);
+                }
+            }
+            _ => {
+                draw_door(renderer, door);
+            }
+        }
+    }
+
     if let Some(sector) = selected_sector {
         if host.input.display_door
             && sector.sector_type.is_door()

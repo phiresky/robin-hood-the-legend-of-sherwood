@@ -76,6 +76,15 @@ fn sprite_motion_order_for_nonanimation(order: OrderType) -> OrderType {
     }
 }
 
+fn door_click_polygon_at(game_host: &crate::natives::GameHost, click: Point2D) -> Option<u32> {
+    game_host
+        .doors
+        .iter()
+        .enumerate()
+        .find(|(_, door)| door.is_door() && door.click_polygon_contains(click.x, click.y))
+        .map(|(idx, _)| idx as u32)
+}
+
 fn is_sword_movement_nonanimation(order: OrderType) -> bool {
     matches!(
         order,
@@ -867,10 +876,17 @@ impl EngineInner {
         // Door index of the clicked door sector, if any.  Used to
         // route the per-PC gate search via `find_path_to_door` and
         // emit a `GoalShape::Door` terminal element.
-        let clicked_door_index: Option<u32> = hit
+        let clicked_sector_door_index: Option<u32> = hit
             .sector_idx
             .and_then(|i| self.fast_grid.level.sectors.get(usize::from(i)))
             .and_then(|s| s.door_index);
+        let clicked_polygon_door_index = self
+            .mission_script
+            .as_ref()
+            .and_then(|s| s.game_host())
+            .and_then(|h| door_click_polygon_at(h, click_point));
+        let clicked_door_index = clicked_sector_door_index.or(clicked_polygon_door_index);
+        let is_door_click = is_door_click || clicked_door_index.is_some();
 
         // ── Determine effective click point, layer, and goal sector ──
         let goal_sector = hit.sector;
@@ -1039,9 +1055,10 @@ impl EngineInner {
             }
 
             // Same-sector or unknown goal sector: simple move
-            if !is_valid
-                || goal_sector.is_none()
-                || goal_sector.is_some_and(|goal| u16::from(goal) == *src_sector)
+            if !is_door_click
+                && (!is_valid
+                    || goal_sector.is_none()
+                    || goal_sector.is_some_and(|goal| u16::from(goal) == *src_sector))
             {
                 // Door clicks skip the walkable snap entirely.
                 let snap_res = if is_door_click {
@@ -1159,7 +1176,7 @@ impl EngineInner {
                 continue;
             }
 
-            let Some(goal_sector) = goal_sector else {
+            if goal_sector.is_none() && !is_door_click {
                 tracing::warn!("skipping cross-sector move without resolved goal sector");
                 continue;
             };
@@ -1236,6 +1253,10 @@ impl EngineInner {
             let path = if door_goal_info.is_some() {
                 door_goal_info.as_ref().map(|(_, p, _, _, _)| p.clone())
             } else {
+                let Some(goal_sector) = goal_sector else {
+                    tracing::warn!("skipping gate path without resolved goal sector");
+                    continue;
+                };
                 let game_host = self.mission_script.as_mut().and_then(|s| s.game_host_mut());
                 game_host.and_then(|h| {
                     crate::gate::find_path_gates(
@@ -1260,7 +1281,7 @@ impl EngineInner {
                     tracing::info!(
                         "Gate A* from sector {} to sector {}: {} gates{}",
                         src_sector,
-                        goal_sector,
+                        goal_sector.map(u16::from).unwrap_or(*src_sector),
                         gate_steps.len(),
                         if door_goal.is_some() {
                             " (door goal)"
@@ -5204,15 +5225,15 @@ impl EngineInner {
     }
     // ─── Elevation-line crossing ──────────────────────────────────
 
-    /// Find a projection-area sight obstacle on `layer` whose ground
-    /// polygon contains `pos`.
+    /// Find a projection-area sight obstacle on `layer` whose
+    /// screen-space plane contains `pos`.
     ///
     /// Used by the elevation-line emergency fallbacks: iterate plane
     /// sectors in the spatial bucket at `(pos, layer 0)`, then keep
-    /// the one whose attached sight obstacle's layer matches and
-    /// whose polygon contains the position.  We don't carry a plane-
-    /// sector registry yet — but every plane sector wraps a single
-    /// projection-area obstacle, so iterating projection-area
+    /// the one whose attached sight obstacle's layer matches and whose
+    /// screen-space sector plane contains the position.  We don't carry
+    /// a plane-sector registry yet — but every plane sector wraps a
+    /// single projection-area obstacle, so iterating projection-area
     /// obstacles directly gives the same answer.
     pub(super) fn find_plane_obstacle_at(
         &self,
@@ -5244,10 +5265,10 @@ impl EngineInner {
             if obs.layer != layer {
                 continue;
             }
-            if !obs.box_ground.contains_point(bbox_at) {
+            if !obs.box_screen.contains_point(bbox_at) {
                 continue;
             }
-            if !obs.contains_point(polygon_at) {
+            if !obs.contains_point_screen(polygon_at) {
                 continue;
             }
             return Some(oi as u16);

@@ -1178,11 +1178,10 @@ impl EngineInner {
     /// that contains the given map-space point.
     ///
     /// Iterates the sector's projection-area obstacle list and returns
-    /// the obstacle whose ground polygon contains `point`.  When
+    /// the obstacle whose screen-space plane contains `point`.  When
     /// multiple candidates match, picks the one with the greatest
-    /// top-plane height at that point ("highest obstacle"
-    /// disambiguation).  Returns `None` if no obstacle covers the
-    /// point.
+    /// top-plane height ("highest obstacle" disambiguation).  Returns
+    /// `None` if no obstacle covers the point.
     ///
     /// The per-sector projection-area index isn't populated in the
     /// Rust port yet, so we fall back to scanning every sight obstacle
@@ -1196,33 +1195,7 @@ impl EngineInner {
         sector_number: u16,
         point: Point2D,
     ) -> Option<u16> {
-        use crate::geo2d::polygon_contains_point;
-        let mut best: Option<(u16, f32)> = None;
-        let obstacles = self.sight_obstacles(assets);
-        for (idx, obs) in obstacles.iter_indexed() {
-            if !obstacles.is_active(idx as usize) {
-                continue;
-            }
-            if obs.sector != sector_number || obs.layer != layer {
-                continue;
-            }
-            if !obs.box_ground.contains_point(point) {
-                continue;
-            }
-            if !polygon_contains_point(&obs.polygon, point) {
-                continue;
-            }
-            // Disambiguate overlapping projection areas by top-plane
-            // height at this point ("highest obstacle" pick).
-            let height = obs.compute_top_z(point.x, point.y);
-            let idx = idx as u16;
-            match best {
-                None => best = Some((idx, height)),
-                Some((_, best_h)) if height > best_h => best = Some((idx, height)),
-                _ => {}
-            }
-        }
-        best.map(|(idx, _)| idx)
+        self.get_projection_area_index(assets, sector_number, layer, point)
     }
 
     /// Apply a projection-area obstacle + its footstep material to an

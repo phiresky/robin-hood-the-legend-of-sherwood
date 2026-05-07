@@ -1799,6 +1799,11 @@ pub struct InputState {
     /// cursor / render hooks don't re-scan `game_host.patches` each
     /// frame.
     pub selected_patch_idx: Option<u32>,
+    /// Index into `GameHost::doors` for a door whose click polygon is
+    /// under the mouse. Some building doors are wider than their grid
+    /// door sector, so hover/click handling must not depend only on
+    /// `selected_sector_idx`.
+    pub hovered_door_idx: Option<u32>,
     /// True when the hovered sector is a motion-area / door / jump
     /// sector or a patch overlay sits over the mouse — i.e. a move
     /// command dispatched here would have somewhere to land. Updated

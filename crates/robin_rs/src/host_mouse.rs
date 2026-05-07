@@ -48,6 +48,21 @@ fn apply_trajectory_preview(host: &mut Host, preview: TrajectoryPreview) {
     }
 }
 
+fn door_click_polygon_at(engine: &Engine, mouse_map: Point2D) -> Option<u32> {
+    engine
+        .mission_script()
+        .and_then(|s| s.game_host())
+        .and_then(|h| {
+            h.doors
+                .iter()
+                .enumerate()
+                .find(|(_, door)| {
+                    door.is_door() && door.click_polygon_contains(mouse_map.x, mouse_map.y)
+                })
+                .map(|(idx, _)| idx as u32)
+        })
+}
+
 /// Dispatch the PC-popup information messages based on the hovered PC.
 ///
 /// Called from the NoAction branch of `update_mouse` each frame.  When
@@ -300,6 +315,13 @@ pub fn choose_mouse_pointer_for_no_action(
     // Look up sector under mouse.
     let mouse_sector_result = engine.fast_grid().get_sector_screen(mouse_map, pc_pos);
     let pc_sector_hit = engine.fast_grid().get_sector(pc_pos, pc_pos, pc_layer);
+
+    if let Some(door_idx) = host.input.hovered_door_idx {
+        host.input.increment_cursor_animation = false;
+        host.input.selected_layer = mouse_sector_result.layer;
+        host.valid_trajectory = false;
+        return engine.choose_door_cursor(Some(door_idx), None);
+    }
 
     // If the mouse is over a patch overlay sector, resolve the owning
     // patch and route to `choose_door_cursor`. The patch's first door
@@ -764,6 +786,7 @@ pub fn update_mouse(
     host.input.selected_sector_idx = final_sector_idx;
     host.input.selected_layer = final_layer;
     host.input.selected_patch_idx = selected_patch_idx;
+    host.input.hovered_door_idx = door_click_polygon_at(engine, mouse_map);
 
     // Refresh `Patch::display_doors` for the currently-selected
     // patch.  Routed through the command pipeline so rollback /
@@ -782,6 +805,7 @@ pub fn update_mouse(
     // set, or the selected sector is a motion-area / door / jump
     // sector.  Gate move-command dispatch on this.
     host.input.valid_position_for_move = host.input.selected_patch_idx.is_some()
+        || host.input.hovered_door_idx.is_some()
         || sector_hit.sector_idx.is_some_and(|idx| {
             engine
                 .fast_grid()
