@@ -6,6 +6,7 @@ const POLL_INTERVAL_MS = 500;
 type ReplayStatus = {
     readonly frame: number;
     readonly total: number;
+    readonly paused: boolean;
 };
 
 type StateReply = {
@@ -20,6 +21,10 @@ export function installTimeline(container: HTMLElement, rpc: RobinRpc): void {
     current.className = 'timeline-time';
     current.textContent = '00:00';
 
+    const playPause = document.createElement('button');
+    playPause.type = 'button';
+    playPause.textContent = 'Play';
+
     const scrub = document.createElement('input');
     scrub.type = 'range';
     scrub.min = '0';
@@ -32,7 +37,7 @@ export function installTimeline(container: HTMLElement, rpc: RobinRpc): void {
     total.className = 'timeline-time';
     total.textContent = '00:00';
 
-    container.append(current, scrub, total);
+    container.append(playPause, current, scrub, total);
 
     let scrubbing = false;
     scrub.addEventListener('pointerdown', () => { scrubbing = true; });
@@ -46,6 +51,15 @@ export function installTimeline(container: HTMLElement, rpc: RobinRpc): void {
         current.textContent = formatTime(frame);
         void rpc('go-to-frame', { frame }).catch((e: unknown) => {
             console.warn('timeline: go-to-frame failed:', e);
+        });
+    });
+
+    playPause.addEventListener('click', () => {
+        const paused = playPause.dataset.paused !== 'true';
+        playPause.dataset.paused = String(paused);
+        playPause.textContent = paused ? 'Play' : 'Pause';
+        void rpc('set-paused', { paused }).catch((e: unknown) => {
+            console.warn('timeline: set-paused failed:', e);
         });
     });
 
@@ -67,6 +81,8 @@ export function installTimeline(container: HTMLElement, rpc: RobinRpc): void {
                 container.style.display = 'flex';
                 scrub.max = String(Math.max(totalFrames, frame, 1));
                 total.textContent = formatTime(totalFrames);
+                playPause.dataset.paused = String(replay.paused);
+                playPause.textContent = replay.paused ? 'Play' : 'Pause';
                 if (!scrubbing) {
                     scrub.value = String(frame);
                     current.textContent = formatTime(frame);

@@ -6,12 +6,6 @@ declare global {
     // Optional test/dev override for loading binaries from a local checkout.
     // Keep this global so the deployed HTML can stay config-free.
     var ROBIN_WASM_BINARIES_BASE: string | undefined;
-    var rh_rpc_resolve: ((
-        id: number,
-        status: number,
-        contentType: string,
-        body: string | Uint8Array,
-    ) => void) | undefined;
     var robinRpc: ((method: string, params?: unknown) => Promise<unknown>) | undefined;
 }
 
@@ -30,7 +24,7 @@ type RobinWasmModule = {
     readonly default: (init?: { module_or_path?: string | URL | Request }) => Promise<unknown>;
     readonly wasm_boot: (datadir: Uint8Array) => void;
     readonly wasm_preload_asset?: (path: string, bytes: Uint8Array) => void;
-    readonly rh_rpc_enqueue?: (id: number, json: Uint8Array) => void;
+    readonly rh_rpc?: <T = unknown>(request: { method: string; params: unknown }) => Promise<T>;
 };
 
 type PreloadEntry = string | {
@@ -61,47 +55,9 @@ const replayTimeline = document.querySelector<HTMLDivElement>('#replay-timeline'
 
 const logOk = (t: string): void => appendLogLine(logEl, t);
 const logErr = (t: string): void => appendLogLine(logEl, t, 'err');
-const rpcPending = new Map<number, {
-    readonly resolve: (value: unknown) => void;
-    readonly reject: (reason?: unknown) => void;
-}>();
-let nextRpcId = 1;
 
 installConsoleMirror(logEl);
 installFullscreenButton(fullscreenButton);
-
-globalThis.rh_rpc_resolve = (
-    id: number,
-    status: number,
-    contentType: string,
-    body: string | Uint8Array,
-): void => {
-    const pending = rpcPending.get(id);
-    if (pending === undefined) {
-        logErr(`[rpc ${id}] reply for unknown request`);
-        return;
-    }
-    rpcPending.delete(id);
-    const value = parseRpcBody(contentType, body);
-    if (status >= 200 && status < 300) {
-        pending.resolve(value);
-    } else {
-        const msg = typeof value === 'object' && value !== null && 'error' in value
-            ? String((value as { error: unknown }).error)
-            : `RPC ${id} failed with status ${status}`;
-        pending.reject(new Error(msg));
-    }
-};
-
-function parseRpcBody(contentType: string, body: string | Uint8Array): unknown {
-    if (body instanceof Uint8Array) {
-        return body;
-    }
-    if (contentType.includes('json')) {
-        return JSON.parse(body);
-    }
-    return body;
-}
 
 function installConsoleMirror(target: HTMLElement): void {
     const pendingLines: Array<{ text: string; cls?: 'err' }> = [];
@@ -265,25 +221,12 @@ async function main(): Promise<void> {
 }
 
 function installRpcClient(wasm: RobinWasmModule): RobinRpc {
-    if (wasm.rh_rpc_enqueue === undefined) {
-        throw new Error('wasm module does not export rh_rpc_enqueue');
+    if (wasm.rh_rpc === undefined) {
+        throw new Error('wasm module does not export rh_rpc');
     }
-    const encoder = new TextEncoder();
+    const rhRpc = wasm.rh_rpc;
     const rpc: RobinRpc = <T = unknown>(method: string, params: unknown = null): Promise<T> => {
-        const id = nextRpcId++;
-        const payload = encoder.encode(JSON.stringify({ method, params }));
-        return new Promise((resolve, reject) => {
-            rpcPending.set(id, {
-                resolve: resolve as (value: unknown) => void,
-                reject,
-            });
-            try {
-                wasm.rh_rpc_enqueue?.(id, payload);
-            } catch (e) {
-                rpcPending.delete(id);
-                reject(e);
-            }
-        });
+        return rhRpc<T>({ method, params });
     };
     globalThis.robinRpc = rpc;
     return rpc;

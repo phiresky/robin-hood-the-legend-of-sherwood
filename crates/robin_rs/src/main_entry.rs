@@ -1496,6 +1496,10 @@ pub(crate) fn resolve_loading_pak(
     proto_level_filename: Option<&str>,
     ambience: Option<u32>,
 ) -> Option<String> {
+    fn data_asset_exists(path: &str) -> bool {
+        crate::sbfile::resolve_data_path(path).is_some() || robin_util::asset_fs::exists(path)
+    }
+
     if let Some(proto) = proto_level_filename {
         // Day=1, Fog=2, Night=4. Probe all three when the caller doesn't
         // have the exact ambience yet; only one mission-specific pak
@@ -1508,18 +1512,15 @@ pub(crate) fn resolve_loading_pak(
         };
         for &amb in candidates {
             let candidate = format!("Data/Levels/{:02}/{}.pak", amb, proto);
-            if let Some(resolved) = crate::sbfile::resolve_data_path(&candidate) {
-                tracing::info!(
-                    "Loading screen .pak: using mission-specific {}",
-                    resolved.display()
-                );
-                return Some(resolved.to_string_lossy().into_owned());
+            if data_asset_exists(&candidate) {
+                tracing::info!("Loading screen .pak: using mission-specific {candidate}");
+                return Some(candidate);
             }
         }
     }
     let default_path = "Data/Interface/Loading.pak";
-    if let Some(resolved) = crate::sbfile::resolve_data_path(default_path) {
-        Some(resolved.to_string_lossy().into_owned())
+    if data_asset_exists(default_path) {
+        Some(default_path.to_string())
     } else if robin_assets::shipping_datadir::global()
         .is_some_and(|dd| dd.pak_files.contains_key("interface/loading.pak"))
     {

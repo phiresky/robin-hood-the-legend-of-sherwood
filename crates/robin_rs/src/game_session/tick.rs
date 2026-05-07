@@ -146,6 +146,7 @@ pub(super) fn drain_steps(
     rewind_buffer: &mut crate::rewind::RewindBuffer,
     rollback_checker: &mut Option<crate::rollback_checker::RollbackChecker>,
     replay_player: &mut Option<crate::replay::ReplayPlayer>,
+    manual_pause: &mut bool,
 ) {
     let steps = crate::http_server::take_pending_steps();
     if steps.is_empty() {
@@ -255,6 +256,13 @@ pub(super) fn drain_steps(
                     })),
                     Err(e) => step.respond_err(e),
                 }
+            }
+            crate::http_server::StepKind::SetPaused { paused } => {
+                *manual_pause = paused;
+                step.respond_ok(serde_json::json!({
+                    "paused": paused,
+                    "frame": manager.sim_frame,
+                }));
             }
         }
     }

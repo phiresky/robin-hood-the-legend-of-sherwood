@@ -21,15 +21,12 @@
 //!   | POST   | `/command`          | externally-tagged `PlayerCommand` JSON       | `{ok: true}` or `{error}`                              |
 //!   | GET    | `/screenshot`       | `?w=&h=&hide_ui=&view_cones=&pc_sight=&…`    | `image/png` of the next rendered frame                 |
 //!
-//! - **Wasm:** no loopback socket inside the browser.  Instead, a small
-//!   JS bridge (`wasm_shims/rpc.js`) exposes `robin.call(method, params)`
-//!   which calls into the exported [`rh_rpc_enqueue`] entry point below.
-//!   The request lands on the same queue as the native transport and is
-//!   drained on the game tick; the reply is pushed back via
-//!   [`wasm_rpc::resolve`], which invokes the JS-side `rh_rpc_resolve`
-//!   callback (async-proxied from the pthread worker to the main
-//!   thread).  JSON replies arrive as parsed objects; PNG replies
-//!   arrive as `Uint8Array`.
+//! - **Wasm:** no loopback socket inside the browser.  Instead, the
+//!   exported `rh_rpc({ method, params })` async function returns a JS
+//!   Promise. The request lands on the same queue as the native
+//!   transport and is drained on the game tick; JSON replies arrive as
+//!   parsed JS values, and binary replies arrive as
+//!   `{ contentType, data: Uint8Array }`.
 //!
 //! ### Threading (native)
 //!
@@ -130,6 +127,9 @@ pub enum HttpPayload {
     /// Internally decomposes into a forward or backward step
     /// depending on the current frame.  Replay scrubbing uses this.
     GoToFrame { target: u32 },
+    /// `POST /set-paused` / `robin.call("set-paused", {paused})` —
+    /// toggle the mission loop's manual pause flag.
+    SetPaused { paused: bool },
     /// `GET /get-replay` — snapshot the current recorder's byte
     /// stream.  Served from an in-memory mirror populated by the
     /// recorder's tee-writer; no filesystem read required, so the
@@ -228,13 +228,13 @@ impl From<serde_json::Value> for ReplyBody {
 pub type Reply = Result<ReplyBody, String>;
 
 /// One-shot reply channel.  Native uses a `mpsc::sync_channel` so the
-/// listener thread can block on recv; wasm carries the JS-side request
-/// id and resolves the matching Promise via `rh_rpc_resolve`.
+/// listener thread can block on recv; wasm uses an async one-shot
+/// channel that resolves the Promise returned by `rh_rpc`.
 pub enum Responder {
     #[cfg(not(target_arch = "wasm32"))]
     Channel(SyncSender<Reply>),
     #[cfg(target_arch = "wasm32")]
-    Wasm(u32),
+    Wasm(async_channel::Sender<Reply>),
 }
 
 impl Responder {
@@ -247,7 +247,11 @@ impl Responder {
                 }
             }
             #[cfg(target_arch = "wasm32")]
-            Self::Wasm(id) => wasm_rpc::resolve(id, reply),
+            Self::Wasm(tx) => {
+                if let Err(e) = tx.try_send(reply) {
+                    tracing::debug!("script RPC: response dropped (wasm promise gone): {e}");
+                }
+            }
         }
     }
 }
@@ -267,8 +271,8 @@ static GLOBAL: OnceLock<HttpServer> = OnceLock::new();
 /// the queue through every signature.  Re-calls are silently ignored.
 ///
 /// Native: binds a loopback HTTP listener on `port` (0 disables).
-/// Wasm: ignores `port`; just installs the empty queue so the JS bridge
-/// (`rh_rpc_enqueue`) has somewhere to push.
+/// Wasm: ignores `port`; just installs the empty queue so `rh_rpc`
+/// has somewhere to push.
 pub fn start_global(port: u16) -> Result<(), String> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -279,7 +283,7 @@ pub fn start_global(port: u16) -> Result<(), String> {
         let _ = GLOBAL.set(HttpServer {
             queue: Arc::new(Mutex::new(VecDeque::new())),
         });
-        tracing::info!("script RPC: wasm bridge ready (robin.call())");
+        tracing::info!("script RPC: wasm bridge ready (rh_rpc)");
         Ok(())
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -397,6 +401,16 @@ fn run_listener(server: tiny_http::Server, queue: Queue) {
                 }
                 match read_json::<GoToBody>(&mut req) {
                     Ok(b) => relay(&queue, HttpPayload::GoToFrame { target: b.frame }),
+                    Err(e) => (400, serde_json::json!({"error": e}).into()),
+                }
+            }
+            (Method::Post, "/set-paused") => {
+                #[derive(serde::Deserialize)]
+                struct SetPausedBody {
+                    paused: bool,
+                }
+                match read_json::<SetPausedBody>(&mut req) {
+                    Ok(b) => relay(&queue, HttpPayload::SetPaused { paused: b.paused }),
                     Err(e) => (400, serde_json::json!({"error": e}).into()),
                 }
             }
@@ -725,6 +739,15 @@ pub fn drain_global(
                         kind: StepKind::GoToFrame { target },
                     });
             }
+            HttpPayload::SetPaused { paused } => {
+                pending_steps()
+                    .lock()
+                    .expect("step queue poisoned")
+                    .push(PendingStep {
+                        response_tx: req.response_tx,
+                        kind: StepKind::SetPaused { paused },
+                    });
+            }
             other => {
                 let reply = dispatch_in_engine(
                     other,
@@ -806,7 +829,8 @@ fn dispatch_in_engine(
         HttpPayload::Screenshot(_) => Err("screenshot must be routed via drain_global".into()),
         HttpPayload::StepForward { .. }
         | HttpPayload::StepBack { .. }
-        | HttpPayload::GoToFrame { .. } => Err("step must be routed via drain_global".into()),
+        | HttpPayload::GoToFrame { .. }
+        | HttpPayload::SetPaused { .. } => Err("step must be routed via drain_global".into()),
         HttpPayload::GetReplay => match get_current_replay() {
             Ok(content) => Ok(ReplyBody::Json(serde_json::json!({
                 "content": content,
@@ -822,6 +846,7 @@ fn snapshot_state(engine: &Engine) -> serde_json::Value {
         serde_json::json!({
             "frame": s.frame,
             "total": s.total,
+            "paused": s.paused,
         })
     });
     serde_json::json!({
@@ -982,6 +1007,7 @@ pub fn replay_buffer_snapshot() -> Vec<u8> {
 pub struct ReplayStatus {
     pub frame: u32,
     pub total: u32,
+    pub paused: bool,
 }
 
 fn replay_status_slot() -> &'static Mutex<Option<ReplayStatus>> {
@@ -1079,6 +1105,9 @@ pub enum StepKind {
     /// Absolute seek — no-op if `target == sim_frame`, decomposes into
     /// a forward or back step otherwise.  Replay scrubbing uses this.
     GoToFrame { target: u32 },
+    /// Toggle the mission loop's manual pause flag. Queued with
+    /// scrubbing so pause/play and seek requests apply in caller order.
+    SetPaused { paused: bool },
 }
 
 /// A step-forward / step-back request waiting for the main loop to
@@ -1304,10 +1333,10 @@ fn decompile_script(engine: &Engine, class: Option<&str>) -> serde_json::Value {
 // ──────────────────────────────────────────────────────────────────
 //
 // Browser has no loopback socket, so we expose the same request/reply
-// pipeline via a JS-callable entry point (`rh_rpc_enqueue`) and a
-// JS-side resolver (`rh_rpc_resolve`, shim in `wasm_shims/rpc.js`).
+// pipeline as a JS-callable `rh_rpc({ method, params }) -> Promise`.
 // Requests land on the same `GLOBAL.queue` as the native transport,
-// drain on the game tick, and reply through `Responder::Wasm(id)`.
+// drain on the game tick, and resolve the Promise through an internal
+// one-shot channel.
 
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_rpc {
@@ -1318,97 +1347,75 @@ pub mod wasm_rpc {
     use robin_engine::player_command::PlayerCommand;
     use wasm_bindgen::JsValue;
 
-    #[wasm_bindgen::prelude::wasm_bindgen]
-    extern "C" {
-        #[wasm_bindgen(js_namespace = globalThis, js_name = rh_rpc_resolve)]
-        fn js_resolve(id: u32, status: u16, content_type: &str, body: JsValue);
-    }
-
-    /// JS-side resolver imported through wasm-bindgen.  `wasm-www`
-    /// installs `globalThis.rh_rpc_resolve`; each response resolves
-    /// the Promise created for the matching request id.
-    pub fn resolve(id: u32, reply: Reply) {
+    fn reply_to_js(reply: Reply) -> Result<JsValue, JsValue> {
         match reply {
-            Ok(ReplyBody::Json(value)) => match serde_json::to_string(&value) {
-                Ok(body) => js_resolve(id, 200, "application/json", JsValue::from_str(&body)),
-                Err(e) => js_resolve(
-                    id,
-                    500,
-                    "application/json",
-                    JsValue::from_str(
-                        &serde_json::json!({ "error": format!("encode reply: {e}") }).to_string(),
-                    ),
-                ),
-            },
+            Ok(ReplyBody::Json(value)) => {
+                use serde::Serialize;
+
+                let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+                value
+                    .serialize(&serializer)
+                    .map_err(|e| JsValue::from_str(&format!("encode reply: {e}")))
+            }
             Ok(ReplyBody::Binary { content_type, data }) => {
                 let array = js_sys::Uint8Array::from(data.as_slice());
-                js_resolve(id, 200, content_type, array.into());
+                let out = js_sys::Object::new();
+                js_sys::Reflect::set(
+                    &out,
+                    &JsValue::from_str("contentType"),
+                    &JsValue::from_str(content_type),
+                )
+                .map_err(|e| JsValue::from_str(&format!("set contentType: {e:?}")))?;
+                js_sys::Reflect::set(&out, &JsValue::from_str("data"), &array)
+                    .map_err(|e| JsValue::from_str(&format!("set data: {e:?}")))?;
+                Ok(out.into())
             }
-            Err(message) => {
-                let body = serde_json::json!({ "error": message }).to_string();
-                js_resolve(id, 400, "application/json", JsValue::from_str(&body));
-            }
+            Err(message) => Err(JsValue::from_str(&message)),
         }
     }
 
-    /// JS → Rust entry point.  JS side passes a single UTF-8 JSON
-    /// message of the form `{"method": "...", "params": {...}}` with
-    /// the request id.  `wasm-bindgen` copies the `Uint8Array` into
-    /// wasm for the duration of this call; we don't hold on to it.
-    ///
-    /// The reply is delivered asynchronously (once the game loop
-    /// drains the queue) via [`rh_rpc_resolve`].  A decode-time error
-    /// resolves immediately with status 400.
-    ///
-    /// The reply id is opaque to Rust — JS is expected to use a fresh
-    /// id per outstanding request.
+    /// JS → Rust entry point.  Accepts `{ method, params }` and returns
+    /// a Promise resolved once the game loop drains the request on a
+    /// frame boundary.
     #[wasm_bindgen::prelude::wasm_bindgen]
-    pub fn rh_rpc_enqueue(id: u32, json: &[u8]) {
+    pub async fn rh_rpc(request: JsValue) -> Result<JsValue, JsValue> {
         #[derive(serde::Deserialize)]
         struct Req {
             method: String,
             #[serde(default)]
             params: serde_json::Value,
         }
-        let req: Req = match serde_json::from_slice(json) {
-            Ok(r) => r,
-            Err(e) => {
-                resolve(id, Err(format!("bad json: {e}")));
-                return;
-            }
-        };
+        let req: Req = serde_wasm_bindgen::from_value(request)
+            .map_err(|e| JsValue::from_str(&format!("bad request: {e}")))?;
         // Pure-introspection methods don't need a live engine — resolve
         // inline without touching the tick queue.
         match req.method.as_str() {
             "info" => {
-                resolve(id, Ok(ReplyBody::Json(super::info_json())));
-                return;
+                return reply_to_js(Ok(ReplyBody::Json(super::info_json())));
             }
             "natives" => {
-                resolve(id, Ok(ReplyBody::Json(super::list_natives_json())));
-                return;
+                return reply_to_js(Ok(ReplyBody::Json(super::list_natives_json())));
             }
             _ => {}
         }
-        let payload = match decode_request(&req.method, req.params) {
-            Ok(p) => p,
-            Err(e) => {
-                resolve(id, Err(e));
-                return;
-            }
-        };
-        let Some(server) = GLOBAL.get() else {
-            resolve(id, Err("RPC bridge not initialized".into()));
-            return;
-        };
+        let payload = decode_request(&req.method, req.params).map_err(|e| JsValue::from_str(&e))?;
+        let server = GLOBAL
+            .get()
+            .ok_or_else(|| JsValue::from_str("RPC bridge not initialized"))?;
+        let (tx, rx) = async_channel::bounded(1);
         server
             .queue
             .lock()
             .expect("queue mutex poisoned")
             .push_back(HttpRequest {
                 payload,
-                response_tx: Responder::Wasm(id),
+                response_tx: Responder::Wasm(tx),
             });
+        let reply = rx
+            .recv()
+            .await
+            .map_err(|e| JsValue::from_str(&format!("RPC response dropped: {e}")))?;
+        reply_to_js(reply)
     }
 
     fn decode_request(method: &str, params: serde_json::Value) -> Result<HttpPayload, String> {
@@ -1508,6 +1515,15 @@ pub mod wasm_rpc {
                 let g: G = serde_json::from_value(params)
                     .map_err(|e| format!("go-to-frame params: {e}"))?;
                 Ok(HttpPayload::GoToFrame { target: g.frame })
+            }
+            "set-paused" => {
+                #[derive(serde::Deserialize)]
+                struct P {
+                    paused: bool,
+                }
+                let p: P = serde_json::from_value(params)
+                    .map_err(|e| format!("set-paused params: {e}"))?;
+                Ok(HttpPayload::SetPaused { paused: p.paused })
             }
             "get-replay" => Ok(HttpPayload::GetReplay),
             "load-replay" => {

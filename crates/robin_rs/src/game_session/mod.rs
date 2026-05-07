@@ -248,7 +248,7 @@ pub(crate) async fn run_mission_headless(
         host.net.is_some(),
     );
     let mut manager = robin_engine::engine_manager::EngineManager::new(engine, host.local_seat);
-    let manual_pause = start_paused;
+    let mut manual_pause = start_paused;
 
     loop {
         let recorder_hash_this_frame = replay_recorder.as_ref().and_then(|r| {
@@ -340,6 +340,7 @@ pub(crate) async fn run_mission_headless(
             &mut rewind_buffer,
             &mut rollback_checker,
             &mut replay_player,
+            &mut manual_pause,
         );
         let dismissed = dismiss_pending_modals(&mut host);
         if dismissed > 0 {
@@ -1275,6 +1276,7 @@ pub(crate) async fn run_mission(
     let mut last_mp_state_hash_frame: Option<u32> = None;
     let mut manual_pause =
         start_paused || mp_waiting_for_initial_snapshot || mp_waiting_for_begin_sim;
+    let mut replay_finished_logged = false;
 
     // Track the ambience-derived shadow key so host-side sprite caches
     // (selection marks + titbits) can be rebound when
@@ -1467,7 +1469,8 @@ pub(crate) async fn run_mission(
             && !player.is_finished()
         {
             let frame_idx = player.current_frame();
-            if let Some(expected) = player.hash_for_frame(frame_idx) {
+            let is_terminal_frame = frame_idx + 1 >= player.total_frames();
+            if !is_terminal_frame && let Some(expected) = player.hash_for_frame(frame_idx) {
                 let actual = crate::replay::state_hash(&manager.engine);
                 if actual != expected {
                     tracing::error!(
@@ -2643,7 +2646,7 @@ pub(crate) async fn run_mission(
             peer_hashes.retain(|&f, _| f > manager.sim_frame);
         }
 
-        let paused = pause_menu.is_some() || manual_pause || mp_clock_pause || modal_pause;
+        let mut paused = pause_menu.is_some() || manual_pause || mp_clock_pause || modal_pause;
 
         let mut replay_modal_dismissals: std::collections::VecDeque<
             robin_engine::player_command::PlayerCommand,
@@ -2652,39 +2655,44 @@ pub(crate) async fn run_mission(
             && !paused
         {
             if player.is_finished() {
-                tracing::info!("Replay finished after {} frames", player.current_frame());
-                *campaign_ref = manager.engine.take_campaign().unwrap_or_default();
-                return Ok(GameCode::LevelInterrupted);
-            }
-            // Hash check for this frame was already done at the top of
-            // the loop (see the record/check block after begin_frame),
-            // so the check and the recorder write share the same
-            // engine-state sampling point and can't drift.
-            let replay_cmds = player.next_frame();
-            let mut sim_cmds: Vec<PlayerInput> = Vec::with_capacity(replay_cmds.len());
-            for cmd in replay_cmds {
-                match cmd.command {
-                    robin_engine::player_command::PlayerCommand::ModalDismiss { .. } => {
-                        replay_modal_dismissals.push_back(cmd.command.clone());
-                    }
-                    _ => sim_cmds.push(cmd.clone()),
+                if !replay_finished_logged {
+                    tracing::info!("Replay finished after {} frames", player.current_frame());
+                    replay_finished_logged = true;
                 }
+                manual_pause = true;
+                paused = true;
+            } else {
+                replay_finished_logged = false;
+                // Hash check for this frame was already done at the top of
+                // the loop (see the record/check block after begin_frame),
+                // so the check and the recorder write share the same
+                // engine-state sampling point and can't drift.
+                let replay_cmds = player.next_frame();
+                let mut sim_cmds: Vec<PlayerInput> = Vec::with_capacity(replay_cmds.len());
+                for cmd in replay_cmds {
+                    match cmd.command {
+                        robin_engine::player_command::PlayerCommand::ModalDismiss { .. } => {
+                            replay_modal_dismissals.push_back(cmd.command.clone());
+                        }
+                        _ => sim_cmds.push(cmd.clone()),
+                    }
+                }
+                manager.engine.apply_commands(
+                    &mut host.engine_display,
+                    &mut host.input,
+                    &assets,
+                    &sim_cmds,
+                );
+                // Discard any live input commands during replay, then stash
+                // the commands we actually applied so the rewind buffer's
+                // per-frame command log captures them — otherwise a later
+                // step-back during replay has nothing to walk forward from
+                // its snapshots.  Recording is still a no-op (the recorder
+                // gate below short-circuits when `replay_recorder` is None,
+                // which it always is in replay mode).
+                frame_cmds = FrameCommands::new();
+                frame_cmds.commands = sim_cmds;
             }
-            manager.engine.apply_commands(
-                &mut host.engine_display,
-                &mut host.input,
-                &assets,
-                &sim_cmds,
-            );
-            // Discard any live input commands during replay, then stash
-            // the commands we actually applied so the rewind buffer's
-            // per-frame command log captures them — otherwise a later
-            // step-back during replay has nothing to walk forward from
-            // its snapshots.  Recording is still a no-op (the recorder
-            // gate below short-circuits when `replay_recorder` is None,
-            // which it always is in replay mode).
-            frame_cmds = FrameCommands::new();
-            frame_cmds.commands = sim_cmds;
         }
 
         // ── Post-rewind auto-replay ──
@@ -2826,6 +2834,7 @@ pub(crate) async fn run_mission(
             &mut rewind_buffer,
             &mut rollback_checker,
             &mut replay_player,
+            &mut manual_pause,
         );
 
         // Publish replay-playback status for the script-RPC `state`
@@ -2836,6 +2845,7 @@ pub(crate) async fn run_mission(
             crate::http_server::ReplayStatus {
                 frame: p.current_frame(),
                 total: p.total_frames(),
+                paused: manual_pause,
             }
         }));
 
