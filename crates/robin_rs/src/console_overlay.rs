@@ -37,6 +37,10 @@ const MAX_INPUT_LEN: usize = 128;
 const MAX_OUTPUT_LINES: usize = 256;
 /// Number of in-game frames the caret stays visible / hidden.
 const CARET_HALF_PERIOD: u32 = 12;
+/// Lines moved by Page Up / Page Down.
+const PAGE_SCROLL_LINES: usize = 8;
+/// Lines moved per mouse-wheel notch.
+const WHEEL_SCROLL_LINES: usize = 3;
 
 /// Dev-mode console keyword table for tab completion.
 ///
@@ -342,9 +346,13 @@ impl ConsoleOverlay {
                     // symmetry so KeyDown/KeyUp pair atomically.
                     consumed_any = true;
                 }
+                GameEvent::MouseWheel(delta) => {
+                    consumed_any = true;
+                    self.scroll_wheel(*delta);
+                }
                 _ => {
-                    // Mouse / resize / quit pass through unconsumed —
-                    // the game still wants to react to those.
+                    // Mouse move/buttons, resize, and quit pass through
+                    // unconsumed — the game still wants to react to those.
                 }
             }
         }
@@ -523,6 +531,10 @@ impl ConsoleOverlay {
             self.output.pop_front();
         }
         self.output.push_back(line);
+        if self.scroll_from_bottom > 0 {
+            self.scroll_from_bottom =
+                (self.scroll_from_bottom + 1).min(self.max_scroll_from_bottom());
+        }
     }
 
     fn history_prev(&mut self) {
@@ -643,12 +655,33 @@ impl ConsoleOverlay {
     }
 
     fn scroll_up(&mut self) {
-        let max = self.output.len().saturating_sub(1);
-        self.scroll_from_bottom = (self.scroll_from_bottom + 4).min(max);
+        self.scroll_up_lines(PAGE_SCROLL_LINES);
     }
 
     fn scroll_down(&mut self) {
-        self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(4);
+        self.scroll_down_lines(PAGE_SCROLL_LINES);
+    }
+
+    fn scroll_wheel(&mut self, delta: i32) {
+        let lines = WHEEL_SCROLL_LINES.saturating_mul(delta.unsigned_abs() as usize);
+        if delta > 0 {
+            self.scroll_up_lines(lines);
+        } else if delta < 0 {
+            self.scroll_down_lines(lines);
+        }
+    }
+
+    fn scroll_up_lines(&mut self, lines: usize) {
+        let max = self.max_scroll_from_bottom();
+        self.scroll_from_bottom = (self.scroll_from_bottom + lines).min(max);
+    }
+
+    fn scroll_down_lines(&mut self, lines: usize) {
+        self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(lines);
+    }
+
+    fn max_scroll_from_bottom(&self) -> usize {
+        self.output.len().saturating_sub(1)
     }
 
     /// Drain any pending `CAMPAIGN <path>` request; the caller (host
@@ -887,6 +920,33 @@ mod tests {
         c.delete_at_cursor();
         assert_eq!(c.input, "ABDE");
         assert_eq!(c.cursor, 2);
+    }
+
+    #[test]
+    fn scroll_clamps_to_history_bounds() {
+        let mut c = ConsoleOverlay::new();
+        for i in 0..3 {
+            c.push_output(OutputLine::Response(format!("line {i}")));
+        }
+
+        c.scroll_up_lines(100);
+        assert_eq!(c.scroll_from_bottom, 2);
+
+        c.scroll_down_lines(100);
+        assert_eq!(c.scroll_from_bottom, 0);
+    }
+
+    #[test]
+    fn push_output_keeps_scrolled_view_anchored() {
+        let mut c = ConsoleOverlay::new();
+        for i in 0..8 {
+            c.push_output(OutputLine::Response(format!("line {i}")));
+        }
+
+        c.scroll_up_lines(3);
+        c.push_output(OutputLine::Response("new line".to_string()));
+
+        assert_eq!(c.scroll_from_bottom, 4);
     }
 
     #[test]
