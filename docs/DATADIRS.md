@@ -332,6 +332,22 @@ German, and Spanish interface languages.
 
     source:   https://store.steampowered.com/app/46560/Robin_Hood_The_Legend_of_Sherwood/
 
+## Mac OS X — Macintosh Garden DMG
+
+HFS+ disk image containing `Install Robin Hood.pkg` and English manuals.
+
+    filename: Robin_Hood_CD_0.dmg
+    local:    datadirs/installers/Robin_Hood_CD_0.dmg
+    format:   Apple DMG / HFS+ disk image (532 MB compressed, 648 MB unpacked)
+    source:   https://macintoshgarden.org/games/robin-hood-the-legend-of-sherwood
+    MD5:      82824a1621831fee3c0f00d7dac0eb3b
+    SHA256:   0f538c7e581f4ff6d02914848450f085bce1b553307728055cab51d7d69b3733
+
+- Volume root: `Robin Hood CD`
+- Installer package: `Install Robin Hood.pkg`
+- Package payload: `Install Robin Hood.pkg/Contents/Archive.pax.gz` (524 MB)
+- Manuals: `Manual/Robin Hood Manual.pdf`, `Manual/Robin Hood Manual for Print.pdf`
+
 ## ZETA OS — BeOS/ZETA port
 
 Port for ZETA OS (a BeOS derivative). BFS filesystem disc image containing `RobinHood.zpkg`,
