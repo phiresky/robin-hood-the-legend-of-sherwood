@@ -519,8 +519,6 @@ pub struct Order {
     pub target_y: f32,
     /// The actor this order targets, if any (entity ID).
     pub target_actor: Option<u32>,
-    /// Higher priority orders are executed first.
-    pub priority: i32,
     /// Whether to compute facing direction from movement.
     pub compute_direction: bool,
     /// Tolerance for reaching the destination.
@@ -535,11 +533,6 @@ pub struct Order {
     /// Carries `MoveFlags` bits (e.g. `RIDER_CHARGE`) through from the AI
     /// decision to the engine's pathfinding / movement dispatch.
     pub move_flags: u16,
-
-    /// If set, the engine must not call `halt()` on the owner before
-    /// dispatching this order.  Used by follow-up / continuous patrol
-    /// moves that want to preserve the outgoing sequence.
-    pub no_halt: bool,
 
     /// Per-order tag used by the sprite pipeline so animation bookings
     /// don't silently restart mid-play.
@@ -572,14 +565,12 @@ impl Order {
             target_x: x,
             target_y: y,
             target_actor: None,
-            priority: 0,
             compute_direction: true,
             tolerance: 0.0,
             lock_ai: false,
             reverse: false,
             done: false,
             move_flags: 0,
-            no_halt: false,
             order_id,
             antagonist: None,
             completion: OrderCompletion::AdvanceElement,
@@ -588,11 +579,6 @@ impl Order {
 
     pub fn with_target_actor(mut self, actor_id: u32) -> Self {
         self.target_actor = Some(actor_id);
-        self
-    }
-
-    pub fn with_priority(mut self, priority: i32) -> Self {
-        self.priority = priority;
         self
     }
 
@@ -678,7 +664,6 @@ pub struct AiOrderIntent {
     pub target_x: f32,
     pub target_y: f32,
     pub target_actor: Option<u32>,
-    pub priority: i32,
     pub compute_direction: bool,
     pub tolerance: f32,
     pub lock_ai: bool,
@@ -710,7 +695,6 @@ impl AiOrderIntent {
             target_x: x,
             target_y: y,
             target_actor: None,
-            priority: 0,
             compute_direction: true,
             tolerance: 0.0,
             lock_ai: false,
@@ -746,14 +730,12 @@ impl AiOrderIntent {
             target_x: self.target_x,
             target_y: self.target_y,
             target_actor: self.target_actor,
-            priority: self.priority,
             compute_direction: self.compute_direction,
             tolerance: self.tolerance,
             lock_ai: self.lock_ai,
             reverse: self.reverse,
             done: self.done,
             move_flags: self.move_flags,
-            no_halt: self.no_halt,
             order_id,
             antagonist: self.antagonist,
             completion: OrderCompletion::AdvanceElement,
@@ -849,29 +831,23 @@ mod tests {
 
     #[test]
     fn order_builder() {
-        let order = Order::test_new(OrderType::WalkingUpright, 10.0, 20.0)
-            .with_target_actor(42)
-            .with_priority(5);
+        let order = Order::test_new(OrderType::WalkingUpright, 10.0, 20.0).with_target_actor(42);
 
         assert_eq!(order.order_type, OrderType::WalkingUpright);
         assert_eq!(order.target_x, 10.0);
         assert_eq!(order.target_y, 20.0);
         assert_eq!(order.target_actor, Some(42));
-        assert_eq!(order.priority, 5);
     }
 
     #[test]
     fn order_defaults() {
         let order = Order::test_new(OrderType::Invalid, 0.0, 0.0);
         assert_eq!(order.target_actor, None);
-        assert_eq!(order.priority, 0);
     }
 
     #[test]
     fn serde_roundtrip_order() {
-        let order = Order::test_new(OrderType::ShootingWithBow, 100.0, 200.0)
-            .with_target_actor(7)
-            .with_priority(-1);
+        let order = Order::test_new(OrderType::ShootingWithBow, 100.0, 200.0).with_target_actor(7);
 
         let json = serde_json::to_string(&order).unwrap();
         let back: Order = serde_json::from_str(&json).unwrap();
@@ -880,6 +856,5 @@ mod tests {
         assert_eq!(back.target_x, 100.0);
         assert_eq!(back.target_y, 200.0);
         assert_eq!(back.target_actor, Some(7));
-        assert_eq!(back.priority, -1);
     }
 }

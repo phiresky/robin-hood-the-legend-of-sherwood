@@ -3601,7 +3601,6 @@ impl HostFunctions for GameHost {
                     let level = self.recording_level();
                     let mut elem = SequenceElement::new_generic(level, Command::PlayDialog, None);
                     elem.set_property(Field::DialogId, FieldValue::Integer(dialog_id as u32));
-                    elem.set_property(Field::DialogSource, FieldValue::Integer(0));
                     self.record_element(elem)
                 }
                 RecordDisplayPopupText => {
@@ -4641,13 +4640,12 @@ impl HostFunctions for GameHost {
                                 );
                                 return 0;
                             };
-                            let mut e = SequenceElement::new_interaction(
+                            let e = SequenceElement::new_interaction(
                                 level,
                                 Command::ShootBowOnce,
                                 owner,
                                 antagonist,
                             );
-                            e.script_driven = true;
                             e
                         }
                         ENTER_SF => {
@@ -4670,15 +4668,9 @@ impl HostFunctions for GameHost {
                                 e.set_property(Field::Opponent, FieldValue::Element(ant));
                             }
                             e.set_property(Field::JumplineDestination, FieldValue::Integer(0));
-                            e.set_property(Field::SwordfightPrepared, FieldValue::Bool(false));
-                            e.script_driven = true;
                             e
                         }
-                        LEAVE_SF => {
-                            let mut e = SequenceElement::new(level, Command::QuitSwordfight, owner);
-                            e.script_driven = true;
-                            e
-                        }
+                        LEAVE_SF => SequenceElement::new(level, Command::QuitSwordfight, owner),
                         PARRY => SequenceElement::new(level, Command::ParrySword, owner),
                         THRUST_A | THRUST_B | THRUST_C | THRUST_D | THRUST_E | THRUST_F
                         | THRUST_G | THRUST_H | THRUST_I => {
@@ -4700,10 +4692,7 @@ impl HostFunctions for GameHost {
                                 );
                                 return 0;
                             };
-                            let mut e =
-                                SequenceElement::new_interaction(level, cmd, owner, antagonist);
-                            e.script_driven = true;
-                            e
+                            SequenceElement::new_interaction(level, cmd, owner, antagonist)
                         }
                         LOOK_LEFT => {
                             // Rejects non-soldiers.
@@ -4724,11 +4713,7 @@ impl HostFunctions for GameHost {
                             }
                             SequenceElement::new(level, Command::LookRight, owner)
                         }
-                        UNEQUIP_BOW => {
-                            let mut e = SequenceElement::new(level, Command::UnequipBow, owner);
-                            e.script_driven = true;
-                            e
-                        }
+                        UNEQUIP_BOW => SequenceElement::new(level, Command::UnequipBow, owner),
                         CROUCH_DOWN => SequenceElement::new(level, Command::CrouchDown, owner),
                         _ => {
                             tracing::warn!("RecordAction: unknown script command ID {action_id}");

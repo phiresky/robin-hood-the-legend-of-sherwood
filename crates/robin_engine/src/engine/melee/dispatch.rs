@@ -532,7 +532,7 @@ impl EngineInner {
         // The read happens BEFORE the action-state branch, so an
         // "already holding shield" actor still gets its danger point
         // and protection link refreshed by the new command.
-        let (danger_pt, danger_pt3d, new_protected) = self
+        let (danger_pt, danger_pt3d, danger_layer, new_protected) = self
             .sequence_manager
             .get_element(seq_id, elem_idx)
             .map(|e| match &e.data {
@@ -543,7 +543,7 @@ impl EngineInner {
                             .and_then(|s| s.as_ref())
                             .map(|e| e.element_data().position_map())
                     });
-                    (pt, None, None)
+                    (pt, None, None, None)
                 }
                 crate::sequence::SequenceElementData::Generic { properties } => {
                     use crate::sequence::{Field, FieldValue};
@@ -566,27 +566,42 @@ impl EngineInner {
                         ),
                         _ => (None, None),
                     };
+                    // Picked layer travels with the danger point.  The
+                    // C++ original (RHelementactorpc.cpp:3022) reads
+                    // RHFIELD_SHIELD_DANGER_POINT_LAYER and feeds it to
+                    // the danger-point titbit so the indicator renders
+                    // on the chosen map layer rather than the PC's own.
+                    let layer = match properties.get(&Field::ShieldDangerPointLayer) {
+                        Some(FieldValue::Integer(v)) => Some(*v as u16),
+                        _ => None,
+                    };
                     let prot = match properties.get(&Field::ShieldProtected) {
                         Some(FieldValue::Element(id)) => Some(*id),
                         _ => None,
                     };
-                    (pt2d, pt3d, prot)
+                    (pt2d, pt3d, layer, prot)
                 }
-                _ => (None, None, None),
+                _ => (None, None, None, None),
             })
-            .unwrap_or((None, None, None));
+            .unwrap_or((None, None, None, None));
 
         // Stamp the per-PC shield danger point when the Generic
         // property carries a non-zero point. Leave it zero-initialised
-        // otherwise; the zero-point case sets the layer to `-1` for
-        // titbit bookkeeping, which the titbit sync already handles by
-        // skipping zero danger points.
+        // otherwise; `sync_danger_point_titbits` skips zero danger
+        // points so no titbit is created in that case.
+        //
+        // The layer is always overwritten so a stale player-picked
+        // layer from a previous raise can't leak into a follow-up
+        // AI-issued raise (which omits the layer property and thus
+        // gets `None` here, falling back to the PC's own layer in
+        // `sync_danger_point_titbits`).
         if let Some(pt3d) = danger_pt3d
             && (pt3d.x != 0.0 || pt3d.y != 0.0 || pt3d.z != 0.0)
             && let Some(Some(entity)) = self.entities.get_mut(owner.0 as usize)
             && let Some(pc) = entity.pc_data_mut()
         {
             pc.shield_danger_point = pt3d;
+            pc.shield_danger_point_layer = danger_layer.unwrap_or(0);
         }
         // Only call `SetShieldProtected` when the Generic property is
         // non-null.

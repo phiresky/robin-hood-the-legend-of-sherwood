@@ -183,6 +183,12 @@ pub enum PlayerCommand {
         protected_pc: EntityId,
         /// The danger point toward which the shield is oriented.
         danger_point: geo2d::Point2D,
+        /// Map layer the player was looking at when picking the danger
+        /// point.  Differs from the carrier's own layer when the danger
+        /// is across a chasm or off a balcony.  Stamped onto
+        /// `Field::ShieldDangerPointLayer` so the danger-point titbit
+        /// renders on the picked layer.
+        danger_point_layer: u16,
     },
 
     // ── Posture ──────────────────────────────────────────────────

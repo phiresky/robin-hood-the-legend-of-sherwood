@@ -522,6 +522,7 @@ impl EngineInner {
                 actor,
                 protected_pc,
                 danger_point,
+                danger_point_layer,
             } => {
                 self.apply_raise_shield_with_danger(
                     *actor,
@@ -530,6 +531,7 @@ impl EngineInner {
                         x: danger_point.x,
                         y: danger_point.y,
                     },
+                    *danger_point_layer,
                 );
             }
 
@@ -2598,7 +2600,6 @@ impl EngineInner {
                         None => FieldValue::Integer(0),
                     },
                 );
-                enter_elem.set_property(Field::SwordfightPrepared, FieldValue::Bool(false));
                 self.launch_element(enter_elem);
                 return;
             }
@@ -2643,7 +2644,6 @@ impl EngineInner {
                     SequenceElement::new_generic(2, Command::EnterSwordfight, Some(pc_id));
                 enter_elem.set_property(Field::Opponent, FieldValue::Element(target_id));
                 enter_elem.set_property(Field::JumplineDestination, FieldValue::LineId(aggr_idx));
-                enter_elem.set_property(Field::SwordfightPrepared, FieldValue::Bool(false));
 
                 let mut sequence = Sequence::new();
                 sequence.append_element(move_elem);
@@ -2659,7 +2659,6 @@ impl EngineInner {
         let mut enter_elem = SequenceElement::new_generic(2, Command::EnterSwordfight, Some(pc_id));
         enter_elem.set_property(Field::Opponent, FieldValue::Element(target_id));
         enter_elem.set_property(Field::JumplineDestination, FieldValue::Integer(0));
-        enter_elem.set_property(Field::SwordfightPrepared, FieldValue::Bool(false));
         enter_elem.command_level = 1;
 
         let mut post_seek = Sequence::new();
@@ -2753,7 +2752,6 @@ impl EngineInner {
                 None => FieldValue::Integer(0),
             },
         );
-        enter_elem.set_property(Field::SwordfightPrepared, FieldValue::Bool(false));
 
         let mut sequence = Sequence::new();
         sequence.append_element(move_elem);
@@ -2961,18 +2959,12 @@ impl EngineInner {
         actor: EntityId,
         protected_pc: EntityId,
         danger_point: crate::element::Point2D,
+        danger_point_layer: u16,
     ) {
         use crate::order::OrderType;
 
         self.shield.is_protected = true;
         self.shield.protected_pc = Some(protected_pc);
-
-        // Layer of the acting PC — defaults to the carrier's layer
-        // in a single-PC click.
-        let actor_layer = self
-            .get_entity(actor)
-            .map(|e| e.element_data().layer())
-            .unwrap_or(0);
 
         // Stamp the new danger point on the acting PC so
         // `sync_danger_point_titbits` refreshes the `DangerPoint`
@@ -3009,7 +3001,7 @@ impl EngineInner {
         );
         raise_elem.set_property(
             Field::ShieldDangerPointLayer,
-            FieldValue::Integer(u32::from(actor_layer)),
+            FieldValue::Integer(u32::from(danger_point_layer)),
         );
         raise_elem.set_property(Field::ShieldProtected, FieldValue::Element(protected_pc));
 

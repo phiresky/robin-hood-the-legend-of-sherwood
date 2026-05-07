@@ -429,10 +429,6 @@ impl EngineInner {
                     crate::sequence::Field::JumplineDestination,
                     crate::sequence::FieldValue::Integer(0),
                 );
-                elem.set_property(
-                    crate::sequence::Field::SwordfightPrepared,
-                    crate::sequence::FieldValue::Bool(false),
-                );
                 self.launch_element(elem);
             }
         }
@@ -768,10 +764,6 @@ impl EngineInner {
             elem.set_property(
                 crate::sequence::Field::JumplineDestination,
                 crate::sequence::FieldValue::Integer(0),
-            );
-            elem.set_property(
-                crate::sequence::Field::SwordfightPrepared,
-                crate::sequence::FieldValue::Bool(false),
             );
             seq.append_element(elem);
             self.launch_sequence(seq);
