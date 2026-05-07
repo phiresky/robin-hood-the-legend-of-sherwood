@@ -2446,6 +2446,59 @@ pub(crate) fn render_debug_surfaces_outline(
             }
         }
     }
+
+    // Pass 4: 3D-position anchor for the selected character.
+    // Vertical drop from where the sprite renders (iso-projected
+    // (x, y - z)) down to the z = 0 ground projection (x, y), plus a
+    // small flat ellipse "shadow footprint" at the bottom.  Makes the
+    // entity's height immediately visible — useful when debugging
+    // movement on rooftops, ladders, or during jumps/falls.
+    if let Some(pc_id) = selected_id {
+        if let Some(entity) = engine.get_entity(pc_id) {
+            let pos = entity.element_data().position();
+            // Top: where the sprite is drawn.  Bottom: same map (x, y)
+            // but at z = 0.
+            let top_x_w = pos.x;
+            let top_y_w = pos.y - pos.z;
+            let bot_x_w = pos.x;
+            let bot_y_w = pos.y;
+            let top = (
+                ((top_x_w - view.x) * zoom).round() as i32,
+                ((top_y_w - view.y) * zoom).round() as i32,
+            );
+            let bot = (
+                ((bot_x_w - view.x) * zoom).round() as i32,
+                ((bot_y_w - view.y) * zoom).round() as i32,
+            );
+            // Vertical drop line.
+            renderer.render_gpu_line(top.0, top.1, bot.0, bot.1, 255, 255, 255);
+            // Footprint ellipse: 16 segments around an ellipse with
+            // world-unit radii (rx, ry) — flattened to suggest the
+            // ground plane.  Drawn in screen space directly.
+            const RX_W: f32 = 8.0;
+            const RY_W: f32 = 3.0;
+            const SEGMENTS: u32 = 16;
+            let cx = bot.0 as f32;
+            let cy = bot.1 as f32;
+            let rx_s = RX_W * zoom;
+            let ry_s = RY_W * zoom;
+            let mut prev_pt = (cx + rx_s, cy);
+            for i in 1..=SEGMENTS {
+                let t = (i as f32) * std::f32::consts::TAU / (SEGMENTS as f32);
+                let p = (cx + rx_s * t.cos(), cy + ry_s * t.sin());
+                renderer.render_gpu_line(
+                    prev_pt.0.round() as i32,
+                    prev_pt.1.round() as i32,
+                    p.0.round() as i32,
+                    p.1.round() as i32,
+                    255,
+                    255,
+                    255,
+                );
+                prev_pt = p;
+            }
+        }
+    }
 }
 
 /// Render debug animation lines: polylines for all FX entities.
