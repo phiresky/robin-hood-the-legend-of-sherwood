@@ -468,6 +468,7 @@ mod tests {
                 destination: geo2d::pt(100.0, 200.0),
                 running: false,
                 show_marker: true,
+                goal_override: None,
             });
             rec.push(PlayerCommand::CrouchDown);
             rec.end_frame();
@@ -597,6 +598,29 @@ mod tests {
         assert_eq!(data.commands_for_frame(0).len(), 1);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn group_move_goal_override_serde_roundtrip() {
+        let with_override = PlayerCommand::GroupMove {
+            actors: vec![crate::element::EntityId(1)],
+            destination: geo2d::pt(50.0, 75.0),
+            running: true,
+            show_marker: false,
+            goal_override: Some((crate::sector::SectorNumber::new(42), 3)),
+        };
+        let json = serde_json::to_string(&with_override).unwrap();
+        let round: PlayerCommand = serde_json::from_str(&json).unwrap();
+        match round {
+            PlayerCommand::GroupMove {
+                goal_override: Some((sector, layer)),
+                ..
+            } => {
+                assert_eq!(sector, crate::sector::SectorNumber::new(42));
+                assert_eq!(layer, 3);
+            }
+            _ => panic!("round-tripped GroupMove lost its goal_override"),
+        }
     }
 
     #[test]

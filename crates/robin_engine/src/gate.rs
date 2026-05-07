@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::element::ElementKind;
 use crate::order::OrderType;
-use crate::sector::{LiftData, LiftType, SectorNumber};
+use crate::sector::{LiftType, SectorNumber};
 
 // ---------------------------------------------------------------------------
 // DoorIndex — nominal newtype
@@ -260,10 +260,6 @@ pub struct Door {
     pub locked_npc_civilian_after_patch: bool,
     pub unlockable_after_patch: bool,
 
-    // -- Mouse sector (clickable area) for door interaction --
-    /// Whether the mouse-click sector for this door is active.
-    pub mouse_sector_active: bool,
-
     // -- Special PC authorisation (serialized) --
     pub special_authorisation_pc: bool,
     /// Bitmask of PC characters authorised in the direct (outside→inside) direction.
@@ -309,8 +305,12 @@ pub struct Door {
     /// Pathfinding penalty for crossing this door.
     pub penalty: f32,
 
-    /// Index into the GameHost patches array.
-    /// Set during level loading when a patch references this door.
+    /// Index into the GameHost patches array.  Mirrors the C++
+    /// `pDoor->mpPatch` link: populated only for `door_triggered`
+    /// patches, where opening/passing this door fires the patch
+    /// (consumed by `apply_door_patch` and `gate_state.finish_transition`).
+    /// `triggers_door`-style links are stored on the *patch* side as
+    /// `Patch::door_indices` instead.
     pub patch_index: Option<crate::patch::PatchIndex>,
 
     /// Physical open/close state for gate-type doors (drawbridge, portcullis).
@@ -370,7 +370,6 @@ impl Default for Door {
             locked_npc_villain_after_patch: false,
             locked_npc_civilian_after_patch: false,
             unlockable_after_patch: false,
-            mouse_sector_active: true,
             special_authorisation_pc: false,
             authorised_pc_direct: 0,
             authorised_pc_indirect: 0,
@@ -770,7 +769,7 @@ impl Door {
     /// For `LiftHigh` / `LiftLow` / `LiftHighCrenel` doors, this method checks
     /// rider restrictions but does NOT check lift-type restrictions (wall / ladder
     /// / stairs). The caller must additionally check
-    /// `LiftData::is_actor_authorized()`.
+    /// `LiftType::is_actor_authorized()`.
     pub fn is_actor_authorized(
         &self,
         direct: bool,
@@ -832,7 +831,7 @@ impl Door {
                     return false;
                 }
                 // Actual lift-type check (wall/ladder/stairs) must be done by
-                // the caller via LiftData::is_actor_authorized().
+                // the caller via LiftType::is_actor_authorized().
                 true
             }
         }
@@ -1003,11 +1002,7 @@ where
             door.door_type, door.sector_in
         )
     });
-    LiftData {
-        lift_type,
-        ..LiftData::default()
-    }
-    .is_actor_authorized(actor)
+    lift_type.is_actor_authorized(actor)
 }
 
 /// Rebuild the `gate_links` on every door so that gates sharing a

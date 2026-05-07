@@ -1140,9 +1140,6 @@ pub struct RawObstaclePoint {
 #[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
 pub struct RawSightObstacle {
     pub points: Vec<RawObstaclePoint>,
-    /// Bounding box corners (x, y, z).
-    pub box_point1: (f32, f32, f32),
-    pub box_point2: (f32, f32, f32),
     /// Projection area (sector, layer) if this is a projection area.
     pub projection_area: Option<(u16, u16)>,
     pub opaque: bool,
@@ -1229,8 +1226,6 @@ pub struct RawDoor {
 pub struct RawLift {
     /// Index of the associated motion area.
     pub motion_area_index: u16,
-    /// Layer.  Stored for reference even though the loader does not use it.
-    pub layer: u16,
     pub lift_type: u8,
     pub doors: Vec<RawDoor>,
     pub direction: i16,
@@ -2981,13 +2976,16 @@ fn read_one_sight_obstacle(reader: &mut ChunkReader) -> Result<RawSightObstacle,
         });
     }
 
-    // Bounding box (6 floats: point1 x,y,z + point2 x,y,z)
-    let box_p1_x = reader.read_f32()?;
-    let box_p1_y = reader.read_f32()?;
-    let box_p1_z = reader.read_f32()?;
-    let box_p2_x = reader.read_f32()?;
-    let box_p2_y = reader.read_f32()?;
-    let box_p2_z = reader.read_f32()?;
+    // Bounding box (6 floats: point1 x,y,z + point2 x,y,z) — read for
+    // stream alignment but discarded.  The C++ engine also reseeds the
+    // box from the per-point Add3DPoint calls; the Rust SightObstacle
+    // computes its bounding boxes the same way from `points`.
+    let _ = reader.read_f32()?;
+    let _ = reader.read_f32()?;
+    let _ = reader.read_f32()?;
+    let _ = reader.read_f32()?;
+    let _ = reader.read_f32()?;
+    let _ = reader.read_f32()?;
 
     // Projection area
     let is_projection = reader.read_bool()?;
@@ -3012,8 +3010,6 @@ fn read_one_sight_obstacle(reader: &mut ChunkReader) -> Result<RawSightObstacle,
 
     Ok(RawSightObstacle {
         points,
-        box_point1: (box_p1_x, box_p1_y, box_p1_z),
-        box_point2: (box_p2_x, box_p2_y, box_p2_z),
         projection_area,
         opaque,
         solid,
@@ -3232,7 +3228,9 @@ fn read_lifts(reader: &mut ChunkReader, format: LevelFormat) -> Result<Vec<RawLi
 
     for _ in 0..count {
         let motion_area_index = reader.read_u16()?;
-        let layer = reader.read_u16()?;
+        // Layer field — read for stream alignment but unused; the
+        // motion-area drives layer attribution at runtime.
+        let _layer = reader.read_u16()?;
 
         // RHSectorLift::InitializeFromProtoStream
         let lift_type = reader.read_u8()?;
@@ -3256,7 +3254,6 @@ fn read_lifts(reader: &mut ChunkReader, format: LevelFormat) -> Result<Vec<RawLi
 
         lifts.push(RawLift {
             motion_area_index,
-            layer,
             lift_type,
             doors,
             direction,

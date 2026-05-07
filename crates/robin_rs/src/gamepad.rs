@@ -479,6 +479,10 @@ impl GamePadState {
                     destination: dest,
                     running,
                     show_marker: false,
+                    // Gamepad cursor doesn't yet plumb the patch
+                    // override through; spatial lookup at the cursor
+                    // position is the existing behaviour.
+                    goal_override: None,
                 });
             }
         }

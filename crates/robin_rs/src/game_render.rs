@@ -221,6 +221,11 @@ pub(crate) fn render_door_overlays(
             && let Some(door_idx) = sector.door_index
             && let Some(door) = game_host.doors.get(door_idx as usize)
         {
+            // Defer to the patch-FX path on either side of the door↔patch
+            // wiring: door_triggered (door.patch_index set) or
+            // triggers_door (door listed in patch.door_indices).  Mirrors
+            // C++ `RHFastFindGrid::GetPatch(pDoor)`.
+            let owning_patch = engine.find_patch_for_door(door_idx);
             match door.door_type {
                 // Building / BuildingTrap: stack up to the connected
                 // building's doors.
@@ -233,11 +238,10 @@ pub(crate) fn render_door_overlays(
                                 .filter(|s| s.sector_type.is_building())
                         });
                     if let Some(building) = building_sector {
-                        // Only draw inline when the door has no owning
-                        // patch; otherwise the patch-FX path handles it
-                        // via `Patch::display_doors`, which is set
-                        // below.
-                        if door.patch_index.is_none() {
+                        // Only draw inline when no patch owns the door;
+                        // otherwise the patch-FX path handles it via
+                        // `Patch::display_doors`, which is set below.
+                        if owning_patch.is_none() {
                             draw_sector_doors(renderer, building, false);
                         }
                     }
@@ -245,9 +249,7 @@ pub(crate) fn render_door_overlays(
                 // Non-building door: paint the single door polygon
                 // unless a patch owns it.
                 _ => {
-                    if door.patch_index.is_none()
-                        && !sector.points.is_empty()
-                        && selected_sector_active
+                    if owning_patch.is_none() && !sector.points.is_empty() && selected_sector_active
                     {
                         draw_polygon(renderer, &sector.points, COLOR_DOOR, ALPHA_DOOR);
                     }

@@ -7540,20 +7540,14 @@ impl HostFunctions for GameHost {
                 ActivateDoorMouseSector => {
                     let door_h = stack.pop_i32();
                     let active = stack.pop_i32();
-                    if let Some(door) = self.get_door_mut(door_h) {
-                        // Keep the serializable mirror in sync so save/load
-                        // still rehydrates the right hit-testing state.
-                        door.mouse_sector_active = active != 0;
-                    } else {
+                    if self.get_door(door_h).is_none() {
                         tracing::warn!(
                             "Script Error: ActivateDoorMouseSector: door {door_h} not found"
                         );
                         return 0;
                     }
-                    // The clickable polygon lives in
-                    // `fast_grid.sector_active`, not
-                    // `door.mouse_sector_active` — queue an
-                    // engine-side flip so script calls actually
+                    // The clickable polygon lives in `fast_grid.sector_active`;
+                    // queue an engine-side flip so script calls actually
                     // disable the click region.
                     self.commands.push(EngineCommand::ActivateDoorMouseSector {
                         door_handle: door_h,

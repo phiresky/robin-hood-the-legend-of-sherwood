@@ -229,9 +229,12 @@ pub struct Patch {
     pub sector: u16,
     /// Waypoint position for this patch.
     pub waypoint: Point2D,
-    /// Indices of doors controlled by this patch (into the GameHost doors array).
-    /// When `PatchEffect::SwapDoors` fires, `swap_rights_patch()` is called
-    /// on each door in this list.
+    /// Indices of doors controlled by this patch (into the GameHost
+    /// doors array).  Mirrors the C++ `RHPatch::maDoors` list: populated
+    /// only for `triggers_door` patches.  When `PatchEffect::SwapDoors`
+    /// fires inside `apply_final`, `swap_rights_patch()` is called on
+    /// each door in this list.  `door_triggered`-style links are stored
+    /// on the *door* side as `Door::patch_index` instead.
     pub door_indices: Vec<u32>,
 
     // -- Swap data (old/new object indices for SwapObjects) --

@@ -1722,13 +1722,7 @@ impl EngineInner {
                                         let lift_ok = self
                                             .grid_sector_by_number(sector_in)
                                             .and_then(|gs| gs.lift_type)
-                                            .map(|lt| {
-                                                crate::sector::LiftData {
-                                                    lift_type: lt,
-                                                    ..Default::default()
-                                                }
-                                                .is_actor_authorized(&auth_info)
-                                            })
+                                            .map(|lt| lt.is_actor_authorized(&auth_info))
                                             .unwrap_or(true);
                                         if !lift_ok {
                                             tracing::debug!(
