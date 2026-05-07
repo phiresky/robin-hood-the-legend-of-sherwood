@@ -11,8 +11,7 @@ use robin_assets::keyconfig::KeyConfig;
 use robin_assets::shipping_datadir::ShippingDatadir;
 use robin_engine::element::{EntityId, Point3D, TrajectoryPoint};
 use robin_engine::engine::{
-    DrawOrder, FadeToBlack, GroundMarkSpriteData, InputState, PendingBgBlit, PendingChromaShift,
-    SideEffects,
+    DrawOrder, FadeToBlack, GroundMarkSpriteData, InputState, PendingBgBlit, SideEffects,
 };
 use robin_engine::game_operation::GameCode;
 use robin_engine::geo2d::{Point2D, Vec2D};
@@ -413,10 +412,6 @@ pub struct Host {
     /// Renderer` are available — see `robin_rs::blit_to_map`.
     pub pending_bg_blits: Vec<PendingBgBlit>,
 
-    /// Queued CHROMA palette shifts handed off by the last tick (or a
-    /// console `CHROMA` cheat).  Drained in `pre_render_engine_setup`.
-    pub pending_chroma_shifts: Vec<PendingChromaShift>,
-
     // ── Host-owned UI-request queues (drained at host UI sites) ──
     /// Dialogue IDs pushed by `StartDialog` script commands.  Accumulated
     /// from every tick's `SideEffects.pending_dialogues`.  Drained by
@@ -497,10 +492,8 @@ pub struct Host {
     pub ui_focus: bool,
 
     /// Deferred console-overlay output lines produced by host-side work
-    /// that can't reach the overlay directly — currently only
-    /// [`crate::chroma::drain_pending_chroma_shifts`], which needs to
-    /// report the pixel count *after* applying the shift.  Drained by
-    /// the overlay at the start of each frame via
+    /// that can't reach the overlay directly. Drained by the overlay
+    /// at the start of each frame via
     /// [`crate::console_overlay::ConsoleOverlay::drain_pending_host_output`].
     pub pending_console_output: Vec<String>,
 
@@ -535,7 +528,7 @@ impl Host {
         }
     }
 
-    /// Mutable access to the frame holder during loading / palette shifts.
+    /// Mutable access to the frame holder during loading.
     pub fn frame_holder_mut(&mut self) -> &mut FrameHolder {
         Arc::make_mut(&mut self.frame_holder)
     }
@@ -593,9 +586,8 @@ impl Host {
 
     /// Apply the engine-local outputs of a tick.  Consumes the
     /// [`SideEffects`] struct by value so owned sub-vectors
-    /// (`bg_blits`, `chroma_shifts`, …) can be moved directly into
-    /// host accumulators without clones.  Returns the tick's
-    /// game-state code.
+    /// can be moved directly into host accumulators without clones.
+    /// Returns the tick's game-state code.
     pub fn apply_side_effects(&mut self, fx: SideEffects) -> GameCode {
         if let Some(fade) = fx.fade_to_black {
             self.fade_to_black = fade;
@@ -791,11 +783,9 @@ impl Host {
         // hover, portrait guard hover); the render loop drains the
         // buffer right after the outline pass.
         self.input.marked_pc_ids.extend(fx.pending_mark_pc_ids);
-        // Patch-effect background decal changes + CHROMA palette shifts
-        // are accumulated across frames until the next render pass drains
-        // them.
+        // Patch-effect background decal changes are accumulated across
+        // frames until the next render pass drains them.
         self.pending_bg_blits.extend(fx.bg_blits);
-        self.pending_chroma_shifts.extend(fx.chroma_shifts);
         fx.code
     }
 

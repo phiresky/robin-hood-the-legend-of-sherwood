@@ -90,7 +90,6 @@ pub mod android;
 pub mod bg_cache;
 pub mod blit_to_map;
 pub mod campaign_map;
-pub mod chroma;
 pub mod console_overlay;
 pub use robin_assets::convertkeys;
 pub mod corner_hud;
@@ -119,7 +118,7 @@ pub use host::Host;
 // `crate::Engine` / `crate::LevelAssets` etc. without fully qualifying
 // every call. These are stable entry points, not migration shims.
 pub use robin_engine::engine::level_loading;
-pub use robin_engine::engine::{Engine, LevelAssets, PendingBgBlit, PendingChromaShift};
+pub use robin_engine::engine::{Engine, LevelAssets, PendingBgBlit};
 pub mod ingame_menu;
 pub mod input;
 pub mod input_translator;

@@ -438,9 +438,8 @@ pub struct EngineInner {
     /// Campaign state — owned here during gameplay, swapped into
     /// GameHost for script execution.  `None` when not in a mission.
     pub(crate) campaign: Option<crate::campaign::Campaign>,
-    // (Deferred bg-blits and CHROMA palette shifts live on
-    // `pending_side_effects.{bg_blits, chroma_shifts}` now; load-once
-    // index tables live on `LevelAssets::{source_durations,
+    // (Deferred bg-blits live on `pending_side_effects.bg_blits` now;
+    // load-once index tables live on `LevelAssets::{source_durations,
     // patch_entity_handles, scroll_entity_ids, all_soldier_entity_ids}`.)
 }
 
@@ -454,24 +453,6 @@ pub type SourceDurations = std::sync::Arc<std::collections::BTreeMap<u32, u32>>;
 /// sample-length entry for a given source id — approximately 3 s at
 /// 25 fps.
 pub const SOURCE_DEFAULT_FRAMES: u32 = 75;
-
-/// A queued palette-shift from the CHROMA console cheat.
-///
-/// `start_hue` / `end_hue` in degrees (0..360).  `rotation` adds to hue,
-/// `saturation_pct` / `value_pct` scale S/V by percentage (100 = no change).
-/// Shifts are applied to every unique dictionary referenced by the
-/// selected PC's current sprite script.
-#[derive(
-    Debug, Clone, serde::Serialize, serde::Deserialize, robin_state_hash_derive::StateHash,
-)]
-pub struct PendingChromaShift {
-    pub pc_entity_id: EntityId,
-    pub start_hue: f32,
-    pub end_hue: f32,
-    pub rotation: f32,
-    pub saturation_pct: f32,
-    pub value_pct: f32,
-}
 
 /// A queued persistent background decal update for an FX entity whose
 /// patch just transitioned. `restore_only = true` removes the decal

@@ -79,13 +79,6 @@ pub enum ConsoleCommand {
     Anim,
     Babylon,
     CestLaZone,
-    Chroma {
-        start_hue: f32,
-        end_hue: f32,
-        rotation: f32,
-        saturation: f32,
-        value: f32,
-    },
     Companies,
     Einstein,
     EnergyDisplay,
@@ -117,8 +110,8 @@ pub enum ConsoleCommand {
 
     /// A known keyword that was invoked with the wrong number of
     /// arguments.  Carries the in-body "USAGE: …" / "Verboten …"
-    /// help text (e.g. campaign with < 2 args, chroma with != 6
-    /// args).  The dispatcher turns this into a plain `Ok(msg)` so
+    /// help text (e.g. campaign with < 2 args).  The dispatcher turns
+    /// this into a plain `Ok(msg)` so
     /// the overlay shows the help text instead of a generic
     /// "Unknown command" error.
     UsageError(&'static str),
@@ -216,23 +209,6 @@ fn parse_dev(tokens: &[&str]) -> Option<ConsoleCommand> {
         }),
         "COMA" => Some(ConsoleCommand::Coma),
         "COMPANIES" => Some(ConsoleCommand::Companies),
-        "CHROMA" if tokens.len() == 6 => {
-            let start_hue = tokens[1].parse().ok()?;
-            let end_hue = tokens[2].parse().ok()?;
-            let rotation = tokens[3].parse().ok()?;
-            let saturation = tokens[4].parse().ok()?;
-            let value = tokens[5].parse().ok()?;
-            Some(ConsoleCommand::Chroma {
-                start_hue,
-                end_hue,
-                rotation,
-                saturation,
-                value,
-            })
-        }
-        "CHROMA" => Some(ConsoleCommand::UsageError(
-            "USAGE: CHROMA <start hue> <end hue> <rotation> <saturation> <value>",
-        )),
         "CESTLAZONE" => Some(ConsoleCommand::CestLaZone),
         "CAMPAIGN" if tokens.len() >= 2 => Some(ConsoleCommand::LoadCampaign {
             filename: tokens[1].to_string(),
@@ -551,29 +527,6 @@ mod tests {
                 actor: "ABC123".to_string(),
                 method: "HIDEINTERFACE".to_string(),
             })
-        );
-    }
-
-    #[test]
-    fn parse_chroma() {
-        let cmd = parse("CHROMA 10 200 30 80 90");
-        assert!(matches!(cmd, Some(ConsoleCommand::Chroma { .. })));
-    }
-
-    #[test]
-    fn parse_chroma_wrong_arg_count_emits_usage() {
-        // CHROMA with anything other than 6 args emits the usage string.
-        assert_eq!(
-            parse("CHROMA"),
-            Some(ConsoleCommand::UsageError(
-                "USAGE: CHROMA <start hue> <end hue> <rotation> <saturation> <value>"
-            ))
-        );
-        assert_eq!(
-            parse("CHROMA 10 20"),
-            Some(ConsoleCommand::UsageError(
-                "USAGE: CHROMA <start hue> <end hue> <rotation> <saturation> <value>"
-            ))
         );
     }
 

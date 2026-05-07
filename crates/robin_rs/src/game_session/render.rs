@@ -587,7 +587,7 @@ pub struct RenderContext<'a> {
 ///
 /// The caller is responsible for:
 /// - running `pre_render_engine_setup` before this function (drain
-///   deferred bg blits / chroma shifts, sort display order);
+///   deferred bg blits, sort display order);
 /// - calling `renderer.present()` after this function returns;
 /// - running `post_render_engine_cleanup` to clear one-shot NPC flags;
 /// - skipping the whole trio in fast-forward (`host.skip_render`).
@@ -637,9 +637,9 @@ pub(super) fn render_frame(
     let display_info_elapsed_secs = ctx.display_info_elapsed_secs;
     let local_seat = host.local_seat;
     // Queue the GPU background texture for the current camera view.
-    // Engine-mutating pre-render bookkeeping (bg blits, chroma shifts,
-    // SortDisplayOrder) is hoisted to the main loop so `render_frame`
-    // itself observes an immutable `&Engine` / `&DevState` — this lets
+    // Engine-mutating pre-render bookkeeping (bg blits, SortDisplayOrder)
+    // is hoisted to the main loop so `render_frame` itself observes an
+    // immutable `&Engine` / `&DevState` — this lets
     // the `/screenshot` HTTP endpoint render with dev-flag overrides
     // without disturbing the live sim state.
     // Drop any modal snapshot once gameplay owns the frame again.  While the
@@ -1322,10 +1322,9 @@ pub(super) fn render_frame(
     // Drawn after the pause menu so the cheat console is reachable
     // even mid-pause — the console captures input independent of
     // the pause overlay.
-    // Pump host-side deferred console output (CHROMA pixel count,
-    // campaign-load outcome) into the overlay's history so those
-    // lines surface in the scrollback even though they originate
-    // outside the dispatcher.
+    // Pump host-side deferred console output into the overlay's history
+    // so those lines surface in the scrollback even though they
+    // originate outside the dispatcher.
     drain_pending_console_output(console_overlay, host);
     console_overlay.tick_animation();
     if console_overlay.is_visible() {

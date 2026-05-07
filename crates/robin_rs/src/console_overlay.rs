@@ -69,7 +69,6 @@ const COMPLETION_KEYWORDS_DEV: &[&str] = &[
     "CALL",
     "CAMPAIGN",
     "CESTLAZONE",
-    "CHROMA",
     "COMA",
     "COMPANIES",
     "DIES",
@@ -507,10 +506,10 @@ impl ConsoleOverlay {
         }
     }
 
-    /// Drain any host-side deferred console output (currently CHROMA
-    /// pixel-count reports, campaign-load outcome messages).  These
-    /// originate outside the engine dispatcher but still want to show
-    /// up in the overlay's history.
+    /// Drain any host-side deferred console output (currently
+    /// campaign-load outcome messages). These originate outside the
+    /// engine dispatcher but still want to show up in the overlay's
+    /// history.
     pub fn drain_pending_host_output(&mut self, host: &mut crate::Host) {
         if host.pending_console_output.is_empty() {
             return;

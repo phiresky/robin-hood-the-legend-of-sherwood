@@ -2175,10 +2175,6 @@ pub struct SideEffects {
     /// renderer-owned sprite textures are available (see
     /// `robin_rs::blit_to_map`).
     pub bg_blits: Vec<super::PendingBgBlit>,
-    /// Queued CHROMA palette shifts emitted by the `CHROMA` console
-    /// cheat.  Drained host-side before render (see
-    /// `robin_rs::chroma`).
-    pub chroma_shifts: Vec<super::PendingChromaShift>,
     /// Set when a silent `Win(false)` fired this tick (ambush/tactical
     /// silent win). Host flips the Sherwood start-mission /
     /// quit-mission widgets.

@@ -72,8 +72,8 @@ impl EngineInner {
     //
     // The Rust GPU renderer re-composes the scene every frame, so there
     // is no offscreen cache to invalidate from the engine — host cache
-    // bookkeeping (patch bake, window-regain-focus, palette shift) is
-    // driven by `SideEffects::invalidate_background`, and save-load
+    // bookkeeping (patch bake, window-regain-focus) is driven by
+    // `SideEffects::invalidate_background`, and save-load
     // clears mid-zoom state via `EngineSnapshot::apply_to`.
     pub(super) fn tick_display_state(&mut self, display: &mut HostDisplayState) -> u32 {
         // Director work is cinematic / script-driven; it targets the

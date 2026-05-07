@@ -492,10 +492,9 @@ impl Engine {
     }
 
     // ── Per-frame drains ────
-    // Patch-effect bg blits + CHROMA palette shifts now travel through
-    // `SideEffects` (`apply_side_effects` moves them into
-    // `Host::pending_bg_blits` / `Host::pending_chroma_shifts`) so
-    // the engine no longer owns the queue between tick and render.
+    // Patch-effect bg blits now travel through `SideEffects`
+    // (`apply_side_effects` moves them into `Host::pending_bg_blits`)
+    // so the engine no longer owns the queue between tick and render.
 
     // `mission_script_game_host_mut` is no longer exposed — the
     // host-side callers go through `refresh_selected_patch_display_doors`

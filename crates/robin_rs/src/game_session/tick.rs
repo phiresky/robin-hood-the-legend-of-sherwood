@@ -72,26 +72,23 @@ pub(super) fn tick_audio(
 /// can observe an immutable `&Engine`:
 ///
 /// - Drain deferred `BlitToMap` patch-effect background decal updates.
-/// - Drain queued CHROMA palette shifts.
 ///
 /// The back-to-front draw order (`host.draw_order`) is refreshed at the
 /// top of the main loop via `engine.compute_display_order()` — it's host-
 /// cache derived state, not sim state, and lives outside the command
 /// pipeline.
 pub(super) fn pre_render_engine_setup(
-    manager: &mut robin_engine::engine_manager::EngineManager,
+    _manager: &mut robin_engine::engine_manager::EngineManager,
     host: &mut Host,
-    assets: &robin_engine::engine::LevelAssets,
-    renderer: &mut crate::renderer::Renderer,
+    _assets: &robin_engine::engine::LevelAssets,
+    _renderer: &mut crate::renderer::Renderer,
 ) {
     crate::blit_to_map::drain_pending_bg_blits(host);
-    crate::chroma::drain_pending_chroma_shifts(&mut manager.engine, host, assets, renderer);
 }
 
-/// Pump any host-side deferred console output (CHROMA pixel count,
-/// campaign-load outcome) into the overlay.  Keeps the overlay-owned
-/// scrollback as the single display surface for all cheat feedback,
-/// regardless of which subsystem originates the message.
+/// Pump any host-side deferred console output into the overlay. Keeps
+/// the overlay-owned scrollback as the single display surface for all
+/// cheat feedback, regardless of which subsystem originates the message.
 pub(super) fn drain_pending_console_output(
     console_overlay: &mut crate::console_overlay::ConsoleOverlay,
     host: &mut Host,

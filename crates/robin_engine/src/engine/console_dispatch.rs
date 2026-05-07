@@ -953,34 +953,6 @@ impl EngineInner {
                     id.0
                 ))
             }
-            Chroma {
-                start_hue,
-                end_hue,
-                rotation,
-                saturation,
-                value,
-            } => {
-                // Grab the selected PC's current sprite dictionary and
-                // hue-shift every non-shadow / non-transparent entry.
-                // We can't do the palette mutation here (no
-                // `&mut LevelAssets` / `&mut Renderer` at dispatch
-                // time), so queue it for `drain_pending_chroma_shifts`
-                // to apply.
-                let Some(&pc_id) = self.seats[0].selection.first() else {
-                    return ConsoleResponse::Ok("CHROMA: no PC selected.".to_string());
-                };
-                self.pending_side_effects
-                    .chroma_shifts
-                    .push(crate::engine::PendingChromaShift {
-                        pc_entity_id: pc_id,
-                        start_hue: *start_hue,
-                        end_hue: *end_hue,
-                        rotation: *rotation,
-                        saturation_pct: *saturation,
-                        value_pct: *value,
-                    });
-                ConsoleResponse::Ok("CHROMA: queued palette shift.".to_string())
-            }
             Fps => {
                 // Idempotent set (not a toggle): unconditionally
                 // enables FPS display and prints "FPS displayed."
@@ -1298,8 +1270,7 @@ fn cheat_help_text(use_final: bool) -> &'static str {
                               ENERGYDISPLAY, LIGHT, MOTION, NOISE, PROJECTION,\n\
                               RAILROAD, SEEKANDDESTROY, SHADOW, SPHERE,\n\
                               CESTLAZONE, LEVEL TEXT [DG|DB|PT|SB]\n\
-         Rendering / debug:   CHROMA <s_hue> <e_hue> <rot> <sat> <val>, FPS,\n\
-                              STATUS FRAMECACHE|HARDWARE|SHADOW|PC,\n\
+         Rendering / debug:   FPS, STATUS FRAMECACHE|HARDWARE|SHADOW|PC,\n\
                               OPTIMIZE, CALL <initial> HIDEINTERFACE|DISPLAYINTERFACE,\n\
                               FORGET, SARKOZY, ASSERTFALSE\n"
     }
