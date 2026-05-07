@@ -5,7 +5,7 @@ use crate::campaign::{Campaign, CampaignValue};
 use crate::element::{Entity, EntityId};
 use crate::geo2d::{self};
 use crate::messenger::{Message, MessageType, SimpleMessage};
-use crate::profiles::{MissionLocation, MissionProfile, MissionType};
+use crate::profiles::{MissionLocation, MissionProfile};
 
 impl EngineInner {
     /// Refresh entity-active map in GameHost from the real entity storage.
@@ -2356,7 +2356,6 @@ impl EngineInner {
         let profile = campaign.missions[idx].profile(&assets.profile_manager);
         let mission_filename = profile.mission_filename.clone();
         let proto_level_filename = profile.proto_level_filename.clone();
-        let mission_type = profile.mission_type;
         let location = profile.location;
 
         self.initialize_from_mission(
@@ -2371,7 +2370,6 @@ impl EngineInner {
         )?;
 
         // Set mission-specific engine state from the profile
-        self.weather.is_skirmish = mission_type == MissionType::Tactical;
         self.weather.is_forest_level = location == MissionLocation::Sherwood;
 
         Ok(())

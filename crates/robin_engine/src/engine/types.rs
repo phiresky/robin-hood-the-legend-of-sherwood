@@ -1726,14 +1726,8 @@ pub struct MissionState {
     /// EngineInner should transition to "interrupted" result this frame.
     pub quit_interrupted: bool,
 
-    /// Name of the current mission (for save validation).
-    pub mission_name: String,
-    /// Name of the proto-level (map geometry).
-    pub proto_level_name: String,
     /// Map filename from the mission header (e.g. "lincoln").
     pub map_name: String,
-    /// Skip-data filename (for skip-ahead saves).
-    pub skip_data: String,
 
     /// Victory/defeat dialogue ID.
     pub victory_defeat_id: u32,
@@ -1972,8 +1966,6 @@ pub struct WeatherState {
     pub night_color: u16,
     /// Whether this is a forest level.
     pub is_forest_level: bool,
-    /// Whether this is a skirmish mission.
-    pub is_skirmish: bool,
     /// Current ambiance.
     pub ambiance: Ambiance,
 }

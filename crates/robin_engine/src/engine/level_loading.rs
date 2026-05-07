@@ -398,8 +398,6 @@ impl EngineInner {
         progress: &mut dyn FnMut(f32),
     ) -> Result<(), EngineError> {
         self.script_globals.clear();
-        self.mission.mission_name = mission_name.to_string();
-        self.mission.proto_level_name = proto_level_name.to_string();
         self.mission_stat.reset();
         self.short_briefings.clear();
 

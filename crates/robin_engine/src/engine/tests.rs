@@ -861,7 +861,6 @@ fn mission_stat_resets_on_new_mission() {
 
     assert_eq!(engine.mission_stat.collected_money, 0);
     assert_eq!(engine.short_briefings.count(true), 0);
-    assert_eq!(engine.mission.mission_name, "test_mission");
 }
 
 #[test]
