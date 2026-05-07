@@ -3208,6 +3208,13 @@ impl EngineInner {
         // borrow ends.
         let mut blocked_impossible: Vec<(crate::sequence::SequenceId, usize)> = Vec::new();
         let mut door_pass_transition_done_effects: Vec<EntityId> = Vec::new();
+        // Movement elements whose sprite reported `MotionState::Done`
+        // this tick — port of `mpOrder->bDone = true` at the end of
+        // `RHElementActor::Hourglass` (RHelementactor.cpp:691).  The
+        // postpone-race guard at `engine_postpone` (engine/mod.rs)
+        // reads `e.orders.back().done` to short-circuit a postpone
+        // when the target's last order has already hit its done-frame.
+        let mut order_done_effects: Vec<(crate::sequence::SequenceId, usize)> = Vec::new();
         let mut post_seek_arrivals: Vec<(EntityId, crate::sequence::SequenceId, usize)> =
             Vec::new();
         // Elevation-line crossings detected during this tick. Dispatched
@@ -3838,6 +3845,9 @@ impl EngineInner {
             }
             if matches!(motion_state, MotionState::Start) && is_sword_motion {
                 sword_movement_starts.push(EntityId(idx as u32));
+            }
+            if matches!(motion_state, MotionState::Done) {
+                order_done_effects.push((move_seq_id, move_elem_idx));
             }
             if door_pass_anim.is_some()
                 && matches!(motion_state, MotionState::Done)
@@ -4655,6 +4665,20 @@ impl EngineInner {
         }
         for entity_id in door_pass_transition_done_effects {
             self.apply_door_pass_transition_done_side_effects(assets, entity_id);
+        }
+        // Mark the front order `done = true` on every movement element
+        // whose sprite hit `MotionState::Done` this tick.  Mirrors the
+        // C++ `mpOrder->bDone = true` write at the end of
+        // `RHElementActor::Hourglass` (RHelementactor.cpp:691).  Only
+        // matters for the postpone-race guard in `engine_postpone`,
+        // which short-circuits a postpone to TERMINATED when the
+        // target element's last order is already `done`.
+        for (seq_id, elem_idx) in order_done_effects {
+            if let Some(elem) = self.sequence_manager.get_element_mut(seq_id, elem_idx)
+                && let Some(order) = elem.orders.front_mut()
+            {
+                order.done = true;
+            }
         }
         for entity_id in sword_movement_terminations {
             self.maybe_provoke_after_sword_movement_terminated(assets, entity_id);
