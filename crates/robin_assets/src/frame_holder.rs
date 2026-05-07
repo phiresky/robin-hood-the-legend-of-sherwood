@@ -159,8 +159,6 @@ pub struct FrameDictionary {
     shadow_color: u16,
     /// Whether night color effect has been applied.
     night_applied: bool,
-    /// Whether "Arno law" shadow color replacement has been applied.
-    arno_law_applied: bool,
     /// Whether 16→15 bit conversion has been applied.
     converted_to_15bit: bool,
     /// Whether fog color effect has been applied.
@@ -175,7 +173,6 @@ impl Default for FrameDictionary {
             checksum: 0,
             shadow_color: SHADOW_KEY,
             night_applied: false,
-            arno_law_applied: false,
             converted_to_15bit: false,
             fog_applied: false,
         }
@@ -280,7 +277,6 @@ impl FrameDictionary {
         }
 
         self.shadow_color = new_shadow_color;
-        self.arno_law_applied = true;
         true
     }
 

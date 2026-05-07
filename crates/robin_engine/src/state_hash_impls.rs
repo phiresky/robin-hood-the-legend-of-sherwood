@@ -27,7 +27,6 @@ macro_rules! impl_state_hash_bitflags {
 }
 
 impl_state_hash_bitflags! {
-    crate::sprite::CreateFlags,
     crate::ai::AiLockFlags,
     crate::ai::GotoFlags,
     crate::ai::DutyFlags,

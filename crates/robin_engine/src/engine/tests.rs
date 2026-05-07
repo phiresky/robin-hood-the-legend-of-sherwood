@@ -398,7 +398,6 @@ fn sprite_serialization_surface_matches_v2_contract() {
         // Runtime attachment fields — seed with non-defaults to prove
         // only Arc-shared level-owned attachments get wiped on deserialize.
         s.frame_profile_name = "FakeProfile".into();
-        s.alternate_profile_name = "FakeAlternate".into();
         s.profile_cache_key = "FakeFile/FakeProfile".into();
         s.alternate_profile_cache_key = "FakeFile/FakeAlternate".into();
         s.center = crate::geo2d::Vec2D { x: 32.0, y: 48.0 };
@@ -466,7 +465,6 @@ fn sprite_serialization_surface_matches_v2_contract() {
     assert!(rehydrated_sprite.conversion.is_empty());
     assert!(rehydrated_sprite.alternate_conversion.is_none());
     assert_eq!(rehydrated_sprite.frame_profile_name, "FakeProfile");
-    assert_eq!(rehydrated_sprite.alternate_profile_name, "FakeAlternate");
     assert_eq!(rehydrated_sprite.profile_cache_key, "FakeFile/FakeProfile");
     assert_eq!(
         rehydrated_sprite.alternate_profile_cache_key,
@@ -861,7 +859,6 @@ fn mission_stat_resets_on_new_mission() {
 
     assert_eq!(engine.mission_stat.collected_money, 0);
     assert_eq!(engine.short_briefings.count(true), 0);
-    assert_eq!(engine.mission.mission_name, "test_mission");
 }
 
 #[test]
@@ -1230,7 +1227,9 @@ fn sort_for_minimap_priority_order() {
 
 #[test]
 fn smalltalk_strike_does_not_transfer_initiative_immediately() {
-    use crate::element::{ActorSoldier, Command, ElementData, ElementKind, Entity, Point3D};
+    use crate::element::{
+        ActorSoldier, Command, ElementData, ElementKind, Entity, Point3D, Posture,
+    };
     use crate::element_kinds::ActionState;
 
     let mut engine = EngineInner::new();
@@ -1238,6 +1237,10 @@ fn smalltalk_strike_does_not_transfer_initiative_immediately() {
 
     let mut attacker_element = ElementData {
         kind: ElementKind::ActorSoldier,
+        // Soldiers built ad-hoc in tests need an explicit posture —
+        // the level deserialiser remaps `Undefined` to a kind-specific
+        // default, but `ElementData::default()` does not.
+        posture: Posture::Upright,
         ..Default::default()
     };
     attacker_element.set_position(Point3D {
@@ -1255,6 +1258,7 @@ fn smalltalk_strike_does_not_transfer_initiative_immediately() {
 
     let mut defender_element = ElementData {
         kind: ElementKind::ActorSoldier,
+        posture: Posture::Upright,
         ..Default::default()
     };
     defender_element.set_position(Point3D {

@@ -1314,6 +1314,14 @@ mod tests {
                 kind: ElementKind::ActorSoldier,
                 active: true,
                 blipped,
+                // Soldiers loaded from a level always carry a concrete
+                // posture (the deserialiser remaps `Undefined` to the
+                // kind-specific default).  Test helpers don't go
+                // through that path, so seed `Upright` here — without
+                // it the `posture_after_transition` stamp picks up
+                // `Undefined` and the `MakePostureTransition` panic
+                // arm fires when the test launches a sequence.
+                posture: Posture::Upright,
                 ..ElementData::default()
             },
             actor: ActorData::default(),

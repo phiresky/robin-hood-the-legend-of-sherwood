@@ -16,7 +16,6 @@ use crate::position_interface::PositionInterface;
 use crate::sprite_script::{
     Ambiance, FrameKind, SpriteInfo, SpriteScript, SpriteScriptor, UNMAPPED,
 };
-use crate::sprite_variant::SpriteVariant;
 
 // ---------------------------------------------------------------------------
 // MotionState
@@ -182,87 +181,6 @@ pub enum FlightStyle {
 }
 
 // ---------------------------------------------------------------------------
-// MaskingMode
-// ---------------------------------------------------------------------------
-
-/// How sprites are masked during rendering.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    robin_state_hash_derive::StateHash,
-)]
-pub enum MaskingMode {
-    Default,
-    Projectile,
-    FlyingHuman,
-}
-
-// ---------------------------------------------------------------------------
-// CreateFlags
-// ---------------------------------------------------------------------------
-
-bitflags::bitflags! {
-    /// Flags for `CreateTargetSprite`.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct CreateFlags: u32 {
-        // The 0x0001 fetch-shadow flag was never set by any caller and
-        // never consumed; dropped during the 08-17 audit pass.
-        const WIPE_SHADOW = 0x0002;
-        const GENERATE_EDGE_MAP = 0x0004;
-        const INTO_THE_SHADOW = 0x0008;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SpriteRenderingInfo
-// ---------------------------------------------------------------------------
-
-/// All parameters needed to render a single sprite frame.
-#[derive(Debug, Clone, Serialize, Deserialize, robin_state_hash_derive::StateHash)]
-pub struct SpriteRenderingInfo {
-    /// Target surface ID for rendering.
-    pub destination_surface: u32,
-    /// Whether this sprite is currently selected by the player.
-    pub selected: bool,
-    /// Whether to draw even when hidden behind obstacles.
-    pub draw_hidden: bool,
-    /// Creation/rendering flags.
-    pub flags: CreateFlags,
-    /// Masking mode.
-    pub masking: MaskingMode,
-    /// Whether the masking bounding box is valid.
-    pub valid_box_for_masking: bool,
-    /// Outline color (for selected sprites).
-    pub outline_color: u16,
-    /// Replacement color (for shadow rendering).
-    pub replacement_color: u16,
-    /// Day/Night/Fog variant.
-    pub variant: SpriteVariant,
-}
-
-impl Default for SpriteRenderingInfo {
-    fn default() -> Self {
-        Self {
-            destination_surface: 0,
-            selected: false,
-            draw_hidden: false,
-            flags: CreateFlags::empty(),
-            masking: MaskingMode::Default,
-            valid_box_for_masking: false,
-            outline_color: 0,
-            replacement_color: 0,
-            variant: SpriteVariant::Day,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // BoundingBox2D — simple AABB for sprite bounds
 // ---------------------------------------------------------------------------
 
@@ -342,9 +260,6 @@ pub struct Sprite {
     /// Sub-frame counter at which "action done" fires.
     pub action_done_counter: u16,
 
-    /// Countdown for fall-style flights.
-    pub frame_count_down: u16,
-
     /// Last sound ID played (to avoid repeats).
     pub last_sound_id: u16,
 
@@ -391,8 +306,6 @@ pub struct Sprite {
 
     /// Name of the loaded frame profile.
     pub frame_profile_name: String,
-    /// Name of the alternate profile.
-    pub alternate_profile_name: String,
     /// SpriteScriptor cache key for the primary profile.
     pub profile_cache_key: String,
     /// SpriteScriptor cache key for the alternate profile, when present.
@@ -431,7 +344,6 @@ struct SpriteSnapshotRef<'a> {
     use_alternate_profile: bool,
     action_done_frame: u16,
     action_done_counter: u16,
-    frame_count_down: u16,
     last_sound_id: u16,
     splitch_count: u8,
     behind_display_order_ref: bool,
@@ -439,7 +351,6 @@ struct SpriteSnapshotRef<'a> {
     anims_to_be_replaced: &'a [OrderType],
     replacing_anims: &'a [OrderType],
     frame_profile_name: &'a str,
-    alternate_profile_name: &'a str,
     profile_cache_key: &'a str,
     alternate_profile_cache_key: &'a str,
     center: Vec2D,
@@ -459,7 +370,6 @@ struct SpriteSnapshot {
     use_alternate_profile: bool,
     action_done_frame: u16,
     action_done_counter: u16,
-    frame_count_down: u16,
     last_sound_id: u16,
     splitch_count: u8,
     behind_display_order_ref: bool,
@@ -467,7 +377,6 @@ struct SpriteSnapshot {
     anims_to_be_replaced: Vec<OrderType>,
     replacing_anims: Vec<OrderType>,
     frame_profile_name: String,
-    alternate_profile_name: String,
     profile_cache_key: String,
     alternate_profile_cache_key: String,
     center: Vec2D,
@@ -488,7 +397,6 @@ impl Sprite {
             use_alternate_profile: self.use_alternate_profile,
             action_done_frame: self.action_done_frame,
             action_done_counter: self.action_done_counter,
-            frame_count_down: self.frame_count_down,
             last_sound_id: self.last_sound_id,
             splitch_count: self.splitch_count,
             behind_display_order_ref: self.behind_display_order_ref,
@@ -496,7 +404,6 @@ impl Sprite {
             anims_to_be_replaced: &self.anims_to_be_replaced,
             replacing_anims: &self.replacing_anims,
             frame_profile_name: &self.frame_profile_name,
-            alternate_profile_name: &self.alternate_profile_name,
             profile_cache_key: &self.profile_cache_key,
             alternate_profile_cache_key: &self.alternate_profile_cache_key,
             center: self.center,
@@ -532,7 +439,6 @@ impl<'de> Deserialize<'de> for Sprite {
             use_alternate_profile: snapshot.use_alternate_profile,
             action_done_frame: snapshot.action_done_frame,
             action_done_counter: snapshot.action_done_counter,
-            frame_count_down: snapshot.frame_count_down,
             last_sound_id: snapshot.last_sound_id,
             splitch_count: snapshot.splitch_count,
             behind_display_order_ref: snapshot.behind_display_order_ref,
@@ -544,7 +450,6 @@ impl<'de> Deserialize<'de> for Sprite {
             conversion: std::sync::Arc::new(Vec::new()),
             alternate_conversion: None,
             frame_profile_name: snapshot.frame_profile_name,
-            alternate_profile_name: snapshot.alternate_profile_name,
             profile_cache_key: snapshot.profile_cache_key,
             alternate_profile_cache_key: snapshot.alternate_profile_cache_key,
             center: snapshot.center,
@@ -567,7 +472,6 @@ impl robin_util::state_hash::StateHash for Sprite {
         self.use_alternate_profile.state_hash(state);
         self.action_done_frame.state_hash(state);
         self.action_done_counter.state_hash(state);
-        self.frame_count_down.state_hash(state);
         self.last_sound_id.state_hash(state);
         self.splitch_count.state_hash(state);
         self.behind_display_order_ref.state_hash(state);
@@ -575,7 +479,6 @@ impl robin_util::state_hash::StateHash for Sprite {
         self.anims_to_be_replaced.state_hash(state);
         self.replacing_anims.state_hash(state);
         self.frame_profile_name.state_hash(state);
-        self.alternate_profile_name.state_hash(state);
         self.profile_cache_key.state_hash(state);
         self.alternate_profile_cache_key.state_hash(state);
         self.center.state_hash(state);
@@ -597,7 +500,6 @@ impl Default for Sprite {
             use_alternate_profile: false,
             action_done_frame: 0xFFFF,
             action_done_counter: 0xFFFF,
-            frame_count_down: 0,
             last_sound_id: 0,
             splitch_count: 0,
             behind_display_order_ref: false,
@@ -609,7 +511,6 @@ impl Default for Sprite {
             conversion: std::sync::Arc::new(Vec::new()),
             alternate_conversion: None,
             frame_profile_name: String::new(),
-            alternate_profile_name: String::new(),
             profile_cache_key: String::new(),
             alternate_profile_cache_key: String::new(),
             center: Vec2D { x: 0.0, y: 0.0 },
@@ -1219,7 +1120,6 @@ impl Sprite {
             sprite.conversion = info.conversion.clone();
             sprite.center = info.center;
         } else {
-            sprite.alternate_profile_name = profile_name.to_owned();
             sprite.alternate_profile_cache_key = cache_key.to_owned();
             sprite.alternate_scripts = Some(info.scripts.clone());
             sprite.alternate_conversion = Some(info.conversion.clone());

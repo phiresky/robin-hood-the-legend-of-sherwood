@@ -655,7 +655,6 @@ impl EngineInner {
                 // Reset shield protection for the fresh activation.
                 self.shield.is_protected = true;
                 self.shield.protected_pc = None;
-                self.shield.danger_point = [0.0, 0.0, 0.0];
             }
             _ => {}
         }
