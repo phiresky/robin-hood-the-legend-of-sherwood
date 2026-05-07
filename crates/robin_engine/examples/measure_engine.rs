@@ -108,7 +108,6 @@ fn measure_element_details(
         "element.sprite.profile_names",
         &(
             &element.sprite.frame_profile_name,
-            &element.sprite.alternate_profile_name,
             &element.sprite.profile_cache_key,
             &element.sprite.alternate_profile_cache_key,
         ),

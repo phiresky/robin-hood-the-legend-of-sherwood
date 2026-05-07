@@ -306,8 +306,6 @@ pub struct Sprite {
 
     /// Name of the loaded frame profile.
     pub frame_profile_name: String,
-    /// Name of the alternate profile.
-    pub alternate_profile_name: String,
     /// SpriteScriptor cache key for the primary profile.
     pub profile_cache_key: String,
     /// SpriteScriptor cache key for the alternate profile, when present.
@@ -341,7 +339,6 @@ struct SpriteSnapshotRef<'a> {
     anims_to_be_replaced: &'a [OrderType],
     replacing_anims: &'a [OrderType],
     frame_profile_name: &'a str,
-    alternate_profile_name: &'a str,
     profile_cache_key: &'a str,
     alternate_profile_cache_key: &'a str,
     center: Vec2D,
@@ -368,7 +365,6 @@ struct SpriteSnapshot {
     anims_to_be_replaced: Vec<OrderType>,
     replacing_anims: Vec<OrderType>,
     frame_profile_name: String,
-    alternate_profile_name: String,
     profile_cache_key: String,
     alternate_profile_cache_key: String,
     center: Vec2D,
@@ -396,7 +392,6 @@ impl Sprite {
             anims_to_be_replaced: &self.anims_to_be_replaced,
             replacing_anims: &self.replacing_anims,
             frame_profile_name: &self.frame_profile_name,
-            alternate_profile_name: &self.alternate_profile_name,
             profile_cache_key: &self.profile_cache_key,
             alternate_profile_cache_key: &self.alternate_profile_cache_key,
             center: self.center,
@@ -443,7 +438,6 @@ impl<'de> Deserialize<'de> for Sprite {
             conversion: std::sync::Arc::new(Vec::new()),
             alternate_conversion: None,
             frame_profile_name: snapshot.frame_profile_name,
-            alternate_profile_name: snapshot.alternate_profile_name,
             profile_cache_key: snapshot.profile_cache_key,
             alternate_profile_cache_key: snapshot.alternate_profile_cache_key,
             center: snapshot.center,
@@ -472,7 +466,6 @@ impl robin_util::state_hash::StateHash for Sprite {
         self.anims_to_be_replaced.state_hash(state);
         self.replacing_anims.state_hash(state);
         self.frame_profile_name.state_hash(state);
-        self.alternate_profile_name.state_hash(state);
         self.profile_cache_key.state_hash(state);
         self.alternate_profile_cache_key.state_hash(state);
         self.center.state_hash(state);
@@ -505,7 +498,6 @@ impl Default for Sprite {
             conversion: std::sync::Arc::new(Vec::new()),
             alternate_conversion: None,
             frame_profile_name: String::new(),
-            alternate_profile_name: String::new(),
             profile_cache_key: String::new(),
             alternate_profile_cache_key: String::new(),
             center: Vec2D { x: 0.0, y: 0.0 },
@@ -1114,7 +1106,6 @@ impl Sprite {
             sprite.conversion = info.conversion.clone();
             sprite.center = info.center;
         } else {
-            sprite.alternate_profile_name = profile_name.to_owned();
             sprite.alternate_profile_cache_key = cache_key.to_owned();
             sprite.alternate_scripts = Some(info.scripts.clone());
             sprite.alternate_conversion = Some(info.conversion.clone());
