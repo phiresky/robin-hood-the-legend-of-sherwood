@@ -147,9 +147,9 @@ pub enum HttpPayload {
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct ScreenshotRequest {
-    /// Output width. `None` → native render-target width.
+    /// Output width bound. Used with `height` as an aspect-preserving maximum.
     pub width: Option<u16>,
-    /// Output height. `None` → native render-target height.
+    /// Output height bound. Used with `width` as an aspect-preserving maximum.
     pub height: Option<u16>,
     /// Crop the bottom HUD panel before encoding.
     pub hide_ui: bool,
@@ -593,7 +593,7 @@ fn info_json() -> serde_json::Value {
             {"method": "POST", "path": "/batch",              "desc": "invoke many natives on one tick: {calls: [{op, args, this?}]}"},
             {"method": "POST", "path": "/console",            "desc": "run a debug-console command: {command: '...'}"},
             {"method": "POST", "path": "/command",            "desc": "apply a PlayerCommand (externally-tagged JSON enum)"},
-            {"method": "GET",  "path": "/screenshot",         "desc": "PNG of next rendered frame. Query: w, h (resize), hide_ui, view_cones, pc_sight, motion_graph, all_obstacles, elevation, noise, sound_source, actor_info, script_zones, door, projection_areas, railroad, probability, company_number, combat_energy, light_zones, animation_lines, seek_points, fps, entity_ids (bool flags)"},
+            {"method": "GET",  "path": "/screenshot",         "desc": "PNG of next rendered frame. Query: w, h (aspect-preserving max bounds), hide_ui, view_cones, pc_sight, motion_graph, all_obstacles, elevation, noise, sound_source, actor_info, script_zones, door, projection_areas, railroad, probability, company_number, combat_energy, light_zones, animation_lines, seek_points, fps, entity_ids (bool flags)"},
             {"method": "POST", "path": "/step-forward",       "desc": "Run N engine ticks with --start-paused. Body {n: N} (default 1). Any modal dialog / popup / debriefing / sherwood report / pause-all queued before or during the step is dismissed silently; the reply includes `modals_dismissed`."},
             {"method": "POST", "path": "/step-back",          "desc": "Rewind N frames via the rewind buffer. Body {n: N} (default 1). Fails if target frame is older than the oldest retained snapshot."},
         ],
@@ -1201,7 +1201,7 @@ pub fn apply_screenshot_flags(
 }
 
 /// Apply optional crop + resize, then encode as PNG.  Nearest-neighbour
-/// downscale — good enough for a dev-inspection endpoint and avoids
+/// scaling — good enough for a dev-inspection endpoint and avoids
 /// pulling in an image crate.
 fn encode_png(src_w: u32, src_h: u32, rgba: &[u8], req: &ScreenshotRequest) -> Reply {
     use robin_engine::engine::PANNEL_HEIGHT;
@@ -1216,26 +1216,23 @@ fn encode_png(src_w: u32, src_h: u32, rgba: &[u8], req: &ScreenshotRequest) -> R
         (Cow::Borrowed(rgba), src_w, src_h)
     };
 
+    let (target_w, target_h) = screenshot_target_dimensions(used_w, used_h, req)?;
+
     let resized;
-    let pixels: &[u8] = if let (Some(tw), Some(th)) = (req.width, req.height) {
-        if tw == 0 || th == 0 {
-            return Err("screenshot width/height must be > 0".into());
-        }
-        let tw_u = tw as u32;
-        let th_u = th as u32;
-        let mut out = vec![0u8; (tw_u * th_u * 4) as usize];
-        for dy in 0..th_u {
-            let sy = (dy * used_h / th_u).min(used_h - 1);
-            for dx in 0..tw_u {
-                let sx = (dx * used_w / tw_u).min(used_w - 1);
+    let pixels: &[u8] = if (target_w, target_h) != (used_w, used_h) {
+        let mut out = vec![0u8; (target_w * target_h * 4) as usize];
+        for dy in 0..target_h {
+            let sy = (dy * used_h / target_h).min(used_h - 1);
+            for dx in 0..target_w {
+                let sx = (dx * used_w / target_w).min(used_w - 1);
                 let si = ((sy * used_w + sx) * 4) as usize;
-                let di = ((dy * tw_u + dx) * 4) as usize;
+                let di = ((dy * target_w + dx) * 4) as usize;
                 out[di..di + 4].copy_from_slice(&src[si..si + 4]);
             }
         }
         resized = out;
-        used_w = tw_u;
-        used_h = th_u;
+        used_w = target_w;
+        used_h = target_h;
         &resized
     } else {
         &src
@@ -1257,6 +1254,75 @@ fn encode_png(src_w: u32, src_h: u32, rgba: &[u8], req: &ScreenshotRequest) -> R
         content_type: "image/png",
         data: png_bytes,
     })
+}
+
+fn screenshot_target_dimensions(
+    src_w: u32,
+    src_h: u32,
+    req: &ScreenshotRequest,
+) -> Result<(u32, u32), String> {
+    let (Some(max_w), Some(max_h)) = (req.width, req.height) else {
+        return Ok((src_w, src_h));
+    };
+    if max_w == 0 || max_h == 0 {
+        return Err("screenshot width/height must be > 0".into());
+    }
+
+    let max_w = max_w as u32;
+    let max_h = max_h as u32;
+    let height_for_max_w = ((src_h as u64 * max_w as u64) / src_w as u64) as u32;
+    if height_for_max_w <= max_h {
+        Ok((max_w, height_for_max_w.max(1)))
+    } else {
+        let width_for_max_h = ((src_w as u64 * max_h as u64) / src_h as u64) as u32;
+        Ok((width_for_max_h.max(1), max_h))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn screenshot_request(width: Option<u16>, height: Option<u16>) -> ScreenshotRequest {
+        ScreenshotRequest {
+            width,
+            height,
+            ..ScreenshotRequest::default()
+        }
+    }
+
+    #[test]
+    fn screenshot_dimensions_fit_width_limited_bounds() {
+        let req = screenshot_request(Some(1280), Some(720));
+        assert_eq!(
+            screenshot_target_dimensions(1024, 768, &req).unwrap(),
+            (960, 720)
+        );
+    }
+
+    #[test]
+    fn screenshot_dimensions_fit_height_limited_bounds() {
+        let req = screenshot_request(Some(640), Some(480));
+        assert_eq!(
+            screenshot_target_dimensions(1920, 1080, &req).unwrap(),
+            (640, 360)
+        );
+    }
+
+    #[test]
+    fn screenshot_dimensions_leave_size_when_bounds_missing() {
+        let req = screenshot_request(Some(640), None);
+        assert_eq!(
+            screenshot_target_dimensions(1024, 768, &req).unwrap(),
+            (1024, 768)
+        );
+    }
+
+    #[test]
+    fn screenshot_dimensions_reject_zero_bounds() {
+        let req = screenshot_request(Some(0), Some(720));
+        assert!(screenshot_target_dimensions(1024, 768, &req).is_err());
+    }
 }
 
 fn console_response_to_json(resp: robin_engine::engine::ConsoleResponse) -> serde_json::Value {
