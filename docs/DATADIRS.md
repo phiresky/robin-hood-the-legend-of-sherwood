@@ -309,6 +309,23 @@ RuTracker ISO image. Volume ID: `ROBINHOOD`.
 - Locale: 1049 (Russian)
 - Includes `NOTINC/1033/Data/Text/Level.res` and font files under `NOTINC/Data/Interfac/Fonts`
 
+## Windows — Russian retail (InstallShield)
+
+RuTracker MDF/MDS image. Volume ID: `ROBIN`.
+
+    filename: ROBIN.mdf + ROBIN.mds
+    local:    datadirs/installers/Робин гуд. Легенда Шервуда/
+    format:   MDF/MDS disc image (696 MB + 688 bytes)
+    source:   https://rutracker.org/forum/viewtopic.php?t=5595965
+    BTIH:     13A1D8DB01E839E87354CE0ADDD4C751E2FAC62C
+    MD5:      15815b7f7d9271a5add56a16a0b0e5da (ROBIN.mdf)
+    MD5:      aa4373152e465d051eff22da0ed24e68 (ROBIN.mds)
+    SHA256:   f9369c31dc51ecd16c18312f09524477f287994639b4304cc5afefc98de2c175 (ROBIN.mdf)
+    SHA256:   22f453135f71344f9cf92bfcf61da25cb117c3716451502d15e41a1a38cc6ab6 (ROBIN.mds)
+
+- Locale: 1049 (Russian)
+- InstallShield-style installer with `DATA1.CAB`, `DATA1.HDR`, `SETUP.EXE`, and DirectX redistributables
+
 ## ~~Windows — Czech magazine coverdisc (Score #152, October 2006)~~ NOT THIS GAME
 
 Despite the archive.org title listing "Robin Hood", this disc contains
