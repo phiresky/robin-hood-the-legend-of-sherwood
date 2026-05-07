@@ -400,6 +400,14 @@ and English manuals; the v1.1 image contains a ready-to-run `Robin Hood.app` bun
     MD5:      501af9a2b8e84a5513cfd32cf976f142
     SHA256:   065c4f6f8431b803c3177ef0f92ba4091d852826c9f924ebf336a835bbcbaa61
 
+    filename: Robin Hood Legend of Sherwood.dmg
+    local:    datadirs/installers/Robin Hood Legend of Sherwood.dmg
+    format:   Apple DMG / HFS+ disk image (550 MB compressed, 1000 MB unpacked)
+    source:   https://rutracker.org/forum/viewtopic.php?t=140907
+    BTIH:     545425FCCE54E5DC5F7BC16F80808784A3CEE066
+    MD5:      6f166c4884d25ffa9b4afc9f5ea7a0da
+    SHA256:   9ff90c4140778bb14f04527bc75df702cf6689dba0706885b9682fcaec576894
+
 - Volume root: `Robin Hood CD`
 - Installer package: `Install Robin Hood.pkg`
 - Package payload: `Install Robin Hood.pkg/Contents/Archive.pax.gz` (524 MB)
@@ -407,6 +415,9 @@ and English manuals; the v1.1 image contains a ready-to-run `Robin Hood.app` bun
 - v1.1 volume root: `Robin Hood 1.1`
 - v1.1 app bundle: `Robin Hood.app`
 - v1.1 game data path: `Robin Hood.app/Contents/Resources/Data`
+- RuTracker volume root: `Robin Hood`
+- RuTracker app bundle: `Robin Hood/RH.app`
+- RuTracker game data paths: `Robin Hood/Data` and `Robin Hood/2047/Data`
 
 ## ZETA OS — BeOS/ZETA port
 
