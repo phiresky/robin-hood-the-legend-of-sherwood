@@ -632,7 +632,6 @@ impl EngineInner {
                                 Some(owner),
                             );
                             elem.priority = crate::sequence::SequencePriority::Wait;
-                            elem.script_driven = true;
                             self.sequence_manager.launch_element(elem);
                         } else {
                             tracing::warn!("LaunchWait: invalid actor handle {actor}");

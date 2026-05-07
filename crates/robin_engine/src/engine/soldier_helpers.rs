@@ -928,7 +928,6 @@ impl EngineInner {
                 enter.set_property(Field::Opponent, FieldValue::Element(enemy_id));
                 // No jumpline for this swordfight (door-battle is sector-local).
                 enter.set_property(Field::JumplineDestination, FieldValue::Integer(0));
-                enter.set_property(Field::SwordfightPrepared, FieldValue::Bool(false));
                 tail_elements.push(enter);
             }
         }

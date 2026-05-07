@@ -1000,6 +1000,20 @@ impl EngineInner {
             if !pc.element.active || pc.pc.life_points <= 0 || pc.human.unconscious {
                 continue;
             }
+            // The danger point's layer is what the player picked when
+            // raising the shield, plumbed through
+            // `Field::ShieldDangerPointLayer` on the queued
+            // RaiseShield element and stamped onto
+            // `PcData::shield_danger_point_layer` by
+            // `dispatch_raise_shield`.  When the picked layer wasn't
+            // supplied (AI-issued raise via the Interaction-data
+            // branch), the field stays 0 and we fall back to the PC's
+            // own layer.
+            let layer = if pc.pc.shield_danger_point_layer != 0 {
+                pc.pc.shield_danger_point_layer
+            } else {
+                pc.element.layer()
+            };
             states.push(DangerState {
                 id: pc_id,
                 position: Point3D {
@@ -1007,7 +1021,7 @@ impl EngineInner {
                     y: pc.pc.shield_danger_point.y,
                     z: pc.pc.shield_danger_point.z,
                 },
-                layer: pc.element.layer(),
+                layer,
                 is_protecting: pc.pc.shield_protected.is_some(),
             });
         }

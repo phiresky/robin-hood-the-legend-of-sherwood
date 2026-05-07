@@ -696,6 +696,7 @@ fn resolve_action_left_click(
                     actor: pc_id,
                     protected_pc,
                     danger_point: map_pt,
+                    danger_point_layer: selected_layer,
                 },
                 commit_tail(is_recording),
             ];

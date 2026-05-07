@@ -1203,6 +1203,10 @@ pub struct PcData {
 
     // Shield
     pub shield_danger_point: Point3D,
+    /// Map layer the player picked when raising the shield, used as the
+    /// layer for the danger-point titbit.  Differs from the PC's own
+    /// layer when the danger is across a chasm / off a balcony.
+    pub shield_danger_point_layer: u16,
     pub shield_protected: Option<EntityId>,
     pub shield_protector: Option<EntityId>,
 
@@ -1306,6 +1310,7 @@ impl Default for PcData {
             carried: None,
             carried_posture: Posture::Undefined,
             shield_danger_point: Point3D::default(),
+            shield_danger_point_layer: 0,
             shield_protected: None,
             shield_protector: None,
             guard: None,

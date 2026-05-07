@@ -450,7 +450,6 @@ impl RecordingSession {
     /// walk the new tail of `sequence.elements` after this call.
     pub fn add_element(&mut self, mut element: SequenceElement) {
         element.command_level = self.command_level;
-        element.script_driven = true;
         self.sequence.append_element(element);
         self.has_elements_at_current_level = true;
     }
@@ -463,7 +462,6 @@ impl RecordingSession {
         priority: SequencePriority,
     ) {
         element.command_level = self.command_level;
-        element.script_driven = true;
         element.priority = priority;
         self.sequence.append_element(element);
         self.has_elements_at_current_level = true;
@@ -528,25 +526,20 @@ impl RecordingSession {
 )]
 pub enum Field {
     Direction,
-    Event,
     Timer,
     Message,
     MessageArgument,
     MessageExtendedArgument,
-    BowTargetGuy,
-    BowTargetPoint,
     CameraPoint,
     CameraZoomLevel,
     CameraSpeed,
     ActionId,
     ActionAvailable,
     CharacterAvailable,
-    ConcussionLevel,
     SpeakId,
     SpeakFlags,
     SpeakVariant,
     DialogId,
-    DialogSource,
     PopupTextId,
     AnimationId,
     MapDisplay,
@@ -556,13 +549,10 @@ pub enum Field {
     ShieldDangerPoint,
     ShieldDangerPointLayer,
     ShieldProtected,
-    RollPoint,
     PurseTarget,
     NetTarget,
     WaspNestTarget,
     Opponent,
-    SwordfightPrepared,
-    Gate,
     Door,
     OldAnimation,
     NewAnimation,
@@ -804,9 +794,6 @@ pub struct SequenceElement {
     /// Interruption priority.
     pub priority: SequencePriority,
 
-    /// Whether this element was created by a script.
-    pub script_driven: bool,
-
     /// Posture the actor should have after transition orders complete.
     pub posture_after_transition: Posture,
 
@@ -861,7 +848,6 @@ impl SequenceElement {
             owner,
             state: SequenceState::Todo,
             priority: SequencePriority::NotYetSet,
-            script_driven: false,
             posture_after_transition: Posture::default(),
             action_state_after_transition: ActionState::default(),
             num_transition_orders: 0,
