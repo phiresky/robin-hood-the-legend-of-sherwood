@@ -37,6 +37,11 @@ pub struct ViewParameters {
     /// vertices with `screen_y = y - plane.ComputeZ(x, y)`.
     #[serde(default)]
     pub projection_plane: Option<crate::position_interface::PlaneZCoeffs>,
+    /// Current projection-area obstacle used by the display path. The
+    /// original `RHShadowPolygon` renders one slice per projection area
+    /// and clips the slice to that area's screen polygon.
+    #[serde(skip)]
+    pub projection_obstacle: Option<crate::position_interface::ObstacleHandle>,
 }
 
 impl Default for ViewParameters {
@@ -49,6 +54,7 @@ impl Default for ViewParameters {
             lean_out: false,
             viewer_z: 0.0,
             projection_plane: None,
+            projection_obstacle: None,
         }
     }
 }

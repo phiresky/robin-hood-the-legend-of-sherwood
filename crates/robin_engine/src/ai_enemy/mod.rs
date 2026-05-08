@@ -1654,11 +1654,15 @@ impl EnemyAi {
             );
             return false;
         }
-        // Opaque sight obstacles between viewer and target hide the
-        // target.
-        let viewer_pt = crate::geo2d::pt(ctx.position.x, ctx.position.y);
-        let target_pt = crate::geo2d::pt(view.position.x, view.position.y);
-        let los_clear = ctx.los_clear(viewer_pt, target_pt);
+        // C++ RHElementActorNPC::IsDetecting360Degrees(actor) checks the
+        // upright eye point against the target detection point through the
+        // 3D opaque sight-obstacle graph, not the 2D spatial LOS helper.
+        let los_clear = crate::sight_obstacle::is_reachable_3d(
+            ctx.obstacle_list(),
+            [ctx.position.x, ctx.position.y, viewer_eye_z],
+            [view.position.x, view.position.y, target_eye_z],
+            crate::sight_obstacle::SIGHTOBSTACLE_OPAQUE,
+        );
         tracing::trace!(
             target,
             sq_distance,

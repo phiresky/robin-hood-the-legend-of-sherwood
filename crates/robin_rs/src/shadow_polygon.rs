@@ -246,6 +246,83 @@ fn linestring_to_points(ls: &geo::LineString<f32>) -> Vec<Point2D> {
         .collect()
 }
 
+fn points_to_polygon(points: &[Point2D]) -> Option<geo::Polygon<f32>> {
+    if points.len() < 3 {
+        return None;
+    }
+    let mut coords: Vec<geo::Coord<f32>> = points
+        .iter()
+        .map(|p| geo::Coord { x: p.x, y: p.y })
+        .collect();
+    if let (Some(first), Some(last)) = (coords.first().copied(), coords.last().copied())
+        && first != last
+    {
+        coords.push(first);
+    }
+    Some(geo::Polygon::new(geo::LineString::new(coords), vec![]))
+}
+
+/// Project computed visibility polygons onto a projection-area plane and
+/// clip them to that surface's screen-space polygon.
+///
+/// This mirrors the original `RHShadowPolygon::GetProjectionAreas` /
+/// `SetScreenCoords` display path for non-ground slices: points are
+/// converted to `(x, y - plane.ComputeZ(x, y))`. C++ then adds the
+/// projection area's sector plane as slice iterators in `PrepareSlice`;
+/// clipping to `polygon_screen` gives the same surface outline to the GPU
+/// polygon path.
+pub fn project_and_clip_to_projection_area(
+    visible_polygons: &[Vec<Point2D>],
+    viewer: Point2D,
+    projection_plane: robin_engine::position_interface::PlaneZCoeffs,
+    projection_area: &SightObstacle,
+    occluding_projection_areas: &[&SightObstacle],
+) -> (Vec<Vec<Point2D>>, Point2D) {
+    let project = |p: Point2D| Point2D {
+        x: p.x,
+        y: p.y - projection_plane.compute_z(p.x, p.y),
+    };
+
+    if projection_area.polygon_screen.exterior().0.len() < 3 {
+        tracing::warn!(
+            "projection-area obstacle {} has no screen polygon for view-cone clipping",
+            projection_area.id
+        );
+        return (Vec::new(), project(viewer));
+    }
+
+    let mut rings = Vec::new();
+    let blockers: Vec<geo::Polygon<f32>> = occluding_projection_areas
+        .iter()
+        .filter(|obs| obs.polygon_screen.exterior().0.len() >= 3)
+        .map(|obs| obs.polygon_screen.clone())
+        .collect();
+    let blocker_union = (!blockers.is_empty()).then(|| unary_union(&blockers));
+    for poly in visible_polygons {
+        let projected: Vec<Point2D> = poly.iter().copied().map(project).collect();
+        let Some(projected_poly) = points_to_polygon(&projected) else {
+            continue;
+        };
+        let clipped = projected_poly.intersection(&projection_area.polygon_screen);
+        let clipped = if let Some(blocker_union) = &blocker_union {
+            clipped.difference(blocker_union)
+        } else {
+            clipped
+        };
+        for clipped_poly in clipped.0.iter() {
+            if clipped_poly.unsigned_area() < 0.1 {
+                continue;
+            }
+            rings.push(linestring_to_points(clipped_poly.exterior()));
+            for hole in clipped_poly.interiors() {
+                rings.push(linestring_to_points(hole));
+            }
+        }
+    }
+
+    (rings, project(viewer))
+}
+
 /// Returns `true` if the obstacle bbox *might* overlap the view cone —
 /// i.e. it isn't entirely on the outside of one of the cone's flanking
 /// rays.
@@ -905,6 +982,7 @@ mod tests {
             lean_out: false,
             viewer_z: 0.0,
             projection_plane: None,
+            projection_obstacle: None,
         };
         let cone = compute_view_cone(Point2D { x: 100.0, y: 100.0 }, &params);
 
@@ -935,6 +1013,7 @@ mod tests {
             lean_out: false,
             viewer_z: 0.0,
             projection_plane: None,
+            projection_obstacle: None,
         };
         let params_left = ViewParameters {
             direction: [-1.0, 0.0],
@@ -985,6 +1064,7 @@ mod tests {
             lean_out: false,
             viewer_z: 0.0,
             projection_plane: None,
+            projection_obstacle: None,
         };
 
         // Place a small obstacle directly ahead
@@ -1093,6 +1173,7 @@ mod tests {
             lean_out: false,
             viewer_z: 0.0,
             projection_plane: None,
+            projection_obstacle: None,
         };
         let viewer = Point2D { x: 0.0, y: 5.0 };
         let result = compute_visibility_polygon(viewer, &params, &[&obs]);
@@ -1122,6 +1203,7 @@ mod tests {
             lean_out: false,
             viewer_z: 0.0,
             projection_plane: None,
+            projection_obstacle: None,
         };
         let viewer = Point2D { x: 0.0, y: 5.0 };
         let result = compute_visibility_polygon(viewer, &params, &[&obs]);
@@ -1149,6 +1231,7 @@ mod tests {
             lean_out: false,
             viewer_z: 0.0,
             projection_plane: None,
+            projection_obstacle: None,
         };
         let viewer = Point2D { x: 0.0, y: 5.0 };
         let ccw_result = compute_visibility_polygon(viewer, &params, &[&ccw]);
@@ -1374,6 +1457,7 @@ mod tests {
             lean_out: false,
             viewer_z: 0.0,
             projection_plane: None,
+            projection_obstacle: None,
         };
 
         let mut sky_slab = SightObstacle::new_default(0);
@@ -1503,6 +1587,7 @@ mod tests {
             lean_out: false,
             viewer_z: 0.0,
             projection_plane: None,
+            projection_obstacle: None,
         };
 
         // Obstacle behind the viewer — fully outside the cone.

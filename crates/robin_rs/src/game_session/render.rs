@@ -11,7 +11,7 @@ use crate::game_render::{
     render_debug_animation_lines, render_debug_doors, render_debug_motion_graph,
     render_debug_surfaces_fill, render_debug_surfaces_outline, render_debug_whatsup_overlay,
     render_door_overlays, render_entities_gpu, render_ground_marks, render_listen_ping,
-    render_minimap, render_noise_display, render_ransom_amulet_overlay,
+    render_minimap, render_noise_display, render_patch_fx_gpu, render_ransom_amulet_overlay,
     render_selection_outlines_gpu, render_shadow_polygon_sphere_debug, render_trajectory_preview,
     render_view_cone_overlay,
 };
@@ -665,11 +665,34 @@ pub(super) fn render_frame(
     // this tint.
     apply_ambiance_overlay(engine, renderer);
 
+    // C++ parity: RHengine::PerformRefreshAllElements refreshes background
+    // animations/patch FX before ShowDetectionPolygon.  Keep the cone below
+    // sprites, but above those background patches.
+    render_bg_animations_gpu(engine, host, assets, renderer);
+    render_patch_fx_gpu(engine, host, assets, renderer);
+
+    // Darken the map inside the selected view element's vision cone (if
+    // any). C++ draws this immediately after background animations and
+    // before door overlays, selection marks, ground marks, and elements.
+    render_view_cone_overlay(
+        host,
+        engine,
+        assets,
+        host.selected_view_element,
+        dev,
+        renderer,
+    );
+    render_shadow_polygon_sphere_debug(host, engine, host.selected_view_element, dev, renderer);
+
+    // ── GPU phase: door / jump zone alpha overlays ──
+    // Includes the shift-held `DisplayAllDoorsAndJumpZones` path and
+    // the patch-FX overlay.
+    render_door_overlays(host, engine, assets, renderer, shift_held);
+
     // Draw rotating selection circles BELOW the characters' feet for
-    // every selected PC.  Drawn before the ground marks and entities,
-    // so the circles appear behind ground marks and behind the
-    // sprites.  Skipped when the PC is inside a building or in
-    // POSTURE_FLYING.
+    // every selected PC.  C++ draws selection marks after
+    // ShowDetectionPolygon and before ground marks/entities.  Skipped when
+    // the PC is inside a building or in POSTURE_FLYING.
     for &pc_id in engine.seat_selection(local_seat) {
         let entity = match engine.get_entity(pc_id) {
             Some(e) => e,
@@ -722,28 +745,6 @@ pub(super) fn render_frame(
     // selection marks but BEFORE entity rendering, so ground marks
     // render on top of selection circles but behind characters.
     render_ground_marks(host, engine, assets, renderer);
-
-    // Darken the map outside the selected view element's vision cone
-    // (if any) as a blended GPU overlay.
-    render_view_cone_overlay(
-        host,
-        engine,
-        assets,
-        host.selected_view_element,
-        dev,
-        renderer,
-    );
-    render_shadow_polygon_sphere_debug(host, engine, host.selected_view_element, dev, renderer);
-
-    // ── GPU phase: door / jump zone alpha overlays ──
-    // Includes the shift-held `DisplayAllDoorsAndJumpZones` path and
-    // the patch-FX overlay.
-    render_door_overlays(host, engine, assets, renderer, shift_held);
-
-    // ── GPU phase: background animations (elevation-0 FX) ─────
-    // Background animations render BEFORE the main entity loop and
-    // are excluded from display_order by sort_for_display.
-    render_bg_animations_gpu(engine, host, assets, renderer);
 
     // ── GPU phase: entity sprites (cached as ARGB textures) ──
     // Display-order sort is hoisted to the main loop so it runs

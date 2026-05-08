@@ -441,6 +441,7 @@ pub fn compute_object_visibility(q: &ObjectVisibilityQuery<'_>) -> f32 {
         q.sight_obstacles,
         q.fast_grid,
         q.target,
+        None,
         dx,
         sy,
         sqr_distance,
@@ -499,6 +500,7 @@ fn is_detecting(
         q.sight_obstacles,
         q.fast_grid,
         q.target,
+        Some((q.viewer_eye_z, q.target_eye_z)),
         view_x,
         view_y,
         sqr_distance,
@@ -521,6 +523,7 @@ fn is_detecting_cone_and_los(
     sight_obstacles: ObstacleList<'_>,
     fast_grid: &crate::fast_find_grid::FastFindGrid,
     target: Point2D,
+    los_z: Option<(f32, f32)>,
     view_x: f32,
     view_y: f32,
     sqr_distance: f32,
@@ -550,7 +553,7 @@ fn is_detecting_cone_and_los(
         if det_left < 0.0 || det_right > 0.0 {
             return false;
         }
-        los_clear_spatial(viewer, target, layer, sight_obstacles, fast_grid)
+        los_clear_for_detection(viewer, target, layer, sight_obstacles, fast_grid, los_z)
     } else {
         // ── Close-range halfcircle ───────────────────────────────
         //
@@ -566,11 +569,30 @@ fn is_detecting_cone_and_los(
         let view_sector = crate::position_interface::vector_to_sector_0_to_15_iso(view_x, view_y);
         let diff = (view_sector - viewer_direction).rem_euclid(16);
         if matches!(diff, 0 | 1 | 2 | 3 | 4 | 12 | 13 | 14 | 15) {
-            los_clear_spatial(viewer, target, layer, sight_obstacles, fast_grid)
+            los_clear_for_detection(viewer, target, layer, sight_obstacles, fast_grid, los_z)
         } else {
             false
         }
     }
+}
+
+fn los_clear_for_detection(
+    viewer: Point2D,
+    target: Point2D,
+    layer: u16,
+    sight_obstacles: ObstacleList<'_>,
+    fast_grid: &crate::fast_find_grid::FastFindGrid,
+    los_z: Option<(f32, f32)>,
+) -> bool {
+    if let Some((viewer_z, target_z)) = los_z {
+        return crate::sight_obstacle::is_reachable_3d(
+            sight_obstacles,
+            [viewer.x, viewer.y, viewer_z],
+            [target.x, target.y, target_z],
+            crate::sight_obstacle::SIGHTOBSTACLE_OPAQUE,
+        );
+    }
+    los_clear_spatial(viewer, target, layer, sight_obstacles, fast_grid)
 }
 
 /// Merry-men forest-level 180° view: vision is a flat 180° forward
@@ -947,6 +969,7 @@ pub fn is_detecting_target(
         obstacles,
         fast_grid,
         target,
+        None,
         dx,
         sy,
         sqr_distance,
@@ -1612,7 +1635,7 @@ mod tests {
     }
 
     #[test]
-    fn opaque_obstacle_blocks_los() {
+    fn tall_opaque_obstacle_blocks_los() {
         use crate::sight_obstacle::ObstaclePoint;
         // Build a wall blocking the line from (0,0) to (200,0): a
         // box around (100, -10)..(110, 10).  Vertices are CCW.
@@ -1621,28 +1644,34 @@ mod tests {
             ObstaclePoint {
                 x: 100.0,
                 y: -10.0,
-                z_top: 5.0,
+                z_top: 80.0,
                 z_bottom: 0.0,
             },
             ObstaclePoint {
                 x: 110.0,
                 y: -10.0,
-                z_top: 5.0,
+                z_top: 80.0,
                 z_bottom: 0.0,
             },
             ObstaclePoint {
                 x: 110.0,
                 y: 10.0,
-                z_top: 5.0,
+                z_top: 80.0,
                 z_bottom: 0.0,
             },
             ObstaclePoint {
                 x: 100.0,
                 y: 10.0,
-                z_top: 5.0,
+                z_top: 80.0,
                 z_bottom: 0.0,
             },
         ];
+        wall.top_plane_points = [
+            [100.0, -10.0, 80.0],
+            [110.0, -10.0, 80.0],
+            [100.0, 10.0, 80.0],
+        ];
+        wall.bottom_plane_points = [[100.0, -10.0, 0.0], [110.0, -10.0, 0.0], [100.0, 10.0, 0.0]];
         wall.rebuild_geometry();
         let obstacles = vec![wall];
 

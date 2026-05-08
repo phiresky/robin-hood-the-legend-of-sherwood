@@ -3500,8 +3500,11 @@ impl AiContext {
         if self.in_building {
             return false;
         }
-        let viewer_eye_z =
-            self.elevation + crate::stealth::eye_z_for_posture(self.posture, self.self_is_rider);
+        let viewer_eye_z = self.elevation
+            + crate::stealth::eye_z_for_posture(
+                crate::element::Posture::Upright,
+                self.self_is_rider,
+            );
         let dx = pt.x - self.position.x;
         let dy = (pt.y - self.position.y) * crate::position_interface::INVERSE_ASPECT_RATIO;
         let dz = pt.z - viewer_eye_z;
@@ -3509,9 +3512,12 @@ impl AiContext {
         if sq_distance > self.sq_standard_view_radius {
             return false;
         }
-        let viewer_pt = crate::geo2d::pt(self.position.x, self.position.y);
-        let target_pt = crate::geo2d::pt(pt.x, pt.y);
-        self.los_clear(viewer_pt, target_pt)
+        crate::sight_obstacle::is_reachable_3d(
+            self.obstacle_list(),
+            [self.position.x, self.position.y, viewer_eye_z],
+            [pt.x, pt.y, pt.z],
+            crate::sight_obstacle::SIGHTOBSTACLE_OPAQUE,
+        )
     }
 }
 

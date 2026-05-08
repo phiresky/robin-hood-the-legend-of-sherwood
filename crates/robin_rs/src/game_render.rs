@@ -448,14 +448,13 @@ pub(crate) fn render_view_cone_overlay(
     // pre-filter so the callee doesn't need to consult the parallel
     // active flag (which lives on the engine, not the obstacle itself).
     let obstacles_view = engine.sight_obstacles(assets);
-    let obstacles: Vec<&crate::sight_obstacle::SightObstacle> = obstacles_view
-        .iter_indexed()
-        .filter(|(idx, _)| obstacles_view.is_active(*idx as usize))
-        .map(|(_, o)| o)
-        .collect();
-
-    let vis_polys = crate::shadow_polygon::compute_visibility_polygon(viewer, &params, &obstacles);
-    if !vis_polys.iter().any(|p| p.len() >= 3) {
+    let Some(render_slices) = view_cone_polys_for_render(viewer, &params, &obstacles_view) else {
+        return;
+    };
+    if !render_slices
+        .iter()
+        .any(|slice| slice.polys.iter().any(|p| p.len() >= 3))
+    {
         return;
     }
 
@@ -504,18 +503,183 @@ pub(crate) fn render_view_cone_overlay(
         .map(|(_, m)| m)
         .collect();
 
-    crate::shadow_polygon::render_darken_inside(
-        renderer,
-        &view_rect,
-        host.viewport.zoom_factor,
-        &vis_polys,
-        tint,
-        alpha,
-        viewer,
-        params.radius,
-        params.projection_plane,
-        &cone_masks,
-    );
+    for slice in render_slices {
+        crate::shadow_polygon::render_darken_inside(
+            renderer,
+            &view_rect,
+            host.viewport.zoom_factor,
+            &slice.polys,
+            tint,
+            alpha,
+            slice.viewer,
+            slice.radius,
+            slice.projection_plane,
+            &cone_masks,
+        );
+    }
+}
+
+struct ViewConeRenderSlice {
+    polys: Vec<Vec<crate::geo2d::Point2D>>,
+    viewer: crate::geo2d::Point2D,
+    radius: f32,
+    projection_plane: Option<robin_engine::position_interface::PlaneZCoeffs>,
+}
+
+fn view_cone_polys_for_render(
+    viewer: crate::geo2d::Point2D,
+    params: &crate::shadow_polygon::ViewParameters,
+    obstacles_view: &robin_engine::sight_obstacle::ObstacleList<'_>,
+) -> Option<Vec<ViewConeRenderSlice>> {
+    if let Some(obstacle_handle) = params.projection_obstacle {
+        let idx = usize::from(obstacle_handle);
+        let Some(current_area) = obstacles_view.get(idx) else {
+            tracing::warn!(
+                "view-cone projection obstacle {} is missing from the sight-obstacle list",
+                obstacle_handle
+            );
+            return None;
+        };
+        if !current_area.is_projection_area() {
+            tracing::warn!(
+                "view-cone projection obstacle {} is not a projection area",
+                obstacle_handle
+            );
+            return None;
+        }
+    }
+
+    let active_obstacles: Vec<(usize, &crate::sight_obstacle::SightObstacle)> = obstacles_view
+        .iter_indexed()
+        .filter_map(|(idx, o)| {
+            let idx = idx as usize;
+            obstacles_view.is_active(idx).then_some((idx, o))
+        })
+        .collect();
+
+    let all_obstacles: Vec<&crate::sight_obstacle::SightObstacle> =
+        active_obstacles.iter().map(|(_, o)| *o).collect();
+    let mut slices = Vec::new();
+    if let Some(radius) = shadow_polygon_slice_radius(params, None, viewer) {
+        let mut slice_params = params.clone();
+        slice_params.radius = radius;
+        let ground_polys = crate::shadow_polygon::compute_visibility_polygon(
+            viewer,
+            &slice_params,
+            &all_obstacles,
+        );
+        slices.push(ViewConeRenderSlice {
+            polys: ground_polys,
+            viewer,
+            radius,
+            projection_plane: None,
+        });
+    }
+
+    let cone_bbox = {
+        let cone = crate::shadow_polygon::compute_view_cone(viewer, params);
+        let mut bbox = crate::geo2d::BBox2D::new();
+        for p in cone {
+            bbox.expand_point(p);
+        }
+        bbox
+    };
+
+    for (projection_idx, projection_area) in active_obstacles.iter().copied().filter(|(_, o)| {
+        o.is_projection_area()
+            && o.is_showing_shadow_polygon()
+            && o.box_ground.intersects_bbox(&cone_bbox)
+    }) {
+        let obstacles: Vec<&crate::sight_obstacle::SightObstacle> = active_obstacles
+            .iter()
+            .filter(|(idx, _)| *idx != projection_idx)
+            .map(|(_, o)| *o)
+            .collect();
+        let projection_plane = robin_engine::position_interface::PlaneZCoeffs::from_plane_points(
+            &projection_area.top_plane_points,
+        );
+        let Some(radius) = shadow_polygon_slice_radius(params, Some(projection_plane), viewer)
+        else {
+            continue;
+        };
+        let mut slice_params = params.clone();
+        slice_params.radius = radius;
+        let occluding_projection_areas: Vec<&crate::sight_obstacle::SightObstacle> =
+            active_obstacles
+                .iter()
+                .filter_map(|(idx, o)| {
+                    (*idx != projection_idx
+                        && o.is_projection_area()
+                        && o.layer >= projection_area.layer
+                        && o.box_screen.intersects_bbox(&projection_area.box_screen))
+                    .then_some(*o)
+                })
+                .collect();
+        let (polys, viewer) = crate::shadow_polygon::project_and_clip_to_projection_area(
+            &crate::shadow_polygon::compute_visibility_polygon(viewer, &slice_params, &obstacles),
+            viewer,
+            projection_plane,
+            projection_area,
+            &occluding_projection_areas,
+        );
+        if polys.iter().any(|p| p.len() >= 3) {
+            slices.push(ViewConeRenderSlice {
+                polys,
+                viewer,
+                radius,
+                // `project_and_clip_to_projection_area` returns coordinates
+                // in the same projected map space C++ blits the slice from.
+                // Passing the plane again here would subtract the elevation a
+                // second time.
+                projection_plane: None,
+            });
+        }
+    }
+
+    if slices.iter().any(|s| s.polys.iter().any(|p| p.len() >= 3)) {
+        Some(slices)
+    } else {
+        None
+    }
+}
+
+fn shadow_polygon_slice_radius(
+    params: &crate::shadow_polygon::ViewParameters,
+    projection_plane: Option<robin_engine::position_interface::PlaneZCoeffs>,
+    viewer: crate::geo2d::Point2D,
+) -> Option<f32> {
+    const FACTOR_ELLIPSE: f32 = 0.35;
+    const INV_SQUARE_FACTOR_ELLIPSE: f32 = 8.163_265;
+    const FACTOR_CONE_LEAN_OUT: f32 = 0.8;
+
+    let distance_to_plane = projection_plane
+        .map(|plane| {
+            let vertical = params.viewer_z - plane.compute_z(viewer.x, viewer.y);
+            let normal_len = (plane.az * plane.az + plane.bz * plane.bz + 1.0).sqrt();
+            vertical / normal_len
+        })
+        .unwrap_or(params.viewer_z);
+
+    let radius = params.radius;
+    if params.lean_out {
+        if projection_plane.is_none() {
+            if distance_to_plane > radius {
+                return None;
+            }
+            return Some(FACTOR_CONE_LEAN_OUT * distance_to_plane);
+        }
+        if distance_to_plane >= radius || distance_to_plane <= 0.0 {
+            return None;
+        }
+        return Some(FACTOR_CONE_LEAN_OUT * distance_to_plane);
+    }
+
+    if distance_to_plane.abs() >= FACTOR_ELLIPSE * radius {
+        return None;
+    }
+    let radius_sq =
+        radius * radius - INV_SQUARE_FACTOR_ELLIPSE * distance_to_plane * distance_to_plane;
+    (radius_sq > 0.0).then(|| radius_sq.sqrt())
 }
 
 /// Render the developer shadow-polygon sphere debug overlay when the
@@ -572,32 +736,7 @@ fn render_all_view_cones(
         ),
     );
 
-    // Cull NPCs whose cone bounding box (viewer ± radius) can't reach the
-    // view rect. The boolean-ops pipeline in compute_visibility_polygon
-    // dominates debug CPU, so skipping off-screen cones is pure win.
-    let visible_params: Vec<_> = all_params
-        .into_iter()
-        .filter(|(viewer, params, _)| {
-            let r = params.radius;
-            let cone_bbox = BBox::new(
-                geo2d::pt(viewer.x - r, viewer.y - r),
-                geo2d::pt(viewer.x + r, viewer.y + r),
-            );
-            view_rect.is_intersecting(&cone_bbox)
-        })
-        .collect();
-    if visible_params.is_empty() {
-        return;
-    }
-
-    // Share the single-NPC path's obstacle filter so each NPC's cone
-    // clips correctly against opaque sight obstacles.
     let obstacles_view = engine.sight_obstacles(assets);
-    let obstacles: Vec<&crate::sight_obstacle::SightObstacle> = obstacles_view
-        .iter_indexed()
-        .filter(|(idx, _)| obstacles_view.is_active(*idx as usize))
-        .map(|(_, o)| o)
-        .collect();
 
     // Each NPC's visibility polygon may fragment into multiple rings
     // after obstacle subtraction. Each ring becomes its own TintedCone
@@ -608,19 +747,62 @@ fn render_all_view_cones(
         engine.weather().ambiance == Ambiance::Night || engine.weather().ambiance == Ambiance::Fog,
     );
 
+    let visible_params: Vec<_> = all_params
+        .into_iter()
+        .filter(|(viewer, params, _)| {
+            let r = params.radius;
+            let z = params.viewer_z.max(0.0);
+            let cone_bbox = BBox::new(
+                geo2d::pt(viewer.x - r, viewer.y - z - r),
+                geo2d::pt(viewer.x + r, viewer.y + r),
+            );
+            view_rect.is_intersecting(&cone_bbox)
+        })
+        .collect();
+    if visible_params.is_empty() {
+        return;
+    }
+
     let cones: Vec<crate::shadow_polygon::TintedCone> = visible_params
         .into_iter()
         .flat_map(|(viewer, params, tint)| {
-            let polys =
-                crate::shadow_polygon::compute_visibility_polygon(viewer, &params, &obstacles);
+            let Some(slices) = view_cone_polys_for_render(viewer, &params, &obstacles_view) else {
+                return Vec::new();
+            };
             let color = tint.unwrap_or((0, 0, 0));
             let alpha = params.alpha.min(weather_alpha);
-            let radius = params.radius;
-            let projection_plane = params.projection_plane;
-            polys
+            let view_rect_for_filter = view_rect;
+            slices
                 .into_iter()
-                .filter(|p| p.len() >= 3)
-                .map(move |p| (p, color, viewer, radius, alpha, projection_plane))
+                .flat_map(move |slice| {
+                    let view_rect_for_filter = view_rect_for_filter;
+                    let radius = slice.radius;
+                    slice
+                        .polys
+                        .into_iter()
+                        .filter(|p| p.len() >= 3)
+                        .filter(move |p| {
+                            let mut bbox = BBox::new(p[0], p[0]);
+                            for &point in &p[1..] {
+                                bbox.min.x = bbox.min.x.min(point.x);
+                                bbox.min.y = bbox.min.y.min(point.y);
+                                bbox.max.x = bbox.max.x.max(point.x);
+                                bbox.max.y = bbox.max.y.max(point.y);
+                            }
+                            view_rect_for_filter.is_intersecting(&bbox)
+                        })
+                        .map(move |p| {
+                            (
+                                p,
+                                color,
+                                slice.viewer,
+                                radius,
+                                alpha,
+                                slice.projection_plane,
+                            )
+                        })
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 
@@ -781,6 +963,9 @@ pub(crate) fn render_entities_gpu(
             None => continue,
         };
         if !entity.is_active() || entity.element_data().hidden_in_building {
+            continue;
+        }
+        if entity.fx_data().is_some_and(|fx| fx.patch_index.is_some()) {
             continue;
         }
         // FX entities early-return when `is_to_be_displayed` is false;
@@ -1762,7 +1947,35 @@ pub(crate) fn render_bg_animations_gpu(
     if engine.bg_animation_ids().is_empty() {
         return;
     }
+    render_fx_entities_gpu(
+        engine.bg_animation_ids().iter().copied(),
+        engine,
+        host,
+        renderer,
+    );
+}
 
+pub(crate) fn render_patch_fx_gpu(
+    engine: &Engine,
+    host: &Host,
+    _assets: &LevelAssets,
+    renderer: &mut Renderer,
+) {
+    let patch_ids: Vec<_> = engine
+        .entities_iter_with_id()
+        .filter(|(_, entity)| entity.fx_data().is_some_and(|fx| fx.patch_index.is_some()))
+        .map(|(id, _)| id)
+        .collect();
+    if patch_ids.is_empty() {
+        return;
+    }
+    render_fx_entities_gpu(patch_ids, engine, host, renderer);
+}
+
+fn render_fx_entities_gpu<I>(entity_ids: I, engine: &Engine, host: &Host, renderer: &mut Renderer)
+where
+    I: IntoIterator<Item = robin_engine::element::EntityId>,
+{
     let view = host.viewport.view_position;
     let zoom = host.viewport.zoom_factor;
     let screen_w = host.viewport.screen_size.x as i32;
@@ -1781,7 +1994,7 @@ pub(crate) fn render_bg_animations_gpu(
         .map(|p| p.graphic_config.display_anim)
         .unwrap_or(true);
 
-    for &entity_id in engine.bg_animation_ids() {
+    for entity_id in entity_ids {
         let entity = match engine.get_entity(entity_id) {
             Some(e) => e,
             None => continue,
