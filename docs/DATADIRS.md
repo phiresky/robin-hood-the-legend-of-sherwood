@@ -262,6 +262,23 @@ Developer: Spellbound Entertainment AG. Flip-top big box, ¥7,980. Version 1.1.
 - Locale: 1041 (Japanese)
 - A v1.15 update patch is also available at the same archive.org item (Update_1.15.7z, 5.4 MB)
 
+## Windows — USA retail (The Pirate Bay)
+
+MDF/MDS image. The MDF matches the Redump USA disc image below by size and MD5.
+
+    filename: Robin_Hood.mdf + Robin_Hood.mds
+    local:    datadirs/installers/Robin_Hood_tpb/
+    format:   MDF/MDS disc image (713 MB + 486 bytes), Mode 2 / 2352-byte sectors
+    source:   unknown BitTorrent source (local directory name: Robin_Hood_tpb)
+    BTIH:     F93C10CE424E449A5EAD12F7C759095146492D6B
+    MD5:      5d0e420693f5ed48c89246f05ad65d94 (Robin_Hood.mdf)
+    MD5:      55fd00942f4b05556cccd2e24f02724a (Robin_Hood.mds)
+    SHA256:   6b724ca164a962f80ce8360ff655cd0de3508e87c2654445e60e02fdc06948a1 (Robin_Hood.mdf)
+    SHA256:   fcbf06117410f724121b635f03a040bd7d0740fc124dcb65d8052d5d6cd8c0a4 (Robin_Hood.mds)
+
+- Locale: 1033 (English US)
+- Matches Redump disc 40703 (`747,557,328` bytes, MD5 `5d0e420693f5ed48c89246f05ad65d94`)
+
 ## Windows — Italian retail
 
 Internet Archive CD image. Volume ID: `Robin_Hood`.
