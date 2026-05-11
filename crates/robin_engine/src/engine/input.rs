@@ -2159,6 +2159,34 @@ impl EngineInner {
         }
     }
 
+    /// Find any patch related to the given door, mirroring C++'s
+    /// `RHFastFindGrid::GetPatch(pDoor)`.  Checks both directions of
+    /// the door↔patch wiring:
+    ///
+    /// 1. `door.patch_index` — set when the patch is `door_triggered`
+    ///    (opening this door fires the patch).
+    /// 2. `patch.door_indices` — populated when the patch is
+    ///    `triggers_door` (applying the patch swaps this door's rights).
+    ///
+    /// Used by rendering to defer a door's polygon to the patch FX
+    /// path on either side of the wiring.  Returns `None` when no
+    /// mission script / game host is loaded.
+    pub fn find_patch_for_door(&self, door_idx: u32) -> Option<u32> {
+        let game_host = self.mission_script.as_ref()?.game_host()?;
+        // Fast path: door_triggered link cached on the door.
+        if let Some(door) = game_host.doors.get(door_idx as usize)
+            && let Some(p) = door.patch_index
+        {
+            return Some(u32::from(p));
+        }
+        // Fallback: scan triggers_door patches' door lists.
+        game_host
+            .patches
+            .iter()
+            .position(|p| p.door_indices.contains(&door_idx))
+            .map(|i| i as u32)
+    }
+
     // ─── ChooseMousePointerForDoor ─────────────────────────────
 
     /// Choose the mouse cursor for a door sector or a patch overlay.

@@ -1522,7 +1522,6 @@ mod tests {
             jump_line_indices: Vec::new(),
             gate_indices: Vec::new(),
             underlying_sector: None,
-            associated_sector_index: None,
         };
         let sec_a = make_sector(10);
         let sec_b = make_sector(11);

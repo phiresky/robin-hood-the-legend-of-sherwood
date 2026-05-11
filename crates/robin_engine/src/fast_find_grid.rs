@@ -493,21 +493,6 @@ pub struct GridSector {
     /// click doesn't line up with any jumpable line, the cursor code
     /// recurses with the underlying sector.
     pub underlying_sector: Option<SectorIndex>,
-
-    /// For associated sectors (`SectorType::ASSOCIATED`): the index in
-    /// `FastFindGrid::sectors` of the sector this clickable overlay is
-    /// bound to (lift or drawbridge platform).  Read by
-    /// `get_sector_screen` to follow the link to the real lift sector
-    /// when the mouse hovers a clickable overlay.  Currently never
-    /// populated in production: the lift `click_sector` polygon
-    /// (parsed-and-discarded by `read_lifts`) never reaches the grid
-    /// because the C++ `AddSector(pSectorAssociated, ...)` calls in
-    /// `RHSectorLift::Initialize` are commented out in the original
-    /// source, and the Rust port follows suit.  The field is kept on
-    /// `GridSector` because the read-side `get_sector_screen`
-    /// machinery is still wired (and exercised by tests) — a future
-    /// port of the C++ associated-sector flow would set it.
-    pub associated_sector_index: Option<SectorIndex>,
 }
 
 impl GridSector {
@@ -1986,28 +1971,6 @@ impl FastFindGrid {
                     sector_idx,
                     sector_number,
                 } => {
-                    // Follow `associated_sector` to resolve clickable
-                    // overlay sectors (e.g. a lift platform's click
-                    // zone) to their real target. When the associated
-                    // target is a lift, return on the lift's own layer;
-                    // otherwise keep this layer.
-                    if sector_number.get() > 0
-                        && let Some(sec) = self.level.sectors.get(usize::from(sector_idx))
-                        && sec.sector_type.is_associated()
-                        && let Some(target_idx) = sec.associated_sector_index
-                        && let Some(target) = self.level.sectors.get(usize::from(target_idx))
-                    {
-                        if target.sector_type.is_lift() {
-                            return SectorScreenResult::found(
-                                target_idx,
-                                target.sector_number,
-                                target.layer,
-                            );
-                        }
-                        // Non-lift associated target (drawbridge platform etc.):
-                        // still swap to the real sector but keep this layer.
-                        return SectorScreenResult::found(target_idx, target.sector_number, layer);
-                    }
                     return SectorScreenResult::found(sector_idx, sector_number, layer);
                 }
                 SectorHit::Blocked => {
@@ -2026,12 +1989,10 @@ impl FastFindGrid {
     /// point. Used by the F7 teleport cheat to pick the destination
     /// sector.
     ///
-    /// Unlike [`Self::get_sector_screen`] this accepts only three
+    /// Unlike [`Self::get_sector_screen`] this accepts only two
     /// classes of hit:
     /// 1. motion + area → return the hit directly
-    /// 2. associated sector → swap to target; if target is a lift,
-    ///    return `(target_idx, special_layer, target.sector_number)`
-    /// 3. jump sector → swap to the jump's underlying sector and
+    /// 2. jump sector → swap to the jump's underlying sector and
     ///    return it on the hit's own layer
     ///
     /// Doors and motion obstacles are rejected (the teleport caller
@@ -2060,20 +2021,7 @@ impl FastFindGrid {
             if sector_number.is_valid() && st.is_motion() && st.is_area() {
                 return SectorScreenResult::found(sector_idx, sector.sector_number, layer);
             }
-            // Case 2: associated → lift.
-            if sector_number.get() > 0
-                && st.is_associated()
-                && let Some(target_idx) = sector.associated_sector_index
-                && let Some(target) = self.level.sectors.get(usize::from(target_idx))
-                && target.sector_type.is_lift()
-            {
-                return SectorScreenResult::found(
-                    target_idx,
-                    target.sector_number,
-                    self.level.special_layer,
-                );
-            }
-            // Case 3: jump → underlying sector on this hit's layer.
+            // Case 2: jump → underlying sector on this hit's layer.
             if sector_number.get() > 0
                 && st.is_jump()
                 && let Some(target_idx) = sector.underlying_sector
@@ -2081,8 +2029,8 @@ impl FastFindGrid {
             {
                 return SectorScreenResult::found(target_idx, target.sector_number, sector.layer);
             }
-            // None of the three accepted branches matched on this
-            // layer — fall through to the next iteration rather than
+            // None of the accepted branches matched on this layer —
+            // fall through to the next iteration rather than
             // returning.
         }
         SectorScreenResult::invalid(0)
@@ -2091,9 +2039,8 @@ impl FastFindGrid {
     /// "Peek under the topmost sector" variant of
     /// [`Self::get_sector_screen`] used by shift-held mouse selection.
     ///
-    /// Walks layers top-down, stashes the first non-empty hit without
-    /// applying the associated→lift fix-up, and returns the *second*
-    /// hit (with the fix-up applied) if one is found. Falls back to the
+    /// Walks layers top-down, stashes the first non-empty hit, and
+    /// returns the *second* hit if one is found. Falls back to the
     /// stashed first hit when no second hit exists, and returns an
     /// empty result when no sector is found on any layer. Called from
     /// the mouse-location update path when shift is held.
@@ -2103,8 +2050,7 @@ impl FastFindGrid {
         for layer in (0..self.level.special_layer).rev() {
             let hit = self.get_sector(pt, reference, layer);
             match (first_hit, hit) {
-                // First pass: stash the topmost non-empty hit without
-                // applying associated→lift resolution.
+                // First pass: stash the topmost non-empty hit.
                 (
                     None,
                     SectorHit::Found {
@@ -2120,7 +2066,7 @@ impl FastFindGrid {
                 (None, SectorHit::None) => {}
                 // Second pass: the first hit is already stashed; a new
                 // non-empty hit here is the "hidden" sector under the
-                // top one. Apply associated→lift resolution and return.
+                // top one — return it directly.
                 (
                     Some(_),
                     SectorHit::Found {
@@ -2128,22 +2074,6 @@ impl FastFindGrid {
                         sector_number,
                     },
                 ) => {
-                    if sector_number.get() > 0
-                        && let Some(sec) = self.level.sectors.get(usize::from(sector_idx))
-                        && sec.sector_type.is_associated()
-                        && let Some(target_idx) = sec.associated_sector_index
-                        && let Some(target) = self.level.sectors.get(usize::from(target_idx))
-                        && target.sector_type.is_lift()
-                    {
-                        return SectorScreenResult::found(
-                            target_idx,
-                            target.sector_number,
-                            target.layer,
-                        );
-                    }
-                    // If the associated target isn't a lift, keep the
-                    // associated sector's own number and return the
-                    // outer sector at the current layer.
                     return SectorScreenResult::found(sector_idx, sector_number, layer);
                 }
                 (Some(_), SectorHit::Blocked) => {
@@ -3659,7 +3589,6 @@ mod tests {
             jump_line_indices: Vec::new(),
             gate_indices: Vec::new(),
             underlying_sector: None,
-            associated_sector_index: None,
         }
     }
 
@@ -3889,42 +3818,6 @@ mod tests {
             SectorHit::Found { sector_number, .. } => assert_eq!(sector_number, 21),
             _ => panic!("expected jump_b to win"),
         }
-    }
-
-    #[test]
-    fn test_associated_sector_screen_resolves_to_lift() {
-        use crate::sector::SectorType;
-        // 1 conventional layer → lift_layer = 1 (special_layer - 1 = 1)
-        let mut grid = make_empty_grid(1);
-
-        // Lift on layer 0 with sector_number 5.
-        let mut lift = square_sector(
-            pt(32.0, 32.0),
-            pt(96.0, 96.0),
-            SectorType::MOUSE | SectorType::MOTION | SectorType::AREA | SectorType::LIFT,
-            0,
-            5,
-        );
-        lift.lift_type = Some(crate::sector::LiftType::Normal);
-        let lift_idx = grid.add_sector(lift, 0);
-
-        // Associated clickable overlay on the lift layer (1) pointing at the lift.
-        let mut assoc = square_sector(
-            pt(32.0, 32.0),
-            pt(96.0, 96.0),
-            SectorType::MOUSE | SectorType::ASSOCIATED,
-            1,
-            6,
-        );
-        assoc.associated_sector_index = SectorIndex::new(lift_idx);
-        grid.add_sector(assoc, 1);
-
-        let res = grid.get_sector_screen(pt(60.0, 60.0), pt(60.0, 60.0));
-        assert!(res.is_valid(), "should find the associated overlay");
-        // Should have been resolved through the association to the lift sector.
-        assert_eq!(res.sector_idx, SectorIndex::new(lift_idx));
-        assert_eq!(res.sector, Some(crate::sector::SectorNumber::new(5)));
-        assert_eq!(res.layer, 0);
     }
 
     #[test]

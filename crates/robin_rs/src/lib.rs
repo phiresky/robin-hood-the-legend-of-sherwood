@@ -190,7 +190,6 @@ pub use robin_engine::geo2d;
 pub use robin_engine::graphic_config;
 pub use robin_engine::interp;
 pub use robin_engine::inventory;
-pub use robin_engine::jump;
 pub use robin_engine::jump_line;
 pub use robin_engine::level_data as level_loader;
 pub use robin_engine::macro_store;

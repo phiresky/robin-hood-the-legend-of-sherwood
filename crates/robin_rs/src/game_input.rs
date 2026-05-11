@@ -305,11 +305,23 @@ pub fn resolve_left_click(
         }
         let actors: Vec<EntityId> = selected.to_vec();
         let waypoint = geo2d::pt(patch.waypoint.x, patch.waypoint.y);
+        // Mirror C++'s `update_mouse` substitution
+        // (`mpSelectedSector = mFastGrid.GetSector(patch.sector)` /
+        // `muwSelectedLayer = patch.layer`): pass the patch's
+        // proto-loaded `(sector, layer)` to perform_group_move so the
+        // move targets the patch's underlying motion area instead of
+        // whatever the spatial lookup at the waypoint happens to find
+        // (which can pick the wrong layer or no sector at all).
+        let goal_override = Some((
+            robin_engine::sector::SectorNumber::new(patch.sector as i16),
+            patch.layer,
+        ));
         return vec![PlayerCommand::GroupMove {
             actors,
             destination: waypoint,
             running: is_double,
             show_marker: false,
+            goal_override,
         }];
     }
 
@@ -324,6 +336,7 @@ pub fn resolve_left_click(
         destination: map_pt,
         running: is_double,
         show_marker: true,
+        goal_override: None,
     }]
 }
 

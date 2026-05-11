@@ -660,7 +660,6 @@ impl EngineInner {
                         jump_line_indices: Vec::new(),
                         gate_indices: Vec::new(),
                         underlying_sector: None,
-                        associated_sector_index: None,
                     },
                     sec.layer,
                 );
@@ -3275,10 +3274,6 @@ impl EngineInner {
                         action_direct_2: act_d2,
                         action_indirect_1: act_i1,
                         action_indirect_2: act_i2,
-                        // No clickable polygon for tactic-REIN doors —
-                        // they're logical gateway markers rather than
-                        // visible doors.
-                        mouse_sector_active: false,
                         ..Default::default()
                     });
                     // AdaptPoints is a no-op for `Reinforcement` doors
@@ -3970,7 +3965,6 @@ impl EngineInner {
                             jump_line_indices: Vec::new(),
                             gate_indices: Vec::new(),
                             underlying_sector: None,
-                            associated_sector_index: None,
                         },
                         layer_idx as u16,
                     );
@@ -4008,7 +4002,6 @@ impl EngineInner {
                                 jump_line_indices: Vec::new(),
                                 gate_indices: Vec::new(),
                                 underlying_sector: None,
-                                associated_sector_index: None,
                             },
                             layer_idx as u16,
                         );
@@ -4121,7 +4114,6 @@ impl EngineInner {
                         jump_line_indices: Vec::new(),
                         gate_indices: Vec::new(),
                         underlying_sector: None,
-                        associated_sector_index: None,
                     },
                     building_lift_layer,
                 );
@@ -4183,7 +4175,6 @@ impl EngineInner {
                         jump_line_indices: Vec::new(),
                         gate_indices: Vec::new(),
                         underlying_sector: None,
-                        associated_sector_index: None,
                     },
                     raw.layer,
                 );
@@ -4570,7 +4561,6 @@ impl EngineInner {
                 gate_indices: Vec::new(),
                 underlying_sector: zone_sector[zi]
                     .and_then(crate::fast_find_grid::SectorIndex::new),
-                associated_sector_index: None,
             };
             self.fast_grid.add_sector(gs, zone.layer);
             registered += 1;
@@ -4618,7 +4608,6 @@ impl EngineInner {
                 jump_line_in_helper_needed: spec.jump_line_in_helper_needed,
                 jump_line_out_helper_needed: spec.jump_line_out_helper_needed,
                 penalty: spec.penalty,
-                mouse_sector_active: false,
                 ..Default::default()
             });
         }
@@ -4826,7 +4815,6 @@ impl EngineInner {
                     locked_npc_villain_after_patch: raw.locked_npc_villain_after_patch,
                     locked_npc_civilian_after_patch: raw.locked_npc_civilian_after_patch,
                     unlockable_after_patch: raw.unlockable_after_patch,
-                    mouse_sector_active: true,
                     special_authorisation_pc: false,
                     authorised_pc_direct: 0,
                     authorised_pc_indirect: 0,
@@ -5005,7 +4993,7 @@ impl EngineInner {
                     lowest_door_index: None, jump_line_indices: Vec::new(),
                     gate_indices: Vec::new(),
                     underlying_sector: None,
-                    associated_sector_index: None, },
+                },
                     layer,
                 );
                 self.fast_grid.set_sector_active(idx, door_active);
@@ -5158,14 +5146,16 @@ impl EngineInner {
                     jump_line_indices: Vec::new(),
                     gate_indices: Vec::new(),
                     underlying_sector: None,
-                    associated_sector_index: None,
                 };
                 let idx = grid.add_sector(gs, layer);
                 grid.set_sector_active(idx, active);
                 Some(idx)
             };
 
-            let patch_layer = raw.layer;
+            // Mirrors C++ `mFastGrid.AddPatch(pPatch, pPatch->GetLayer(), …)`
+            // — the late `READ(muwLayer)` at the end of `RHPatch::Initialize`
+            // clobbers the mid-stream read.
+            let patch_layer = raw.final_layer;
             let mouse_patch = crate::sector::SectorType::MOUSE | crate::sector::SectorType::PATCH;
             let mouse_motion = crate::sector::SectorType::MOUSE | crate::sector::SectorType::MOTION;
 
@@ -5298,7 +5288,11 @@ impl EngineInner {
                 pathfinder_layer: raw.pathfinder_layer.unwrap_or(0),
                 pathfinder_sector: raw.pathfinder_sector.unwrap_or(0),
                 pathfinder_changing_obstacles: raw.pathfinder_changing_obstacles,
-                layer: raw.layer,
+                // C++ reads muwLayer twice (mid-stream and again at end of
+                // patch); the late `final_layer` clobbers the early read,
+                // so that's the authoritative value used by `AddPatch`
+                // and `mpSelectedPatch->GetLayer()`.
+                layer: raw.final_layer,
                 sector: raw.sector,
                 waypoint: crate::geo2d::pt(raw.waypoint.0 as f32, raw.waypoint.1 as f32),
                 old_sight_obstacle_indices: old_sight,
@@ -5314,10 +5308,15 @@ impl EngineInner {
             });
         }
 
-        // Wire door↔patch connections: each RawPatch lists its
-        // door_indices; we set patch_index on each referenced Door, and
-        // populate door_indices on the Patch so SwapDoors can call
-        // swap_rights_patch.
+        // Wire door↔patch connections.  In C++ (`RHpatch.cpp:300-308`)
+        // the two relationships are *mutually exclusive* — a patch's
+        // door list is either consumed as door→patch links (every door
+        // gets `mpPatch = this`) when `mbDoorTriggered`, or as the
+        // patch→door swap-rights list (`maDoors`) when `mbTriggersDoor`.
+        // Mirror that here: gate `Door::patch_index` on `door_triggered`
+        // and `Patch::door_indices` on `triggers_door`.
+        let mut door_triggered_count = 0_usize;
+        let mut triggers_door_count = 0_usize;
         for (patch_idx, raw) in loaded.proto.patches.iter().enumerate() {
             let patch_door_indices: Vec<u32> = raw
                 .door_indices
@@ -5337,14 +5336,38 @@ impl EngineInner {
                     }
                 })
                 .collect();
-            for &door_idx in &patch_door_indices {
-                game_host.doors[door_idx as usize].patch_index =
-                    crate::patch::PatchIndex::new(patch_idx as u32);
+            if !patch_door_indices.is_empty() && !raw.door_triggered && !raw.triggers_door {
+                tracing::warn!(
+                    "Patch {} lists {} door(s) but neither door_triggered nor \
+                     triggers_door is set — wiring will be skipped",
+                    patch_idx,
+                    patch_door_indices.len()
+                );
             }
-            if let Some(patch) = game_host.patches.get_mut(patch_idx) {
+            if raw.door_triggered {
+                for &door_idx in &patch_door_indices {
+                    game_host.doors[door_idx as usize].patch_index =
+                        crate::patch::PatchIndex::new(patch_idx as u32);
+                }
+                if !patch_door_indices.is_empty() {
+                    door_triggered_count += 1;
+                }
+            }
+            if raw.triggers_door
+                && let Some(patch) = game_host.patches.get_mut(patch_idx)
+            {
+                let n = patch_door_indices.len();
                 patch.door_indices = patch_door_indices;
+                if n > 0 {
+                    triggers_door_count += 1;
+                }
             }
         }
+        tracing::debug!(
+            door_triggered_patches = door_triggered_count,
+            triggers_door_patches = triggers_door_count,
+            "patch↔door wiring complete"
+        );
 
         // ── Patch animation entities ──
         // Transfer the entity handle mapping computed during entity spawning.

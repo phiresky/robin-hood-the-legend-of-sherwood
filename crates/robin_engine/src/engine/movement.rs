@@ -809,6 +809,7 @@ impl EngineInner {
         click_point: Point2D,
         run: bool,
         show_marker: bool,
+        goal_override: Option<(crate::sector::SectorNumber, u16)>,
     ) {
         if pc_ids.is_empty() {
             return;
@@ -853,48 +854,90 @@ impl EngineInner {
         // ── Unified sector hit-test ──
         //
         // Top-down layer search to set the selected sector / layer /
-        // valid-for-move flags.
-        let hit = self.fast_grid.get_sector_screen(click_point, reference);
-        let is_valid = hit.is_valid_for_move(&self.fast_grid);
-
-        // ── Door/Drawbridge click shortcut ──
-        //
-        // When the click hits a door sector, bypass the walkability
-        // snap on formation slots.  Per-PC routing must also skip
-        // `snap_click_to_walkable` so the destination stays in the door
-        // sector and the gate-A* path routes through the door's entry
-        // point (the door sector itself is not a motion area).
-        let is_door_click = hit
-            .sector_idx
-            .and_then(|i| self.fast_grid.level.sectors.get(usize::from(i)))
-            .is_some_and(|s| s.sector_type.is_door());
-        let is_jump_click = hit
-            .sector_idx
-            .and_then(|i| self.fast_grid.level.sectors.get(usize::from(i)))
-            .is_some_and(|s| s.sector_type.is_jump());
-
-        // Door index of the clicked door sector, if any.  Used to
-        // route the per-PC gate search via `find_path_to_door` and
-        // emit a `GoalShape::Door` terminal element.
-        let clicked_sector_door_index: Option<u32> = hit
-            .sector_idx
-            .and_then(|i| self.fast_grid.level.sectors.get(usize::from(i)))
-            .and_then(|s| s.door_index);
-        let clicked_polygon_door_index = self
-            .mission_script
-            .as_ref()
-            .and_then(|s| s.game_host())
-            .and_then(|h| door_click_polygon_at(h, click_point));
-        let clicked_door_index = clicked_sector_door_index.or(clicked_polygon_door_index);
-        let is_door_click = is_door_click || clicked_door_index.is_some();
-
-        // ── Determine effective click point, layer, and goal sector ──
-        let goal_sector = hit.sector;
-        let (effective_click, effective_layer) = if is_valid {
-            (click_point, hit.layer)
+        // valid-for-move flags.  When `goal_override` is set (patch
+        // click), skip the spatial query: the proto-loaded
+        // `(patch.sector, patch.layer)` are authoritative.  This mirrors
+        // C++ where `update_mouse` substitutes
+        // `mpSelectedSector = mFastGrid.GetSector(patch.sector)` and
+        // `muwSelectedLayer = patch.layer` before `PerformGroupMove`
+        // reads them at `RHengine.cpp:5301-5306`.
+        let (
+            goal_sector,
+            effective_click,
+            effective_layer,
+            is_valid,
+            is_door_click,
+            is_jump_click,
+            clicked_door_index,
+        ) = if let Some((override_sector, override_layer)) = goal_override {
+            // Patch-click path: route to (patch.sector, patch.layer)
+            // unconditionally.  The waypoint becomes the destination
+            // without snapping; per-PC routing below still calls
+            // `snap_click_to_walkable` at `effective_layer` to find a
+            // valid landing position.  Patches are never doors / jumps,
+            // so those shortcuts stay false.  `is_valid = true` keeps
+            // the simple-move branch reachable when the PC is already
+            // in `patch.sector`.
+            (
+                Some(override_sector),
+                click_point,
+                override_layer,
+                true,
+                false,
+                false,
+                None,
+            )
         } else {
-            let snapped = self.snap_to_nearest_walkable(assets, click_point, src_layer);
-            (snapped.unwrap_or(click_point), src_layer)
+            let hit = self.fast_grid.get_sector_screen(click_point, reference);
+            let is_valid = hit.is_valid_for_move(&self.fast_grid);
+
+            // ── Door/Drawbridge click shortcut ──
+            //
+            // When the click hits a door sector, bypass the walkability
+            // snap on formation slots.  Per-PC routing must also skip
+            // `snap_click_to_walkable` so the destination stays in the
+            // door sector and the gate-A* path routes through the
+            // door's entry point (the door sector itself is not a
+            // motion area).
+            let is_door_click_sector = hit
+                .sector_idx
+                .and_then(|i| self.fast_grid.level.sectors.get(usize::from(i)))
+                .is_some_and(|s| s.sector_type.is_door());
+            let is_jump_click = hit
+                .sector_idx
+                .and_then(|i| self.fast_grid.level.sectors.get(usize::from(i)))
+                .is_some_and(|s| s.sector_type.is_jump());
+
+            // Door index of the clicked door sector, if any.  Used to
+            // route the per-PC gate search via `find_path_to_door` and
+            // emit a `GoalShape::Door` terminal element.
+            let clicked_sector_door_index: Option<u32> = hit
+                .sector_idx
+                .and_then(|i| self.fast_grid.level.sectors.get(usize::from(i)))
+                .and_then(|s| s.door_index);
+            let clicked_polygon_door_index = self
+                .mission_script
+                .as_ref()
+                .and_then(|s| s.game_host())
+                .and_then(|h| door_click_polygon_at(h, click_point));
+            let clicked_door_index = clicked_sector_door_index.or(clicked_polygon_door_index);
+            let is_door_click = is_door_click_sector || clicked_door_index.is_some();
+
+            let (effective_click, effective_layer) = if is_valid {
+                (click_point, hit.layer)
+            } else {
+                let snapped = self.snap_to_nearest_walkable(assets, click_point, src_layer);
+                (snapped.unwrap_or(click_point), src_layer)
+            };
+            (
+                hit.sector,
+                effective_click,
+                effective_layer,
+                is_valid,
+                is_door_click,
+                is_jump_click,
+                clicked_door_index,
+            )
         };
 
         // ── Compute formation slots around the click point ──

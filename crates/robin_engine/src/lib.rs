@@ -35,7 +35,6 @@ pub mod geo2d;
 pub mod graphic_config;
 pub mod interp;
 pub mod inventory;
-pub mod jump;
 pub mod jump_line;
 pub mod level_data;
 pub mod macro_store;
