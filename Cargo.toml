@@ -5,6 +5,7 @@ resolver = "2"
 members = [
     "crates/robin_rs",
     "crates/robin_engine",
+    "crates/robin_lua",
     "crates/robin_util",
     "crates/robin_assets",
     "crates/robin_state_hash_derive",
@@ -55,6 +56,8 @@ opt-level = 3
 opt-level = 0
 [profile.dev.package.robin_engine]
 opt-level = 0
+[profile.dev.package.robin_lua]
+opt-level = 0
 [profile.dev.package.robin_util]
 opt-level = 0
 [profile.dev.package.robin_assets]
@@ -81,6 +84,8 @@ opt-level = 1
 [profile.dev-opt1.package.robin_rs]
 opt-level = 1
 [profile.dev-opt1.package.robin_engine]
+opt-level = 1
+[profile.dev-opt1.package.robin_lua]
 opt-level = 1
 [profile.dev-opt1.package.robin_util]
 opt-level = 1
