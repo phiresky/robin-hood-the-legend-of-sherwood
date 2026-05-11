@@ -287,6 +287,33 @@ pub enum NativeFn {
     FadeToBlack,
     LinkTargetToFX,
     ForbidNPCRemark,
+
+    // ── Spellforge / Lua-only natives (indices 265+) ──
+    //
+    // These are not referenced by any shipped `.scb` bytecode (which
+    // only registers 0..=264). They're added so the same `GameHost`
+    // dispatch table can serve the Lua scripting layer used by custom
+    // missions from rhmods.com. Keep their indices stable in case
+    // Lua-emitted bytecode ever wants to call them by index.
+    /// `Reveal(actor) -> int` — un-blip an actor (mark it visible).
+    Reveal,
+    /// `AddObjective(id, isMainObjective) -> int` — adds a mission
+    /// objective to the UI list.
+    AddObjective,
+    /// `CompleteObjective(id) -> int` — marks a previously-added
+    /// objective complete.
+    CompleteObjective,
+    /// `IsActorOutOfAction(actor) -> bool` — Spellforge's
+    /// `IsActorHS` (HS = "Hors Service", out of action) under the
+    /// English name. Functionally identical: dead || tied ||
+    /// unconscious.
+    IsActorOutOfAction,
+    /// `SetPatrolShouldRun(actor, shouldRun)` — toggle whether a
+    /// patrolling NPC walks or runs along its path.
+    SetPatrolShouldRun,
+    /// `SequenceReveal(actor) -> int` — sequence-recorded variant
+    /// of `Reveal`, queued as a sequence element.
+    SequenceReveal,
 }
 
 /// Resolves a native function index to its name, or "unknown".

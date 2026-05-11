@@ -2661,6 +2661,67 @@ pub const NATIVE_SIGNATURES: &[NativeSignature] = &[
             }
         ]
     ),
+    // ── Spellforge / Lua-only natives ──
+    sig!(
+        "Reveal",
+        "int",
+        [NativeParamSig {
+            ty: "Actor",
+            name: "actActor"
+        }]
+    ),
+    sig!(
+        "AddObjective",
+        "int",
+        [
+            NativeParamSig {
+                ty: "int",
+                name: "iObjectiveID"
+            },
+            NativeParamSig {
+                ty: "bool",
+                name: "bIsMainObjective"
+            },
+        ]
+    ),
+    sig!(
+        "CompleteObjective",
+        "int",
+        [NativeParamSig {
+            ty: "int",
+            name: "iObjectiveID"
+        }]
+    ),
+    sig!(
+        "IsActorOutOfAction",
+        "bool",
+        [NativeParamSig {
+            ty: "Actor",
+            name: "actActor"
+        }]
+    ),
+    sig!(
+        "SetPatrolShouldRun",
+        "void",
+        [
+            NativeParamSig {
+                ty: "Actor",
+                name: "actPatrolLeader"
+            },
+            NativeParamSig {
+                ty: "bool",
+                name: "bShouldRun"
+            },
+        ]
+    ),
+    sig!(
+        "SequenceReveal",
+        "int",
+        [NativeParamSig {
+            ty: "Actor",
+            name: "actActor"
+        }]
+    ),
 ];
 
 pub fn native_signature_by_index(index: u32) -> Option<&'static NativeSignature> {

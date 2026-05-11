@@ -750,6 +750,19 @@ impl EngineInner {
                             self.relaunch_path_at_new_speed(assets, EntityId(idx as u32));
                         }
                     }
+                    crate::natives::DeferredCommand::SetPatrolShouldRun {
+                        actor: _,
+                        should_run: _,
+                    } => {
+                        // Spellforge `SetPatrolShouldRun` — no engine
+                        // handler yet. The patrol walk/run toggle
+                        // lives on the patrol descriptor; wiring it
+                        // up is tracked alongside the Lua mission
+                        // bring-up.
+                        // TODO: stamp `patrol.should_run` and re-issue
+                        // the in-flight GoTo via the existing
+                        // `RelaunchPathAtNewSpeed` flow.
+                    }
                 }
             }
         }

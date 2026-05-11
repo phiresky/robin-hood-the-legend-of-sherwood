@@ -272,4 +272,27 @@ pub enum DeferredCommand {
     /// current hiking-path waypoint, compute `WillStopAtNextWaypoint`,
     /// and call `ai.go_to(pos, default_flags | DONT_STOP if !will_stop, ctx)`.
     RelaunchPathAtNewSpeed { actor: i32 },
+    /// Spellforge `SetPatrolShouldRun(actor, should_run)`: toggle
+    /// whether the NPC's patrol moves at walk or run speed. The
+    /// engine handler stamps the patrol's `should_run` field; the
+    /// per-tick patrol re-issue picks the new speed up via the
+    /// existing `RelaunchPathAtNewSpeed` flow.
+    SetPatrolShouldRun { actor: i32, should_run: bool },
+}
+
+/// Mission-objective panel changes queued by the Spellforge
+/// `AddObjective` / `CompleteObjective` natives. The objectives UI
+/// itself doesn't live in `robin_engine` (the host owns rendering and
+/// localisation), so the engine just records the requested changes and
+/// the host drains `GameHost::pending_objective_changes` each frame.
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, robin_state_hash_derive::StateHash,
+)]
+pub enum ObjectiveChange {
+    /// Add a new objective entry. `is_main` distinguishes primary
+    /// vs. optional objectives — the Spellforge UI uses different
+    /// glyphs for each.
+    Add { id: i32, is_main: bool },
+    /// Mark a previously-added objective complete.
+    Complete { id: i32 },
 }

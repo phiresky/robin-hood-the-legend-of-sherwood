@@ -55,7 +55,7 @@ mod signatures;
 #[cfg(test)]
 mod tests;
 
-pub use commands::{DeferredCommand, EngineCommand, SoundCommand};
+pub use commands::{DeferredCommand, EngineCommand, ObjectiveChange, SoundCommand};
 pub use defs::{NativeFn, native_name};
 pub use signatures::{
     NATIVE_SIGNATURES, NativeParamSig, NativeSignature, native_signature_by_index,
@@ -321,6 +321,25 @@ pub struct GameHost {
     /// Deferred game-logic commands for the engine to process after script.
     pub deferred_commands: Vec<DeferredCommand>,
 
+    /// Mission-objective panel changes queued by the Spellforge
+    /// `AddObjective` / `CompleteObjective` natives. The host drains
+    /// this each frame to update its objectives UI. Empty for missions
+    /// that don't use the objectives system (i.e. all vanilla missions
+    /// — only Spellforge mods touch it).
+    pub pending_objective_changes: Vec<ObjectiveChange>,
+
+    /// Name → entity handle maps populated when a Spellforge-format
+    /// `.rhm` is loaded (the extended format prefixes each entity with
+    /// a string identifier). Backs the Lua-only `GetActor("name")`,
+    /// `GetItem`, `GetLocation`, `GetPatrol`, `GetScroll` natives, and
+    /// the reverse `GetActorName(handle)` lookup. Empty for vanilla
+    /// `.rhm` files.
+    pub lua_actor_names: BTreeMap<String, i32>,
+    pub lua_item_names: BTreeMap<String, i32>,
+    pub lua_location_names: BTreeMap<String, i32>,
+    pub lua_patrol_names: BTreeMap<String, i32>,
+    pub lua_scroll_names: BTreeMap<String, i32>,
+
     /// Building active state. Index = building handle − 1.
     pub building_active: Vec<bool>,
     /// Building → gate (door) handles. Index = building handle − 1.
@@ -479,6 +498,12 @@ impl GameHost {
             overall_enemy_alert: 0,
             overall_civilian_alert: 0,
             deferred_commands: Vec::new(),
+            pending_objective_changes: Vec::new(),
+            lua_actor_names: BTreeMap::new(),
+            lua_item_names: BTreeMap::new(),
+            lua_location_names: BTreeMap::new(),
+            lua_patrol_names: BTreeMap::new(),
+            lua_scroll_names: BTreeMap::new(),
             building_active: Vec::new(),
             building_gates: Vec::new(),
             men_to_blazon_conversion_mode: false,
@@ -8138,6 +8163,103 @@ impl HostFunctions for GameHost {
                         .get(idx as usize)
                         .copied()
                         .unwrap_or(0)
+                }
+                // ── Spellforge / Lua-only natives ──
+                Reveal => {
+                    // Spellforge name for "make this actor visible
+                    // (un-blip)". Behaves like `UnBlip` but is the
+                    // imperative-style name surfaced to Lua. Returns
+                    // 1 iff the actor was previously blipped.
+                    let actor = stack.pop_i32();
+                    if !self.actor_exists(actor) {
+                        tracing::warn!("Script Error: Reveal with invalid actor handle {actor}");
+                        return 0;
+                    }
+                    let was_blipped = self
+                        .get_entity(actor)
+                        .is_some_and(|e| e.element_data().blipped);
+                    if let Some(entity) = self.get_entity_mut(actor) {
+                        entity.reveal_blip();
+                    }
+                    i32::from(was_blipped)
+                }
+                SequenceReveal => {
+                    // Sequence-recorded variant of `Reveal`. Same
+                    // semantics as `RecordUnBlip` — emits a `Unblip`
+                    // sequence element at the current recording
+                    // level.
+                    let actor = stack.pop_i32();
+                    if !self.is_actor_handle(actor) {
+                        tracing::warn!("Script Error: SequenceReveal illegal actor handle {actor}");
+                        return 0;
+                    }
+                    let level = self.recording_level();
+                    let elem = SequenceElement::new(level, Command::Unblip, Self::actor_id(actor));
+                    self.record_element(elem)
+                }
+                IsActorOutOfAction => {
+                    // Spellforge's English name for `IsActorHS`
+                    // (Hors Service). Returns true iff the actor is
+                    // dead, tied, or unconscious. Same semantics as
+                    // `IsActorHS` — kept in lockstep to avoid drift
+                    // if scripts mix the two names.
+                    let actor = stack.pop_i32();
+                    let Some(e) = self.get_entity(actor) else {
+                        tracing::warn!(
+                            "Script Error: IsActorOutOfAction with invalid actor handle {actor}"
+                        );
+                        return 0;
+                    };
+                    if !e.is_actor() {
+                        tracing::warn!(
+                            "Script Error: IsActorOutOfAction with non-actor handle {actor}"
+                        );
+                        return 0;
+                    }
+                    let posture = e.element_data().posture;
+                    let dead = e.is_dead();
+                    let tied = posture == Posture::Tied;
+                    let unconscious = e.human_data().is_some_and(|h| h.unconscious);
+                    i32::from(dead || tied || unconscious)
+                }
+                AddObjective => {
+                    // Queues a UI objective for the host to surface
+                    // in the objectives panel. Implementation is in
+                    // the host (objectives panel doesn't exist on
+                    // engine side); this just records the request.
+                    // TODO: define the objectives UI on the host
+                    // and consume `pending_objective_changes`.
+                    let is_main = stack.pop_i32();
+                    let id = stack.pop_i32();
+                    self.pending_objective_changes.push(ObjectiveChange::Add {
+                        id,
+                        is_main: is_main != 0,
+                    });
+                    0
+                }
+                CompleteObjective => {
+                    let id = stack.pop_i32();
+                    self.pending_objective_changes
+                        .push(ObjectiveChange::Complete { id });
+                    0
+                }
+                SetPatrolShouldRun => {
+                    // Toggles whether a patrolling NPC walks or
+                    // runs along its assigned path. The patrol
+                    // walk/run flag lives on the patrol
+                    // descriptor; we stamp it via a deferred
+                    // command so the engine reads a consistent
+                    // value post-script.
+                    // TODO: route into the patrol subsystem once
+                    // the patrol walk/run flag is wired up.
+                    let should_run = stack.pop_i32();
+                    let actor = stack.pop_i32();
+                    self.deferred_commands
+                        .push(DeferredCommand::SetPatrolShouldRun {
+                            actor,
+                            should_run: should_run != 0,
+                        });
+                    0
                 }
                 ComputeLocationBetween => {
                     // Both args must be points; both must share
