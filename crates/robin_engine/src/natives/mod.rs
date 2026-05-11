@@ -2601,9 +2601,10 @@ impl GameHost {
         }
     }
 
-    /// Common body for the `Freeze` script native.  PCs and NPCs use
-    /// different freeze flags because the two entity types have
-    /// separate freeze setters on their distinct data structs.
+    /// Common body for the `Freeze` script native.  Only PCs have a
+    /// readable freeze flag (`fried_psykokwack`); the NPC counterpart
+    /// is intentionally a no-op (the original game's NPC freeze flag
+    /// was never consulted by the AI tick).
     fn script_freeze_actor(&mut self, actor: i32, freeze: bool) {
         let Some(entity) = self.get_entity_mut(actor) else {
             tracing::warn!("Freeze: invalid actor handle {actor}");

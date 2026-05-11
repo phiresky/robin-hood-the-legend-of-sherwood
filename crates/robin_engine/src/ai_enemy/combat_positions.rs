@@ -2002,7 +2002,7 @@ impl EnemyAi {
         tick: &AiPerTickData,
         grid: Option<&crate::fast_find_grid::FastFindGrid>,
     ) {
-        if self.position_change_locked_for_test || self.base.blood_alcohol > 0 {
+        if self.base.blood_alcohol > 0 {
             return;
         }
 

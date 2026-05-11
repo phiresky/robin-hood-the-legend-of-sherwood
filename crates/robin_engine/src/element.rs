@@ -41,7 +41,6 @@ use crate::geo2d::Point2D as GeoPoint2D;
 use crate::jump_line::JumpLineIndex;
 use crate::movement::{ActiveMovement, ActiveShot};
 use crate::order::OrderType;
-use crate::pathfinder::PathFinderSpeed;
 use crate::position_interface::PositionInterface;
 use crate::profiles::{
     Action, CharacterProfile, CharacterProfileIdx, CivilianProfileIdx, SoldierProfileIdx,
@@ -749,11 +748,6 @@ pub struct ActorData {
     pub old_action: Animation,
     pub is_ignored_for_anti_collision: bool,
 
-    // Surrender
-    pub is_about_to_surrender: bool,
-    pub is_surrendering: bool,
-    pub menacer: Option<EntityId>,
-
     // Current state
     pub action_state: ActionState,
     pub execution_frozen: bool,
@@ -812,9 +806,6 @@ pub struct ActorData {
     pub passing_door_directly: bool,
 
     pub script_class: String,
-
-    /// Pathfinder speed / priority for this actor's path requests.
-    pub pathfinder_speed: PathFinderSpeed,
 
     /// Tracks the sequence element that initiated the current movement,
     /// so we can notify the sequence manager when movement completes.
@@ -921,9 +912,6 @@ impl Default for ActorData {
         Self {
             old_action: Animation::default(),
             is_ignored_for_anti_collision: false,
-            is_about_to_surrender: false,
-            is_surrendering: false,
-            menacer: None,
             action_state: ActionState::default(),
             execution_frozen: false,
             sequence_element_started: false,
@@ -938,7 +926,6 @@ impl Default for ActorData {
             post_seek_sequence: None,
             passing_door_directly: false,
             script_class: String::new(),
-            pathfinder_speed: PathFinderSpeed::default(),
             active_movement: ActiveMovement::none(),
             active_door_pass: None,
             active_shot: ActiveShot::none(),
@@ -1013,7 +1000,6 @@ pub struct HumanData {
 
     // Visibility
     pub hollow_man: bool,
-    pub has_already_been_detectable_body: bool,
 
     // Swordfight — opponent list
     /// Active swordfight opponents. The first entry is the principal opponent.
@@ -1070,7 +1056,6 @@ impl Default for HumanData {
             sword_strike_boredom: Vec::new(),
             stuck_under_nets_counter: 0,
             hollow_man: false,
-            has_already_been_detectable_body: false,
             opponents: Vec::new(),
             opponent_jump_lines: Vec::new(),
             smalltalk_initiative: false,
@@ -1470,7 +1455,6 @@ pub struct NpcData {
     pub initial_position_y: f32,
     pub initial_position_sector: Option<crate::position_interface::SectorHandle>,
     pub initial_position_level: u16,
-    pub register_number: u16,
 
     pub inform_my_friends: bool,
     pub money: u32,
@@ -1650,7 +1634,6 @@ impl Default for NpcData {
             initial_position_y: 0.0,
             initial_position_sector: None,
             initial_position_level: 0,
-            register_number: 0,
             inform_my_friends: false,
             money: 0,
             wasp_victim: false,
@@ -1920,7 +1903,6 @@ pub struct ObjectData {
     pub reference: Option<EntityId>,
     pub belongs_to_beggar: bool,
     pub taken: bool,
-    pub register_number: u16,
 }
 
 impl Default for ObjectData {
@@ -1936,7 +1918,6 @@ impl Default for ObjectData {
             reference: None,
             belongs_to_beggar: false,
             taken: false,
-            register_number: 0,
         }
     }
 }
@@ -3377,10 +3358,6 @@ pub trait Actor: Element {
     fn is_execution_frozen(&self) -> bool {
         self.actor_data().execution_frozen
     }
-    fn is_prisoner(&self) -> bool {
-        let d = self.actor_data();
-        d.is_surrendering || d.is_about_to_surrender
-    }
     fn is_tied(&self) -> bool {
         self.posture() == Posture::Tied
     }
@@ -4454,10 +4431,7 @@ mod tests {
                 kind: ElementKind::ActorSoldier,
                 ..ElementData::default()
             },
-            actor: ActorData {
-                pathfinder_speed: PathFinderSpeed::Fast,
-                ..ActorData::default()
-            },
+            actor: ActorData::default(),
             human: HumanData::default(),
             npc: NpcData {
                 ai_brain: AiBrain::Enemy(Box::new(enemy_ai)),
