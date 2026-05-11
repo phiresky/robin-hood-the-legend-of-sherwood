@@ -63,18 +63,21 @@ impl HostPtr {
     /// which means a script reached a native outside of a
     /// [`MissionLuaState::with_host`] scope (a host bug, not a
     /// script bug).
-    fn get_mut(&self) -> &mut GameHost {
+    ///
+    /// Returns a raw pointer rather than `&mut GameHost` so the
+    /// Rust borrow checker doesn't infer a conflicting lifetime
+    /// between repeated calls within the same native — every
+    /// shim re-derefs at the top so the lifetime is fresh per
+    /// call. Clippy's `mut_from_ref` lint correctly flags the
+    /// alternative `&self -> &mut T` shape as a lifetime lie.
+    fn host_ptr(&self) -> *mut GameHost {
         let ptr = self.0.get();
         assert!(
             !ptr.is_null(),
             "robin_lua: native invoked with no GameHost attached; \
              wrap the call site in MissionLuaState::with_host"
         );
-        // SAFETY: see module docs — the only producer of HostPtr is
-        // `with_host`, which exclusively borrows the host for the
-        // scope. Lua is single-threaded with respect to this
-        // pointer.
-        unsafe { &mut *ptr }
+        ptr
     }
 }
 
@@ -211,6 +214,15 @@ pub fn register_natives(state: &mut MissionLuaState) -> mlua::Result<()> {
     // 3. Lua-only natives that don't go through NativeStack.
     register_lua_only(lua, &globals)?;
 
+    // 4. Freeze the global environment. After `sandbox(true)`,
+    //    script code can still read `GetActor` etc. but writes
+    //    are diverted into a per-script environment table — so a
+    //    misbehaving mission can't, say, replace `GetGlobal` with
+    //    a fake version that lies to the next mission. This is
+    //    the reason this crate chose Luau over Lua 5.4. See the
+    //    crate-level docs for the full security story.
+    lua.sandbox(true)?;
+
     state.mark_natives_registered();
     Ok(())
 }
@@ -237,7 +249,10 @@ fn make_native_shim(lua: &Lua, native: NativeFn) -> mlua::Result<Function> {
                 mlua::Error::RuntimeError(format!("{}: called with no GameHost attached", sig.name))
             })?
             .clone();
-        let host = host_ptr.get_mut();
+        // SAFETY: see HostPtr module docs — the pointer is
+        // exclusively borrowed for the duration of `with_host`,
+        // which is the only place this shim runs.
+        let host: &mut GameHost = unsafe { &mut *host_ptr.host_ptr() };
         let mut stack = NativeStack::default();
         // Push in argument order — the engine's `pop_i32()` pulls
         // them off in *reverse*, so the last arg ends up on top of
@@ -257,7 +272,7 @@ fn make_native_shim(lua: &Lua, native: NativeFn) -> mlua::Result<Function> {
 /// some natives take `bits_of(f32)` packed as i32 (zoom, weights).
 fn value_to_i32(v: &Value, native: &str) -> mlua::Result<i32> {
     match v {
-        Value::Integer(i) => Ok(*i as i32),
+        Value::Integer(i) => Ok(*i),
         Value::Number(n) => {
             // Whole numbers pass straight through; non-whole values
             // are packed as f32 bits (the engine pops them with
@@ -285,38 +300,50 @@ fn register_lua_only(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     // string identifier. The mission loader fills the matching
     // BTreeMap on GameHost; these natives just look up by name.
     let get_actor = lua.create_function(|lua, name: String| {
-        let host = host(lua)?;
+        // SAFETY: see HostPtr docs — pointer is valid for the
+        // duration of the surrounding `with_host` scope.
+        let host: &mut GameHost = unsafe { &mut *host_ptr(lua)? };
         Ok(host.lua_actor_names.get(&name).copied().unwrap_or(0))
     })?;
     globals.set("GetActor", get_actor)?;
 
     let get_item = lua.create_function(|lua, name: String| {
-        let host = host(lua)?;
+        // SAFETY: see HostPtr docs — pointer is valid for the
+        // duration of the surrounding `with_host` scope.
+        let host: &mut GameHost = unsafe { &mut *host_ptr(lua)? };
         Ok(host.lua_item_names.get(&name).copied().unwrap_or(0))
     })?;
     globals.set("GetItem", get_item)?;
 
     let get_location = lua.create_function(|lua, name: String| {
-        let host = host(lua)?;
+        // SAFETY: see HostPtr docs — pointer is valid for the
+        // duration of the surrounding `with_host` scope.
+        let host: &mut GameHost = unsafe { &mut *host_ptr(lua)? };
         Ok(host.lua_location_names.get(&name).copied().unwrap_or(0))
     })?;
     globals.set("GetLocation", get_location)?;
 
     let get_patrol = lua.create_function(|lua, name: String| {
-        let host = host(lua)?;
+        // SAFETY: see HostPtr docs — pointer is valid for the
+        // duration of the surrounding `with_host` scope.
+        let host: &mut GameHost = unsafe { &mut *host_ptr(lua)? };
         Ok(host.lua_patrol_names.get(&name).copied().unwrap_or(0))
     })?;
     globals.set("GetPatrol", get_patrol)?;
 
     let get_scroll = lua.create_function(|lua, name: String| {
-        let host = host(lua)?;
+        // SAFETY: see HostPtr docs — pointer is valid for the
+        // duration of the surrounding `with_host` scope.
+        let host: &mut GameHost = unsafe { &mut *host_ptr(lua)? };
         Ok(host.lua_scroll_names.get(&name).copied().unwrap_or(0))
     })?;
     globals.set("GetScroll", get_scroll)?;
 
     // ── Reverse lookup: handle → name ──
     let get_actor_name = lua.create_function(|lua, handle: i32| {
-        let host = host(lua)?;
+        // SAFETY: see HostPtr docs — pointer is valid for the
+        // duration of the surrounding `with_host` scope.
+        let host: &mut GameHost = unsafe { &mut *host_ptr(lua)? };
         // Linear scan — Spellforge's DLL does the same. The maps
         // are mission-scoped (low hundreds of entries), so this
         // doesn't merit a reverse index.
@@ -336,7 +363,9 @@ fn register_lua_only(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     // Used by Spellforge's `lib/common.lua` to iterate every named
     // actor and assign patrols / cutscene roles in bulk.
     let get_all_actors = lua.create_function(|lua, ()| {
-        let host = host(lua)?;
+        // SAFETY: see HostPtr docs — pointer is valid for the
+        // duration of the surrounding `with_host` scope.
+        let host: &mut GameHost = unsafe { &mut *host_ptr(lua)? };
         let t = lua.create_table_with_capacity(0, host.lua_actor_names.len())?;
         for (name, handle) in &host.lua_actor_names {
             t.set(name.clone(), *handle)?;
@@ -358,7 +387,10 @@ fn register_lua_only(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     // itself (`__next_id` key) so it survives Lua's GC and stays
     // mission-scoped without needing a Rust-side counter.
     let sequence_call = lua.create_function(|lua, callback: Function| {
-        let callbacks: Table = lua.globals().get("SequenceCallbacks")?;
+        // The callback table lives in the Lua registry, not in
+        // `_G`, so the sandbox's frozen-globals rule doesn't
+        // block writes. See `state::SEQUENCE_CALLBACKS_KEY`.
+        let callbacks: Table = lua.named_registry_value(crate::state::SEQUENCE_CALLBACKS_KEY)?;
         let next: i32 = callbacks.get("__next_id").unwrap_or(10_000);
         callbacks.set(next, callback)?;
         callbacks.set("__next_id", next + 1)?;
@@ -367,7 +399,9 @@ fn register_lua_only(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         // actor handle) — when it dispatches we pull the closure
         // back out. Equivalent to Spellforge's
         // `SequenceSendMessage(God(), id)`.
-        let host = host(lua)?;
+        // SAFETY: see HostPtr docs — pointer is valid for the
+        // duration of the surrounding `with_host` scope.
+        let host: &mut GameHost = unsafe { &mut *host_ptr(lua)? };
         let mut stack = NativeStack::default();
         // RecordSendMessage(actor, message) pops `message` first
         // (top of stack), then `actor`. So push actor, then
@@ -388,17 +422,16 @@ fn register_lua_only(lua: &Lua, globals: &Table) -> mlua::Result<()> {
 
 /// Helper for Lua-only shims that need the host. Wraps the app-data
 /// lookup with a clearer error message than the raw assertion in
-/// `HostPtr::get_mut`.
-fn host(lua: &Lua) -> mlua::Result<&'static mut GameHost> {
+/// `HostPtr::host_ptr`.
+///
+/// Returns a `*mut` rather than `&mut` so the borrow-checker
+/// doesn't infer a conflicting lifetime between repeated calls
+/// inside the same shim — each call site dereferences afresh.
+fn host_ptr(lua: &Lua) -> mlua::Result<*mut GameHost> {
     let ptr = lua.app_data_ref::<HostPtr>().ok_or_else(|| {
         mlua::Error::RuntimeError("robin_lua: native invoked with no GameHost attached".to_owned())
     })?;
-    // SAFETY: see module docs — pointer is valid for the scoped
-    // borrow set up by MissionLuaState::with_host. Returning a
-    // 'static lifetime is a deliberate lie that we contain inside
-    // the call-shim closure (which itself only runs while
-    // with_host's borrow is live).
-    Ok(unsafe { &mut *ptr.0.get() })
+    Ok(ptr.host_ptr())
 }
 
 /// Every `NativeFn` we expose to Lua under its canonical name.

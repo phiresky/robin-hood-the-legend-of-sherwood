@@ -191,7 +191,8 @@ pub(crate) async fn show_custom_missions(
                 }
                 GameEvent::MouseUp(x, y, 1) => {
                     let (vx, vy) = transform.from_screen(x, y);
-                    if vx >= LIST_X && vx < LIST_X + LIST_W && vy >= LIST_Y && vy < LIST_Y + LIST_H
+                    if (LIST_X..LIST_X + LIST_W).contains(&vx)
+                        && (LIST_Y..LIST_Y + LIST_H).contains(&vy)
                     {
                         let row_offset = ((vy - LIST_Y - 4) / ROW_HEIGHT).max(0) as usize;
                         let target = scroll_offset + row_offset;
@@ -364,7 +365,11 @@ fn draw_list(
     }
 }
 
-fn truncate_to_pixel_width(font: &crate::native_font::NativeFont, text: &str, max_w: i32) -> String {
+fn truncate_to_pixel_width(
+    font: &crate::native_font::NativeFont,
+    text: &str,
+    max_w: i32,
+) -> String {
     if max_w <= 0 {
         return String::new();
     }

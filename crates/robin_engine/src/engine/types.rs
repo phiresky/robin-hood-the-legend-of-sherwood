@@ -1700,7 +1700,17 @@ impl MissionScript {
     }
 
     /// Get a mutable reference to the underlying [`GameHost`].
-    pub(crate) fn game_host_mut(&mut self) -> Option<&mut GameHost> {
+    ///
+    /// Exposed to the host crate so custom-mission Lua scripts can
+    /// reach engine state through `MissionLuaState::with_host`
+    /// (see `robin_rs::lua_session`). Modifying the host through
+    /// this handle outside of a script event is fine for queued
+    /// commands (the engine drains them next tick) but bypasses
+    /// the engine's own `swap_engine_state` synchronisation, so
+    /// reads of entities/AI/fast-grid only see the post-tick
+    /// swap-in state — call it inside a script-event window where
+    /// the engine has just installed live state on the host.
+    pub fn game_host_mut(&mut self) -> Option<&mut GameHost> {
         Some(&mut self.game_host)
     }
 

@@ -14,7 +14,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 robin_engine = { path = "../robin_engine" }
 robin_assets = { path = "../robin_assets" }
+robin_lua = { path = "../robin_lua" }
 robin_util = { path = "../robin_util" }
+mlua = { version = "0.10", features = ["luau", "send"] }
+tempfile = "3"
 md5_crate = { package = "md-5", version = "0.11" }
 ab_glyph = "0.2"
 geo = { version = "0.33", features = ["serde"] }
@@ -139,7 +142,6 @@ gloo-timers = { version = "0.4", features = ["futures"] }
 getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
-tempfile = "3"
 qoi = "0.4"
 robin_engine = { path = "../robin_engine", features = ["test-helpers"] }
 

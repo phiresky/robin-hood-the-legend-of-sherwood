@@ -750,6 +750,46 @@ pub(crate) async fn run_mission(
     }
 
     let mut host = Host::new(window.width as f32, window.height as f32);
+    // Build a Lua session if the main-menu picker stashed a
+    // pending Spellforge launch on the CLI args. Failure here is
+    // non-fatal — the engine's `.scb` script path still runs, the
+    // player just loses the custom Lua hooks. We surface the
+    // reason loudly so it shows up in the loading-screen log.
+    if let Some(pending) = args.pending_lua_mission.as_ref() {
+        let launch = crate::main_menu::custom_missions::CustomMissionLaunch {
+            slug: pending.slug.clone(),
+            mod_title: pending.slug.clone(),
+            version_zip: pending.version_zip.clone(),
+            rhm_basename: pending.rhm_basename.clone(),
+            // Both these fields exist for the picker UI and the
+            // mission loader; the Lua session only reads the
+            // version_zip + basename, but the constructor wants
+            // the whole struct.
+            map_filename: String::new(),
+            requires_spellforge: true,
+        };
+        match crate::lua_session::LuaSession::start(&launch, &pending.mods_root) {
+            Ok(Some(session)) => {
+                tracing::info!(
+                    "LuaSession installed for mission '{}'",
+                    session.mission_basename()
+                );
+                host.lua_session = Some(session);
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    "LuaSession::start returned None for '{}' (Vanilla)",
+                    pending.slug
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "LuaSession::start failed for '{}': {e} — continuing without Lua",
+                    pending.slug
+                );
+            }
+        }
+    }
     if let Err(e) = setup_multiplayer_session(&mut host, args) {
         tracing::error!("{e}; returning to main menu");
         if let Some(ref mut ls) = loading_screen {
@@ -841,6 +881,28 @@ pub(crate) async fn run_mission(
             titbit_row_frame_counts,
             minimap_widget,
         )?;
+
+    // ── Spellforge Lua: post-level-load events ──
+    //
+    // The engine just finished its `.scb` Initialize / PostInitialize
+    // path inside `load_level_and_sprite_bank`. If a custom mission
+    // shipped a `.lua` companion, fire the matching Lua events now —
+    // the Lua side defines its own globals (entity name tables, AI
+    // patrol assignments, etc.) on top of whatever the `.scb` did.
+    //
+    // Vanilla missions (and any Spellforge launch where the Lua
+    // session failed to build) take this branch as a no-op since
+    // `host.lua_session` is `None`.
+    if let Some(lua) = host.lua_session.as_ref()
+        && let Some(game_host) = engine.mission_script_game_host_mut()
+    {
+        tracing::info!(
+            "Lua: firing Initialize for mission '{}' (seed={engine_rng_seed})",
+            lua.mission_basename()
+        );
+        let _ = lua.run_event(game_host, "Initialize", &[engine_rng_seed as i32]);
+        let _ = lua.run_event(game_host, "PostInitialize", &[]);
+    }
 
     // ── Mission-specific sound setup (banks + mission music) ──
     // The audio backend and menu music were initialized before the loading

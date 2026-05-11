@@ -250,6 +250,28 @@ pub struct CliArgs {
     #[clap(skip)]
     #[serde(skip)]
     pub global_options: robin_engine::engine::GlobalOptions,
+
+    /// Internal handoff: when the main menu's custom-mission picker
+    /// chooses a Spellforge mod, this carries the bits the session
+    /// needs to construct a `LuaSession` after the engine + level
+    /// have loaded. `None` for vanilla missions and every non-mod
+    /// launch — the engine's `.scb` path runs as before. Not a real
+    /// CLI flag; not serialised.
+    #[clap(skip)]
+    #[serde(skip)]
+    pub pending_lua_mission: Option<PendingLuaMission>,
+}
+
+/// Subset of [`crate::main_menu::custom_missions::CustomMissionLaunch`]
+/// needed to construct a [`crate::lua_session::LuaSession`] inside
+/// `run_mission` once the engine is alive. Kept as a flat clonable
+/// struct so it can ride along on `CliArgs` (which is `Clone`).
+#[derive(Debug, Clone)]
+pub struct PendingLuaMission {
+    pub slug: String,
+    pub rhm_basename: String,
+    pub version_zip: std::path::PathBuf,
+    pub mods_root: std::path::PathBuf,
 }
 
 impl Default for CliArgs {
@@ -286,6 +308,7 @@ impl Default for CliArgs {
             mp_expected_players: None,
             mp_nickname: String::new(),
             global_options: robin_engine::engine::GlobalOptions::default(),
+            pending_lua_mission: None,
         };
         install_global_options(&mut args);
         args
@@ -1527,10 +1550,9 @@ pub(crate) fn resolve_loading_pak(
         }
     }
     let default_path = "Data/Interface/Loading.pak";
-    if data_asset_exists(default_path) {
-        Some(default_path.to_string())
-    } else if robin_assets::shipping_datadir::global()
-        .is_some_and(|dd| dd.pak_files.contains_key("interface/loading.pak"))
+    if data_asset_exists(default_path)
+        || robin_assets::shipping_datadir::global()
+            .is_some_and(|dd| dd.pak_files.contains_key("interface/loading.pak"))
     {
         Some(default_path.to_string())
     } else {
@@ -1993,8 +2015,22 @@ pub async fn run_rust_game(
                     campaign.create_gang_from_pcs(pcs, &profiles);
                     campaign.add_all_to_mission_team();
                 }
+                // If the mission ships a Lua companion, hand it off
+                // to `run_mission` via the CLI args so `game_session`
+                // can build a `LuaSession` against the just-loaded
+                // engine. `LuaSession::start` is the one that decides
+                // there's nothing to do for vanilla launches; passing
+                // the pending struct unconditionally keeps the
+                // decision in one place.
+                let mut session_args = args.clone();
+                session_args.pending_lua_mission = Some(crate::main_entry::PendingLuaMission {
+                    slug: launch.slug.clone(),
+                    rhm_basename: launch.rhm_basename.clone(),
+                    version_zip: launch.version_zip.clone(),
+                    mods_root: mods_root.clone(),
+                });
                 let SessionResult::QuitToMenu =
-                    run_session(window, &mut campaign, &profiles, args, None).await?;
+                    run_session(window, &mut campaign, &profiles, &session_args, None).await?;
                 drop(mount_guard);
                 tracing::info!("Returned to main menu from CustomMission");
             }

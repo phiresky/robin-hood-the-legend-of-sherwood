@@ -505,6 +505,14 @@ pub struct Host {
     /// Stable draw order for [`Self::background_decals`], preserving the
     /// order in which patch effects became permanent.
     pub background_decal_order: Vec<EntityId>,
+
+    /// Lua interpreter for custom Spellforge missions, populated when
+    /// the player launches a mod that ships a `.lua` script. `None`
+    /// for vanilla campaigns and for Vanilla-tagged mods — the
+    /// engine's `.scb` mission script still runs normally either way.
+    /// Drained by the game-session frame loop to fire `Timer`,
+    /// `CheckVictoryCondition`, etc. on the script.
+    pub lua_session: Option<crate::lua_session::LuaSession>,
 }
 
 impl Host {

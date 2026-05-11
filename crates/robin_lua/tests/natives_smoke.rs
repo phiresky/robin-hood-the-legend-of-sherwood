@@ -145,10 +145,10 @@ fn is_actor_out_of_action_callable() {
         .unwrap();
 }
 
-/// `SequenceCall(fn)` registers a Lua closure in `SequenceCallbacks`
-/// and queues a sequence-recorded SendMessage with the matching id.
-/// Confirms the callback indexing (starts at 10_000 to avoid
-/// colliding with engine-defined message ids).
+/// `SequenceCall(fn)` registers a Lua closure in the registry-side
+/// callback stash and queues a sequence-recorded SendMessage with
+/// the matching id. Confirms the callback indexing (starts at
+/// 10_000 to avoid colliding with engine-defined message ids).
 #[test]
 fn sequence_call_registers_callback() {
     let (state, _dir) = fresh_state();
@@ -160,12 +160,14 @@ fn sequence_call_registers_callback() {
             // SendMessage.
             lua.load("StartSequence(); SequenceCall(function() return 1 end)")
                 .exec()?;
-            let stash_id: i32 = lua.load("return SequenceCallbacks.__next_id").eval()?;
             // Counter advanced past 10_000 → exactly one callback
-            // was registered.
+            // was registered. Read through the registry directly —
+            // the table is intentionally hidden from `_G`.
+            let callbacks: mlua::Table =
+                lua.named_registry_value("robin_lua.sequence_callbacks")?;
+            let stash_id: i32 = callbacks.get("__next_id")?;
             assert_eq!(stash_id, 10_001);
-            // The closure itself is reachable at key 10_000.
-            let kind: String = lua.load("return type(SequenceCallbacks[10000])").eval()?;
+            let kind: String = format!("{}", callbacks.get::<mlua::Value>(10_000_i32)?.type_name());
             assert_eq!(kind, "function");
             Ok(())
         })

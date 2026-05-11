@@ -2648,43 +2648,41 @@ pub(crate) fn render_debug_surfaces_outline(
 
     // Pass 2: bright outline on the selected character's surface
     // (the fill is drawn earlier, beneath sprites).
-    if let Some((sel_layer, sel_area)) = selected_layer_area {
-        if let Some(area) = move_layers
+    if let Some((sel_layer, sel_area)) = selected_layer_area
+        && let Some(area) = move_layers
             .get(sel_layer)
             .and_then(|areas| areas.get(sel_area))
-        {
-            draw_polygon_outline_world(renderer, &area.polygon, &to_screen_i, 255, 255, 0);
-        }
+    {
+        draw_polygon_outline_world(renderer, &area.polygon, &to_screen_i, 255, 255, 0);
     }
 
     // Pass 3: committed path polyline, colored per segment by the
     // destination waypoint's (layer, area).  An X marker at each
     // waypoint highlights surface transitions.
-    if let Some(pc_id) = selected_id {
-        if let Some(waypoints) = engine.actor_path_waypoints(pc_id) {
-            if !waypoints.is_empty() {
-                let start = engine
-                    .get_entity(pc_id)
-                    .map(|e| {
-                        let pm = e.element_data().position_map();
-                        robin_engine::geo2d::pt(pm.x, pm.y)
-                    })
-                    .unwrap_or_else(|| waypoints[0]);
-                let mut prev = start;
-                for &wp in &waypoints {
-                    let (r, g, b) = match locate_surface(graph, wp) {
-                        Some((l, a)) => surface_color(l, a),
-                        None => (255, 255, 255),
-                    };
-                    let (x1, y1) = to_screen_i(prev);
-                    let (x2, y2) = to_screen_i(wp);
-                    renderer.render_gpu_line(x1, y1, x2, y2, r, g, b);
-                    const M: i32 = 4;
-                    renderer.render_gpu_line(x2 - M, y2 - M, x2 + M, y2 + M, r, g, b);
-                    renderer.render_gpu_line(x2 - M, y2 + M, x2 + M, y2 - M, r, g, b);
-                    prev = wp;
-                }
-            }
+    if let Some(pc_id) = selected_id
+        && let Some(waypoints) = engine.actor_path_waypoints(pc_id)
+        && !waypoints.is_empty()
+    {
+        let start = engine
+            .get_entity(pc_id)
+            .map(|e| {
+                let pm = e.element_data().position_map();
+                robin_engine::geo2d::pt(pm.x, pm.y)
+            })
+            .unwrap_or_else(|| waypoints[0]);
+        let mut prev = start;
+        for &wp in &waypoints {
+            let (r, g, b) = match locate_surface(graph, wp) {
+                Some((l, a)) => surface_color(l, a),
+                None => (255, 255, 255),
+            };
+            let (x1, y1) = to_screen_i(prev);
+            let (x2, y2) = to_screen_i(wp);
+            renderer.render_gpu_line(x1, y1, x2, y2, r, g, b);
+            const M: i32 = 4;
+            renderer.render_gpu_line(x2 - M, y2 - M, x2 + M, y2 + M, r, g, b);
+            renderer.render_gpu_line(x2 - M, y2 + M, x2 + M, y2 - M, r, g, b);
+            prev = wp;
         }
     }
 
@@ -2694,50 +2692,50 @@ pub(crate) fn render_debug_surfaces_outline(
     // small flat ellipse "shadow footprint" at the bottom.  Makes the
     // entity's height immediately visible — useful when debugging
     // movement on rooftops, ladders, or during jumps/falls.
-    if let Some(pc_id) = selected_id {
-        if let Some(entity) = engine.get_entity(pc_id) {
-            let pos = entity.element_data().position();
-            // Top: where the sprite is drawn.  Bottom: same map (x, y)
-            // but at z = 0.
-            let top_x_w = pos.x;
-            let top_y_w = pos.y - pos.z;
-            let bot_x_w = pos.x;
-            let bot_y_w = pos.y;
-            let top = (
-                ((top_x_w - view.x) * zoom).round() as i32,
-                ((top_y_w - view.y) * zoom).round() as i32,
+    if let Some(pc_id) = selected_id
+        && let Some(entity) = engine.get_entity(pc_id)
+    {
+        let pos = entity.element_data().position();
+        // Top: where the sprite is drawn.  Bottom: same map (x, y)
+        // but at z = 0.
+        let top_x_w = pos.x;
+        let top_y_w = pos.y - pos.z;
+        let bot_x_w = pos.x;
+        let bot_y_w = pos.y;
+        let top = (
+            ((top_x_w - view.x) * zoom).round() as i32,
+            ((top_y_w - view.y) * zoom).round() as i32,
+        );
+        let bot = (
+            ((bot_x_w - view.x) * zoom).round() as i32,
+            ((bot_y_w - view.y) * zoom).round() as i32,
+        );
+        // Vertical drop line.
+        renderer.render_gpu_line(top.0, top.1, bot.0, bot.1, 255, 255, 255);
+        // Footprint ellipse: 16 segments around an ellipse with
+        // world-unit radii (rx, ry) — flattened to suggest the
+        // ground plane.  Drawn in screen space directly.
+        const RX_W: f32 = 8.0;
+        const RY_W: f32 = 3.0;
+        const SEGMENTS: u32 = 16;
+        let cx = bot.0 as f32;
+        let cy = bot.1 as f32;
+        let rx_s = RX_W * zoom;
+        let ry_s = RY_W * zoom;
+        let mut prev_pt = (cx + rx_s, cy);
+        for i in 1..=SEGMENTS {
+            let t = (i as f32) * std::f32::consts::TAU / (SEGMENTS as f32);
+            let p = (cx + rx_s * t.cos(), cy + ry_s * t.sin());
+            renderer.render_gpu_line(
+                prev_pt.0.round() as i32,
+                prev_pt.1.round() as i32,
+                p.0.round() as i32,
+                p.1.round() as i32,
+                255,
+                255,
+                255,
             );
-            let bot = (
-                ((bot_x_w - view.x) * zoom).round() as i32,
-                ((bot_y_w - view.y) * zoom).round() as i32,
-            );
-            // Vertical drop line.
-            renderer.render_gpu_line(top.0, top.1, bot.0, bot.1, 255, 255, 255);
-            // Footprint ellipse: 16 segments around an ellipse with
-            // world-unit radii (rx, ry) — flattened to suggest the
-            // ground plane.  Drawn in screen space directly.
-            const RX_W: f32 = 8.0;
-            const RY_W: f32 = 3.0;
-            const SEGMENTS: u32 = 16;
-            let cx = bot.0 as f32;
-            let cy = bot.1 as f32;
-            let rx_s = RX_W * zoom;
-            let ry_s = RY_W * zoom;
-            let mut prev_pt = (cx + rx_s, cy);
-            for i in 1..=SEGMENTS {
-                let t = (i as f32) * std::f32::consts::TAU / (SEGMENTS as f32);
-                let p = (cx + rx_s * t.cos(), cy + ry_s * t.sin());
-                renderer.render_gpu_line(
-                    prev_pt.0.round() as i32,
-                    prev_pt.1.round() as i32,
-                    p.0.round() as i32,
-                    p.1.round() as i32,
-                    255,
-                    255,
-                    255,
-                );
-                prev_pt = p;
-            }
+            prev_pt = p;
         }
     }
 }

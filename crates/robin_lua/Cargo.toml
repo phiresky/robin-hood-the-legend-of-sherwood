@@ -13,7 +13,14 @@ robin_util = { path = "../robin_util" }
 # `vendored` builds Lua 5.4 from source so we don't need a system Lua.
 # `send` makes `Lua` `Send` — required because `Engine` (and anything that
 # holds the script host) is moved across threads in the rollback pipeline.
-mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }
+# `luau` (Roblox's safer Lua dialect) is vendored by default — no
+# `vendored` feature needed. `send` makes `Lua` `Send` so the host
+# can move it across rollback boundaries. We choose Luau over Lua 5.4
+# specifically for `Lua::sandbox`: it freezes the globals table and
+# routes script-local writes through a per-script environment, which
+# is the right safety story for running arbitrary downloaded
+# missions.
+mlua = { version = "0.10", features = ["luau", "send"] }
 tracing = "0.1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

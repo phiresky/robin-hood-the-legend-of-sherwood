@@ -3513,11 +3513,19 @@ impl EngineInner {
 
     /// Mutable access to the script host — the `GameHost` that sits on
     /// the VM's transient call-adapter field.  Mutations here do not affect
-    /// rollback determinism, but crate-external callers must go through the
-    /// dedicated helpers below rather than reaching for this accessor, which
-    /// is `pub(crate)` to keep the
-    /// `RollbackSafeEngine` invariant mechanical.
-    pub(crate) fn mission_script_game_host_mut(&mut self) -> Option<&mut crate::natives::GameHost> {
+    /// rollback determinism, but crate-external callers must take care
+    /// to only call from script-event sites (right after a
+    /// `swap_engine_state` swap-in, before the swap-out), since the
+    /// host's view of entity/AI/fast-grid state is only live during
+    /// that window.
+    ///
+    /// Exposed `pub` so the host crate's Lua scripting layer
+    /// (`robin_rs::lua_session`) can drive custom-mission Lua events
+    /// against the same `GameHost` the `.scb` VM uses. The
+    /// `RollbackSafeEngine` invariant still holds — Lua sessions are
+    /// single-player only (see `docs/lua.md`) and never run during
+    /// rollback resimulation.
+    pub fn mission_script_game_host_mut(&mut self) -> Option<&mut crate::natives::GameHost> {
         self.mission_script.as_mut()?.game_host_mut()
     }
 

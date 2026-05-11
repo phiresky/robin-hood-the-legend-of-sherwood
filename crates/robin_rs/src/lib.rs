@@ -126,6 +126,7 @@ pub mod key_config_store;
 pub mod legacy_save;
 pub mod loading_dissolve_gpu;
 pub mod loading_screen;
+pub mod lua_session;
 pub mod main_entry;
 pub mod main_menu;
 pub mod markers;
