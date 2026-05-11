@@ -37,6 +37,7 @@ use robin_engine::player_profile::{DifficultyLevel, PlayerProfile, PlayerProfile
 use robin_engine::sprite::BBox;
 
 pub(crate) mod credits;
+pub(crate) mod custom_missions;
 pub(crate) mod movies;
 pub(crate) mod multiplayer_lobby;
 pub(crate) mod options;
@@ -54,6 +55,11 @@ pub(crate) enum MainMenuChoice {
         slot: usize,
         mission_id: u32,
     },
+    /// Player picked a custom mission to launch.  The caller mounts the
+    /// zip via `mod_pack::mount_for_launch`, then drives a session via
+    /// `Campaign::force_next_mission_by_name`, then returns *here* so
+    /// the picker can be reopened for another launch.
+    CustomMission(custom_missions::CustomMissionLaunch),
     Exit,
 }
 
@@ -76,19 +82,21 @@ enum ClickAction {
     ShowMovies,
     /// Scroll the credits bitmap in place until the player dismisses.
     ShowCredits,
+    /// Open the custom-mission picker; on selection, return
+    /// [`MainMenuChoice::CustomMission`].
+    CustomMissions,
 }
 
-// Button widget IDs — order matches the bottom-right widget list
-// (StartGame / Load / SelectPlayer / Options / ShowMovies /
-// ShowCredits / Exit).
+// Button widget IDs — order matches the bottom-right widget list.
 const ID_START: u32 = 0;
 const ID_MULTIPLAYER: u32 = 1;
 const ID_LOAD: u32 = 2;
-const ID_SELECT_PLAYER: u32 = 3;
-const ID_OPTIONS: u32 = 4;
-const ID_SHOW_MOVIES: u32 = 5;
-const ID_SHOW_CREDITS: u32 = 6;
-const ID_EXIT: u32 = 7;
+const ID_CUSTOM_MISSIONS: u32 = 3;
+const ID_SELECT_PLAYER: u32 = 4;
+const ID_OPTIONS: u32 = 5;
+const ID_SHOW_MOVIES: u32 = 6;
+const ID_SHOW_CREDITS: u32 = 7;
+const ID_EXIT: u32 = 8;
 
 /// Left-side profile info block position:
 ///
@@ -163,7 +171,7 @@ pub(crate) async fn show_main_menu(
     // ── Button layout (align_bottom_right, spacing=2) ────────────────
     let (btn_w, btn_h) = menu_resources.button_dimensions();
 
-    let buttons: [(u32, String, ClickAction); 8] = [
+    let buttons: [(u32, String, ClickAction); 9] = [
         (
             ID_START,
             menu_resources.menu_text.get(MT_BTN_START_GAME),
@@ -178,6 +186,11 @@ pub(crate) async fn show_main_menu(
             ID_LOAD,
             menu_resources.menu_text.get(MT_BTN_LOAD),
             ClickAction::LoadGame,
+        ),
+        (
+            ID_CUSTOM_MISSIONS,
+            "Custom Missions".to_string(),
+            ClickAction::CustomMissions,
         ),
         (
             ID_SELECT_PLAYER,
@@ -624,6 +637,18 @@ async fn dispatch_click(
         ClickAction::ShowMovies => {
             movies::show_movies(event_pump, renderer, menu_resources).await;
             None
+        }
+        ClickAction::CustomMissions => {
+            let mods_root = crate::mod_pack::default_mods_root();
+            custom_missions::show_custom_missions(
+                event_pump,
+                renderer,
+                menu_resources,
+                ModalCursor::new(cursor_renderer, MOUSE_OPACITY_DEFAULT, 0),
+                &mods_root,
+            )
+            .await
+            .map(MainMenuChoice::CustomMission)
         }
     }
 }

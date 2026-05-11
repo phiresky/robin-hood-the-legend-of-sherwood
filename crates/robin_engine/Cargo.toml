@@ -39,6 +39,7 @@ bytemuck = "1"
 nonmax = { version = "0.5", features = ["serde"] }
 bitcode = { version = "0.6", features = ["serde"] }
 bincode = { version = "2", features = ["serde"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 [dev-dependencies]
 tempfile = "3"
 tracing-subscriber = "0.3"

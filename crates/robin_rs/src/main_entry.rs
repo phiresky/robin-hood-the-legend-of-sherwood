@@ -1944,6 +1944,60 @@ pub async fn run_rust_game(
                     run_session(window, &mut campaign, &profiles, &mp_args, None).await?;
                 tracing::info!("Returned to main menu from Multiplayer");
             }
+            MainMenuChoice::CustomMission(launch) => {
+                let mods_root = crate::mod_pack::default_mods_root();
+                tracing::info!(
+                    "Main menu CustomMission: slug={} rhm={} map={} spellforge={}",
+                    launch.slug,
+                    launch.rhm_basename,
+                    launch.map_filename,
+                    launch.requires_spellforge
+                );
+                let mount_guard = match crate::mod_pack::mount_for_launch(
+                    &launch.version_zip,
+                    launch.requires_spellforge,
+                    &mods_root,
+                ) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        tracing::error!("CustomMission: mount failed: {e}");
+                        continue;
+                    }
+                };
+                let profiles_mut = std::sync::Arc::make_mut(&mut profiles);
+                campaign.reset(profiles_mut);
+                let idx = match campaign.force_next_mission_by_name(
+                    profiles_mut,
+                    &launch.rhm_basename,
+                    &launch.map_filename,
+                    true,
+                ) {
+                    Some(i) => i,
+                    None => {
+                        tracing::error!(
+                            "CustomMission: force_next_mission_by_name returned None for rhm={} proto={}",
+                            launch.rhm_basename,
+                            launch.map_filename
+                        );
+                        drop(mount_guard);
+                        continue;
+                    }
+                };
+                campaign.current_mission_idx = Some(idx);
+                // Demo-mode init: if the active datadir is a demo, the
+                // gang has to be created from the PCs declared in the
+                // demo manifest, same as MainMenuChoice::Start. Custom
+                // missions don't dictate roster, they piggyback on
+                // whatever the datadir's campaign would have used.
+                if let Some((_, _, pcs, _)) = detect_demo_mode() {
+                    campaign.create_gang_from_pcs(pcs, &profiles);
+                    campaign.add_all_to_mission_team();
+                }
+                let SessionResult::QuitToMenu =
+                    run_session(window, &mut campaign, &profiles, args, None).await?;
+                drop(mount_guard);
+                tracing::info!("Returned to main menu from CustomMission");
+            }
             MainMenuChoice::Exit => {
                 tracing::info!("Player exited from main menu");
                 return Ok(0);
