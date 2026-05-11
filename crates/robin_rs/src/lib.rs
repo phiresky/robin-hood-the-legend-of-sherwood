@@ -130,6 +130,7 @@ pub mod main_entry;
 pub mod main_menu;
 pub mod markers;
 pub mod menu;
+pub mod mod_pack;
 pub mod mouse_trail;
 pub mod mouse_way;
 pub mod multiplayer;
