@@ -83,6 +83,8 @@ impl MissionLuaState {
         // Custom require rooted at the mission dir. Installed
         // before sandbox so it's part of the frozen baseline.
         install_require(&lua, &mission_dir)?;
+        enforce_determinism(&lua)?;
+        install_log(&lua)?;
 
         // `SequenceCallbacks` is the closure stash for
         // `SequenceCall(fn)` — see `SequenceCall` semantics in
@@ -189,7 +191,7 @@ fn install_require(lua: &Lua, mission_dir: &Path) -> Result<(), mlua::Error> {
     let cache: Arc<Mutex<HashMap<String, mlua::Value>>> = Arc::new(Mutex::new(HashMap::new()));
     let root = mission_dir.to_path_buf();
 
-    let require = lua.create_function(move |lua, name: String| {
+    let require = lua.create_function(move |lua: &Lua, name: String| {
         if let Some(v) = cache.lock().unwrap().get(&name) {
             return Ok(v.clone());
         }
@@ -210,6 +212,135 @@ fn install_require(lua: &Lua, mission_dir: &Path) -> Result<(), mlua::Error> {
     })?;
     lua.globals().set("require", require)?;
     Ok(())
+}
+
+/// Strip the non-deterministic corners of the standard library and
+/// reroute `math.random` through the engine's seeded RNG.
+///
+/// This is the Factorio approach (see their [Lua libraries
+/// docs][factorio]): block sources of wall-clock / platform /
+/// scheduler variance entirely, and replace `math.random` with a
+/// deterministic generator shared across all peers. Without this,
+/// two clients running the same mission would diverge after the
+/// first `math.random` call or the first `os.time()` read, and
+/// rollback replay within a single peer would diverge after a
+/// scripted coroutine yield.
+///
+/// What we cannot fix from Rust today (and accept the risk for):
+///
+/// - `math.sin` / `math.cos` / `math.exp` / `math.log` use the C
+///   runtime's libm, which differs by platform. Within a single
+///   Luau version compiled into the binary this is deterministic
+///   per platform; across platforms (Linux vs. Mac vs. Wasm) it
+///   may drift in the last bit. Factorio shims these with their
+///   own platform-independent math; we don't, yet. Spellforge
+///   missions in the audit don't use them, so it doesn't block
+///   anything launched today.
+/// - Luau's `pairs` / `next` iteration order over hash-mode
+///   tables is "internal layout dependent". We ship a single
+///   vendored Luau build to every peer so the order is the same
+///   in a given binary; bumping the Luau version is a sync
+///   point.
+///
+/// [factorio]: https://lua-api.factorio.com/2.0.76/auxiliary/libraries.html
+fn enforce_determinism(lua: &Lua) -> mlua::Result<()> {
+    let globals = lua.globals();
+
+    // Coroutines can yield across the engine tick boundary, which
+    // would leak script state between rollback re-simulations.
+    // Just remove the library — Spellforge missions don't use it
+    // (none of the 10 audited scripts touch `coroutine`).
+    globals.set("coroutine", mlua::Value::Nil)?;
+
+    // Luau's stripped-down `os` still exposes wall-clock readers.
+    // Nil them so a script that calls `os.time()` produces a
+    // clear error rather than a silently-divergent value.
+    if let Ok(os) = globals.get::<mlua::Table>("os") {
+        for key in ["time", "clock", "date", "difftime"] {
+            os.set(key, mlua::Value::Nil)?;
+        }
+    }
+
+    // Reroute `math.random` through the engine's `sim_rng`. Every
+    // peer runs the same seeded `fastrand::Rng` installed on
+    // `Engine::new`, so identical script calls produce identical
+    // rolls. Three calling conventions match stock Lua:
+    //
+    //   math.random()    -> float in [0, 1)
+    //   math.random(n)   -> int in [1, n]
+    //   math.random(a,b) -> int in [a, b]
+    let math: mlua::Table = globals.get("math")?;
+    let rng = lua.create_function(
+        |_, args: mlua::Variadic<i32>| -> mlua::Result<mlua::Value> {
+            match args.len() {
+                0 => Ok(mlua::Value::Number(robin_engine::sim_rng::f32() as f64)),
+                1 => {
+                    let n = args[0];
+                    if n < 1 {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "math.random: upper bound must be >= 1, got {n}"
+                        )));
+                    }
+                    Ok(mlua::Value::Integer(robin_engine::sim_rng::i32(1..=n)))
+                }
+                2 => {
+                    let (a, b) = (args[0], args[1]);
+                    if a > b {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "math.random: empty interval [{a}, {b}]"
+                        )));
+                    }
+                    Ok(mlua::Value::Integer(robin_engine::sim_rng::i32(a..=b)))
+                }
+                n => Err(mlua::Error::RuntimeError(format!(
+                    "math.random: expected 0..=2 args, got {n}"
+                ))),
+            }
+        },
+    )?;
+    math.set("random", rng)?;
+
+    // `math.randomseed(x)` becomes a no-op. The engine seeds
+    // `sim_rng` once at mission start via `EngineArgs::rng_seed`;
+    // letting Lua reseed it would desync rollback (the replay
+    // never sees the reseed call).
+    let noop_seed = lua.create_function(|_, _: mlua::Variadic<mlua::Value>| Ok(()))?;
+    math.set("randomseed", noop_seed)?;
+
+    Ok(())
+}
+
+/// Install `log(msg)` — a Factorio-style logging helper that
+/// routes script-side messages through `tracing` rather than
+/// stdout. Useful for debugging mods without enabling `print`
+/// (which would push lines straight at the terminal). The
+/// `target` of `rh_lua_script` lets users filter via
+/// `RUST_LOG=rh_lua_script=debug`.
+fn install_log(lua: &Lua) -> mlua::Result<()> {
+    let log = lua.create_function(|_, msg: mlua::Variadic<mlua::Value>| {
+        let mut buf = String::new();
+        for (i, v) in msg.iter().enumerate() {
+            if i > 0 {
+                buf.push('\t');
+            }
+            buf.push_str(&format_lua_value(v));
+        }
+        tracing::info!(target: "rh_lua_script", "{buf}");
+        Ok(())
+    })?;
+    lua.globals().set("log", log)?;
+    Ok(())
+}
+
+fn format_lua_value(v: &mlua::Value) -> String {
+    match v {
+        mlua::Value::Nil => "nil".to_owned(),
+        mlua::Value::Boolean(b) => b.to_string(),
+        mlua::Value::Integer(i) => i.to_string(),
+        mlua::Value::Number(n) => n.to_string(),
+        mlua::Value::String(s) => s.to_str().map(|s| s.to_string()).unwrap_or_default(),
+        other => format!("<{}>", other.type_name()),
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +381,82 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(exec, "nil");
+    }
+
+    /// `enforce_determinism` must strip every wall-clock reader on
+    /// `os` and the entire `coroutine` library. Without these,
+    /// rollback replay would diverge after the first `os.time()`
+    /// call or coroutine yield.
+    #[test]
+    fn non_deterministic_libs_stripped() {
+        let (state, _dir) = make_state();
+        for snippet in &[
+            "return type((os or {}).time)",
+            "return type((os or {}).clock)",
+            "return type((os or {}).date)",
+            "return type((os or {}).difftime)",
+            "return type(coroutine)",
+        ] {
+            let kind: String = state.lua().load(*snippet).eval().unwrap();
+            assert_eq!(kind, "nil", "stripped by enforce_determinism: {snippet}");
+        }
+    }
+
+    /// `math.random` must route through `sim_rng` so all peers
+    /// produce identical rolls. The `with_seed` helper installs a
+    /// fresh deterministic RNG; calling `math.random` twice with
+    /// the same seed must yield the same sequence.
+    #[test]
+    fn math_random_uses_sim_rng() {
+        let dir = tempfile::tempdir().unwrap();
+        let take5 = |seed: u64| {
+            robin_engine::sim_rng::with_seed(seed, || {
+                let state = MissionLuaState::new(dir.path()).unwrap();
+                (0..5)
+                    .map(|_| {
+                        state
+                            .lua()
+                            .load("return math.random(1, 1000000)")
+                            .eval::<i64>()
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        // Same seed → same sequence.
+        assert_eq!(take5(0xDEAD_BEEF), take5(0xDEAD_BEEF));
+        // Different seed → different sequence (vanishingly small
+        // chance of a false positive across 5 draws).
+        assert_ne!(take5(0xDEAD_BEEF), take5(0xC0FFEE));
+    }
+
+    /// `math.randomseed` is a no-op — letting Lua scripts reseed
+    /// the engine RNG would desync rollback (the replay can't see
+    /// the reseed). Confirm the call doesn't panic and the
+    /// following draw still comes from the engine seed.
+    #[test]
+    fn math_randomseed_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let baseline = robin_engine::sim_rng::with_seed(7, || {
+            let state = MissionLuaState::new(dir.path()).unwrap();
+            state
+                .lua()
+                .load("math.randomseed(999); return math.random(1, 1000000)")
+                .eval::<i64>()
+                .unwrap()
+        });
+        let no_seed = robin_engine::sim_rng::with_seed(7, || {
+            let state = MissionLuaState::new(dir.path()).unwrap();
+            state
+                .lua()
+                .load("return math.random(1, 1000000)")
+                .eval::<i64>()
+                .unwrap()
+        });
+        assert_eq!(
+            baseline, no_seed,
+            "math.randomseed must not advance the engine RNG"
+        );
     }
 
     #[test]
