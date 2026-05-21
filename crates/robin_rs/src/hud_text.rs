@@ -5,7 +5,7 @@
 //! the `PCPortrait` font for portrait text and the `Tooltips` font for
 //! hover labels.
 
-use crate::element::{ElementKind, Entity, EntityId};
+use crate::element::{Entity, EntityId};
 use crate::host::ViewportState;
 use crate::native_font::{self, NativeFont};
 use crate::profiles;
@@ -375,22 +375,18 @@ fn render_text_centered_gpu(
 ///
 /// Called from the main game loop after UI panel rendering and before
 /// the cursor. Renders:
-/// 1. Entity names above selected PCs
-/// 2. Entity name on mouse hover (nearest entity under cursor)
-/// 3. Portrait slot text: character name + HP in the bottom panel
-/// 4. Ammunition counts below action buttons
-#[allow(clippy::too_many_arguments)]
+/// 1. Portrait slot text: character name + HP in the bottom panel
+/// 2. Ammunition counts below action buttons
+/// 3. Floating counter titbits (coin pickups, etc.)
 pub fn render_hud_text(
     engine: &Engine,
     local_seat: PlayerId,
     camera: &ViewportState,
     assets: &LevelAssets,
-    draw_order: &[EntityId],
+    _draw_order: &[EntityId],
     portraits: &PortraitCache,
     renderer: &mut Renderer,
     fonts: &HudFonts,
-    mouse_x: i32,
-    mouse_y: i32,
 ) {
     debug_assert!(
         renderer.is_gpu_phase(),
@@ -398,10 +394,6 @@ pub fn render_hud_text(
     );
 
     let shadow = fonts.shadow_font.as_ref();
-    render_hover_name_gpu(
-        engine, local_seat, camera, assets, draw_order, portraits, renderer, fonts, shadow,
-        mouse_x, mouse_y,
-    );
     render_portrait_text_gpu(
         engine, local_seat, assets, portraits, renderer, fonts, shadow,
     );
@@ -569,79 +561,6 @@ fn render_counter_titbits_gpu(
             Alignment::Left,
         );
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_hover_name_gpu(
-    engine: &Engine,
-    local_seat: PlayerId,
-    camera: &ViewportState,
-    assets: &LevelAssets,
-    draw_order: &[EntityId],
-    portraits: &PortraitCache,
-    renderer: &mut Renderer,
-    fonts: &HudFonts,
-    shadow: Option<&NativeFont>,
-    mouse_x: i32,
-    mouse_y: i32,
-) {
-    let font = &fonts.tooltip_font;
-    let hover_threshold = 20.0f32;
-
-    let mut best_id: Option<EntityId> = None;
-    let mut best_dist = hover_threshold;
-
-    for &entity_id in draw_order {
-        let entity = match engine.get_entity(entity_id) {
-            Some(e) => e,
-            None => continue,
-        };
-
-        if !entity.is_active() {
-            continue;
-        }
-
-        match entity.kind() {
-            ElementKind::ActorPc | ElementKind::ActorSoldier | ElementKind::ActorCivilian => {}
-            _ => continue,
-        }
-
-        if engine.seat_selection(local_seat).contains(&entity_id) {
-            continue;
-        }
-
-        let pos = &entity.element_data().position_map();
-        let map_pt = crate::geo2d::pt(pos.x, pos.y);
-        let Some(screen_pt) = camera.map_to_screen(map_pt) else {
-            continue;
-        };
-
-        let dx = screen_pt.x - mouse_x as f32;
-        let dy = screen_pt.y - mouse_y as f32;
-        let dist = (dx * dx + dy * dy).sqrt();
-
-        if dist < best_dist {
-            best_dist = dist;
-            best_id = Some(entity_id);
-        }
-    }
-
-    let Some(entity_id) = best_id else {
-        return;
-    };
-    let Some(entity) = engine.get_entity(entity_id) else {
-        return;
-    };
-    let name = match entity_display_name(engine, assets, portraits, entity_id, entity) {
-        Some(n) if !n.is_empty() => n,
-        _ => return,
-    };
-
-    let tw = font.text_width(&name);
-    let text_x = mouse_x - tw / 2;
-    let text_y = mouse_y - font.height() as i32 - 8;
-
-    render_text_with_shadow_gpu(renderer, font, shadow, &name, text_x, text_y);
 }
 
 fn render_portrait_text_gpu(

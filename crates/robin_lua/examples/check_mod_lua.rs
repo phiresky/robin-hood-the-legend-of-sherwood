@@ -62,7 +62,9 @@ fn main() -> ExitCode {
     results.sort_by(|a, b| {
         let aerr = !matches!(a.outcome, Outcome::Ok);
         let berr = !matches!(b.outcome, Outcome::Ok);
-        berr.cmp(&aerr).then(a.zip.cmp(&b.zip)).then(a.entry.cmp(&b.entry))
+        berr.cmp(&aerr)
+            .then(a.zip.cmp(&b.zip))
+            .then(a.entry.cmp(&b.entry))
     });
 
     let mut ok = 0usize;
@@ -71,7 +73,12 @@ fn main() -> ExitCode {
         match &r.outcome {
             Outcome::Ok => {
                 ok += 1;
-                println!("OK    {:>7} bytes  {}!{}", r.bytes, short(&r.zip, &mods_root), r.entry);
+                println!(
+                    "OK    {:>7} bytes  {}!{}",
+                    r.bytes,
+                    short(&r.zip, &mods_root),
+                    r.entry
+                );
             }
             Outcome::ParseError(msg) => {
                 failed += 1;
@@ -165,8 +172,5 @@ fn scan_zip(lua: &Lua, zip_path: &Path) -> Result<Vec<Result_>, String> {
 }
 
 fn short(zip: &Path, root: &Path) -> String {
-    zip.strip_prefix(root)
-        .unwrap_or(zip)
-        .display()
-        .to_string()
+    zip.strip_prefix(root).unwrap_or(zip).display().to_string()
 }

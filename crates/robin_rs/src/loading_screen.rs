@@ -432,6 +432,11 @@ pub struct LoadingScreenRenderer {
     loading_dissolve: LoadingDissolveTextures,
     /// "Version" font for the version/demo overlay text.
     version_font: Option<Font>,
+    /// "MenuText" font (same as the main-menu profile sidebar that
+    /// shows "Difficulty level: Hard") for the status line below the
+    /// sand-dissolve bar. Falls back to the version font when MenuText
+    /// isn't resolvable in the current datadir.
+    status_font: Option<Font>,
     /// Which datadir family is currently loaded, for the version overlay.
     datadir_kind: LoadingDatadirKind,
     /// Ceiling on `state.current_level` for the current phase. Intra-phase
@@ -604,6 +609,7 @@ impl LoadingScreenRenderer {
             }
         };
         let version_font = load_font("Version");
+        let status_font = load_font("MenuText").or_else(|| load_font("Version"));
         tracing::info!(
             "Loading screen initialized: {}x{}, datadir={:?}",
             width,
@@ -616,6 +622,7 @@ impl LoadingScreenRenderer {
             renderer,
             loading_dissolve,
             version_font,
+            status_font,
             datadir_kind,
             phase_ceiling: 0.0,
             window_focused: true,
@@ -695,6 +702,7 @@ impl LoadingScreenRenderer {
             return;
         }
         let w = self.state.screen_width as usize;
+        let h = self.state.screen_height as usize;
 
         self.renderer.begin_gpu_frame_clear();
         self.renderer
@@ -703,10 +711,35 @@ impl LoadingScreenRenderer {
         // Overlay version / demo text
         self.render_version_text(w);
 
-        // No centered status line near the bottom — keeps the loading
-        // screen visually aligned with the shipped menu.
+        // Phase status line centred near the bottom.
+        self.render_status_text(w, h);
 
         self.renderer.present();
+    }
+
+    /// Render the current phase status ("Loading sprite bank…" etc.)
+    /// centred horizontally near the bottom of the screen.
+    fn render_status_text(&mut self, screen_w: usize, screen_h: usize) {
+        let font = match self.status_font {
+            Some(ref f) => f,
+            None => return,
+        };
+        let Some(text) = self.state.status_text.as_deref() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+
+        let tw = font.text_width(text);
+        let fh = font.height() as i32;
+        let tx = (screen_w as i32 - tw) / 2;
+        let ty = screen_h as i32 - 60 - fh / 2;
+
+        match font {
+            Font::Native(native) => self.renderer.render_text_argb(native, text, tx, ty),
+            Font::TrueType(tt) => self.renderer.render_text_truetype(tt, text, tx, ty),
+        }
     }
 
     /// Render version text right-aligned near the top of the screen,

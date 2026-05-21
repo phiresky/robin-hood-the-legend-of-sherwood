@@ -1278,7 +1278,6 @@ pub(super) fn render_frame(
 
     // ── GPU phase: HUD text ──
     if let Some(fonts) = hud_fonts {
-        let mouse_pos = threaded_input.position();
         crate::hud_text::render_hud_text(
             engine,
             local_seat,
@@ -1288,8 +1287,6 @@ pub(super) fn render_frame(
             portrait_cache,
             renderer,
             fonts,
-            mouse_pos.x as i32,
-            mouse_pos.y as i32,
         );
 
         // ── GPU phase: ransom / amulet counters ──
